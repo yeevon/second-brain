@@ -4,7 +4,7 @@ A self-hosted personal knowledge system. Capture thoughts from Discord on any de
 
 ## How it works
 
-```
+```init
 Discord (any device)
       ↓
 n8n on EC2 (webhook receiver + orchestrator)
@@ -20,7 +20,7 @@ MCP server → Gemini CLI (query your knowledge)
 
 ## Vault structure
 
-```
+```init
 vault/
 ├── /People        contacts, relationships, context
 ├── /Projects      active work, goals, next actions
@@ -28,7 +28,6 @@ vault/
 ├── /Learning      notes, summaries, references
 ├── /Admin         tasks, logistics, decisions
 ├── /_log/         traceability — one file per transaction
-└── /_registry/    pointers to project-memory instances
 ```
 
 ## Components
@@ -65,5 +64,5 @@ Follow the guides in order:
 
 ## Related
 
-- [second-brain-vault](#) — your private vault repo (create your own, do not fork)
+- [my-vault](~) — your private vault repo (create your own, do not fork)
 - [project-memory](https://github.com/yeevon/project-memory) — per-project code memory that registers into this system

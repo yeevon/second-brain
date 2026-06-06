@@ -10,7 +10,7 @@
 ## 2. Create the vault folder structure locally
 
 ```bash
-mkdir -p my-vault/{People,Projects,Ideas,Learning,Admin,_log,_registry}
+mkdir -p my-vault/{People,Projects,Ideas,Learning,Admin,_log}
 
 # add gitkeep files so empty folders commit
 touch my-vault/People/.gitkeep
@@ -21,19 +21,7 @@ touch my-vault/Admin/.gitkeep
 touch my-vault/_log/.gitkeep
 ```
 
-## 3. Create the registry file
-
-```bash
-cat > my-vault/_registry/projects.md << 'EOF'
-# Project registry
-
-| Project | Path | Registered |
-|---------|------|------------|
-
-EOF
-```
-
-## 4. Push to GitHub
+## 3. Push to GitHub
 
 ```bash
 cd my-vault
@@ -45,7 +33,7 @@ git remote add origin https://github.com/your-username/my-vault.git
 git push -u origin main
 ```
 
-## 5. Create a GitHub personal access token
+## 4. Create a GitHub personal access token
 
 n8n needs this to write files to your vault repo.
 
@@ -64,7 +52,7 @@ GITHUB_VAULT_REPO=your-username/my-vault
 GITHUB_VAULT_BRANCH=main
 ```
 
-## 6. Add token to n8n
+## 5. Add token to n8n
 
 In n8n:
 
