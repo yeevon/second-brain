@@ -30,12 +30,9 @@ Create `~/.config/second-brain/mcp-paths.json`:
 
 ```json
 {
-  "vault": "/absolute/path/to/your/local/vault",
-  "registry": "/absolute/path/to/your/local/vault/_registry/projects.md"
+  "vault": "/absolute/path/to/your/local/vault"
 }
 ```
-
-The MCP server reads the registry at startup and adds each registered project path automatically.
 
 ## 4. Configure Gemini CLI to use MCP
 
@@ -55,32 +52,7 @@ In your Gemini CLI config (typically `~/.gemini/config.json`):
 }
 ```
 
-## 5. Add project paths dynamically
-
-When a project registers via `/init-memory`, it appends to `_registry/projects.md`.
-The MCP server reads this on each session start so new projects are available automatically.
-
-To also give MCP access to project `.brain/` folders, add each path:
-
-```json
-{
-  "mcpServers": {
-    "second-brain": {
-      "command": "npx",
-      "args": [
-        "@modelcontextprotocol/server-filesystem",
-        "/path/to/vault",
-        "/path/to/project-one/.brain",
-        "/path/to/project-two/.brain"
-      ]
-    }
-  }
-}
-```
-
-> Tip: The `mcp/update-paths.sh` script rebuilds this config automatically from your registry file. Run it after registering a new project.
-
-## 6. Verify
+## 5. Verify
 
 Start Gemini CLI and ask:
 
