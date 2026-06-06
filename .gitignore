@@ -1,0 +1,23 @@
+# environment files — never commit secrets
+.env
+.env.*
+!.env.example
+
+# n8n
+n8n/data/
+n8n/.n8n/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode/
+.idea/
+
+# node
+node_modules/
+npm-debug.log*
+
+# vault — personal data never goes in the template repo
+vault/
