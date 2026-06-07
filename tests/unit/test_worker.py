@@ -1,11 +1,12 @@
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 
-from secondbrain.ledger import FAILED, INBOX, Ledger
+from secondbrain.ledger import FAILED, FILED, INBOX, RECEIVED, Ledger
 from secondbrain.vault_writer import VaultWriter
-from secondbrain.worker import process_capture_once
+from secondbrain.worker import CaptureQueue, enqueue_unfinished_captures, process_capture_once, run_capture_worker
 
 
 VALID_CLASSIFICATION = {
@@ -58,7 +59,7 @@ async def test_process_capture_routes_classifier_failure_to_inbox(tmp_path):
     updated = ledger.get_capture(capture.capture_id)
     assert result is not None
     assert result.status == INBOX
-    assert result.inbox_reason == "classifier failed: RuntimeError"
+    assert result.inbox_reason == "classifier failed: RuntimeError: timeout"
     assert updated.status == INBOX
     assert updated.derived_note_path == result.note_path
 
@@ -120,6 +121,59 @@ async def test_process_capture_marks_failed_when_vault_write_fails(tmp_path, cap
     assert "vault unavailable" in output
 
 
+@pytest.mark.asyncio
+async def test_enqueue_unfinished_captures_resets_classifying_and_queues_work(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    first = insert_capture(ledger)
+    second = ledger.insert_accepted_capture(
+        discord_message_id="1513233540316266518",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="Second capture.",
+        received_at=datetime(2026, 6, 7, 12, 30, 0, tzinfo=UTC),
+    )
+    ledger.mark_classifying(second.capture_id)
+    queue = CaptureQueue()
+
+    queued = await enqueue_unfinished_captures(ledger, queue)
+
+    assert queued == [first.capture_id, second.capture_id]
+    assert ledger.get_capture(second.capture_id).status == RECEIVED
+    assert await queue.get() == first.capture_id
+    assert await queue.get() == second.capture_id
+
+
+@pytest.mark.asyncio
+async def test_run_capture_worker_consumes_queue_and_files_capture(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture = insert_capture(ledger)
+    queue = CaptureQueue()
+    writer = VaultWriter(tmp_path / "vault")
+    worker = asyncio.create_task(
+        run_capture_worker(
+            settings=make_settings(),
+            ledger=ledger,
+            queue=queue,
+            vault_writer=writer,
+            classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
+        )
+    )
+
+    try:
+        await queue.enqueue(capture.capture_id)
+        await wait_for_status(ledger, capture.capture_id, FILED)
+    finally:
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+    updated = ledger.get_capture(capture.capture_id)
+    assert updated.status == FILED
+    assert updated.derived_note_path is not None
+    assert (tmp_path / "vault" / updated.derived_note_path).exists()
+
+
 class FakeClient:
     def __init__(self, *, parsed=None, error=None):
         self.aio = SimpleNamespace(models=FakeModels(parsed=parsed, error=error))
@@ -139,3 +193,11 @@ class FakeModels:
 class FailingVaultWriter:
     def write_note(self, **kwargs):
         raise OSError("vault unavailable")
+
+
+async def wait_for_status(ledger: Ledger, capture_id: str, status: str) -> None:
+    for _ in range(50):
+        if ledger.get_capture(capture_id).status == status:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"capture did not reach status {status}")

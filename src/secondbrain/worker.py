@@ -109,3 +109,35 @@ async def process_capture_once(
         note_path=write_result.note_path,
         inbox_reason=outcome.inbox_reason,
     )
+
+
+async def enqueue_unfinished_captures(ledger: Ledger, queue: CaptureQueue) -> list[str]:
+    ledger.reset_classifying_to_received()
+    capture_ids = ledger.enqueueable_capture_ids()
+    for capture_id in capture_ids:
+        await queue.enqueue(capture_id)
+    return capture_ids
+
+
+async def run_capture_worker(
+    *,
+    settings: Any,
+    ledger: Ledger,
+    queue: CaptureQueue,
+    vault_writer: VaultWriter,
+    classifier_client: Any | None = None,
+) -> None:
+    while True:
+        capture_id = await queue.get()
+        try:
+            await process_capture_once(
+                capture_id=capture_id,
+                settings=settings,
+                ledger=ledger,
+                vault_writer=vault_writer,
+                classifier_client=classifier_client,
+            )
+        except Exception as exc:
+            print(f"{capture_id} worker error: {type(exc).__name__}: {exc}")
+        finally:
+            queue.task_done()

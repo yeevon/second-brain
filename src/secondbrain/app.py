@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 
 from secondbrain.config import Settings
 from secondbrain.discord_capture import create_discord_client, extract_attachment_metadata
 from secondbrain.ledger import Ledger
 from secondbrain.secret_screen import screen_text
-from secondbrain.worker import CaptureQueue
+from secondbrain.vault_writer import VaultWriter
+from secondbrain.worker import CaptureQueue, enqueue_unfinished_captures, run_capture_worker
 
 
 def create_capture_handler(settings: Settings, ledger: Ledger, queue: CaptureQueue):
@@ -57,13 +59,35 @@ def run_discord_listener() -> None:
     settings = Settings()
     ledger = Ledger(settings.ledger_path)
     queue = CaptureQueue(maxsize=settings.classifier_queue_maxsize)
+    vault_writer = VaultWriter(settings.vault_path)
     handle_capture = create_capture_handler(settings, ledger, queue)
-    client = create_discord_client(settings, handle_capture)
+    worker_started = False
+
+    async def start_background_worker_once() -> None:
+        nonlocal worker_started
+        if worker_started:
+            return
+
+        worker_started = True
+        asyncio.create_task(
+            run_capture_worker(
+                settings=settings,
+                ledger=ledger,
+                queue=queue,
+                vault_writer=vault_writer,
+            )
+        )
+        capture_ids = await enqueue_unfinished_captures(ledger, queue)
+        print("background classifier worker started")
+        print(f"  recovered captures queued: {len(capture_ids)}")
+
+    client = create_discord_client(settings, handle_capture, start_background_worker_once)
     print("starting Discord listener")
     print(f"  guild_id: {settings.discord_guild_id}")
     print(f"  capture_channel_id: {settings.discord_capture_channel_id}")
     print(f"  allowed_user_id: {settings.discord_allowed_user_id}")
     print(f"  ledger_path: {settings.ledger_path}")
+    print(f"  vault_path: {settings.vault_path}")
     client.run(settings.discord_bot_token)
 
 

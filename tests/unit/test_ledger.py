@@ -157,6 +157,22 @@ def test_enqueueable_capture_ids_include_received_and_classifying(tmp_path):
     assert ledger.enqueueable_capture_ids() == [first.capture_id, second.capture_id]
 
 
+def test_reset_classifying_to_received_requeues_stale_work(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture = ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="Review reconnect handling.",
+    )
+    ledger.mark_classifying(capture.capture_id)
+
+    assert ledger.reset_classifying_to_received() == 1
+    assert ledger.get_capture(capture.capture_id).status == RECEIVED
+    assert ledger.reset_classifying_to_received() == 0
+
+
 def test_system_state_round_trips(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
 

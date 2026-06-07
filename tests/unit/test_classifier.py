@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from secondbrain.classifier import classify_capture, parse_classification_response
+from secondbrain.classifier import classify_capture, gemini_classification_schema, parse_classification_response
 from secondbrain.models import Classification
 
 
@@ -87,7 +87,7 @@ async def test_classify_capture_routes_invalid_response_to_inbox():
 
     assert outcome.route == "inbox"
     assert outcome.classification.folder == "inbox"
-    assert outcome.inbox_reason == "classifier failed: ValidationError"
+    assert outcome.inbox_reason.startswith("classifier failed: ValidationError:")
 
 
 @pytest.mark.asyncio
@@ -102,7 +102,21 @@ async def test_classify_capture_routes_api_failure_to_inbox():
 
     assert outcome.route == "inbox"
     assert outcome.classification.folder == "inbox"
-    assert outcome.inbox_reason == "classifier failed: RuntimeError"
+    assert outcome.inbox_reason == "classifier failed: RuntimeError: timeout"
+
+
+@pytest.mark.asyncio
+async def test_classify_capture_redacts_api_key_from_failure_reason():
+    outcome = await classify_capture(
+        "Review reconnect handling.",
+        api_key="secret-api-key",
+        model="gemini-test",
+        confidence_threshold=0.75,
+        client=FakeClient(error=RuntimeError("bad key secret-api-key")),
+    )
+
+    assert "secret-api-key" not in outcome.inbox_reason
+    assert "[REDACTED_API_KEY]" in outcome.inbox_reason
 
 
 def test_parse_classification_response_accepts_json_text_response():
@@ -126,6 +140,14 @@ def test_parse_classification_response_accepts_json_text_response():
     assert isinstance(classification, Classification)
     assert classification.folder == "learning"
     assert classification.title == "Learn SQLite WAL"
+
+
+def test_gemini_schema_omits_unsupported_additional_properties():
+    schema = gemini_classification_schema()
+
+    assert "additionalProperties" not in str(schema)
+    assert "additional_properties" not in str(schema)
+    assert schema["properties"]["actions"]["items"]["required"] == ["text", "status"]
 
 
 class FakeClient:

@@ -4,12 +4,14 @@ _intents = discord.Intents.default()
 _intents.message_content = True
 
 
-def create_discord_client(settings, handle_capture):
+def create_discord_client(settings, handle_capture, on_ready_callback=None):
     client = discord.Client(intents=_intents)
 
     @client.event
     async def on_ready():
         print(f"discord client ready as {client.user}")
+        if on_ready_callback is not None:
+            await on_ready_callback()
 
     @client.event
     async def on_message(message):

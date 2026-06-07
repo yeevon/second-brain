@@ -247,6 +247,32 @@ class Ledger:
             self._append_event(capture_id, "CAPTURE_CLASSIFYING", {"status": CLASSIFYING})
             return True
 
+    def reset_classifying_to_received(self) -> int:
+        with self._lock, self._connection:
+            rows = self._connection.execute(
+                "SELECT capture_id FROM captures WHERE status = ? ORDER BY id",
+                (CLASSIFYING,),
+            ).fetchall()
+            if not rows:
+                return 0
+
+            now = _iso(_now())
+            self._connection.execute(
+                """
+                UPDATE captures
+                SET status = ?, updated_at = ?
+                WHERE status = ?
+                """,
+                (RECEIVED, now, CLASSIFYING),
+            )
+            for row in rows:
+                self._append_event(
+                    row["capture_id"],
+                    "CAPTURE_REQUEUED",
+                    {"from_status": CLASSIFYING, "status": RECEIVED},
+                )
+            return len(rows)
+
     def update_capture(
         self,
         capture_id: str,

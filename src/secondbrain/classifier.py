@@ -45,14 +45,14 @@ async def classify_capture(
             model=model,
             contents=_build_prompt(raw_text),
             config=types.GenerateContentConfig(
-                systemInstruction=CLASSIFIER_SYSTEM_PROMPT,
-                responseMimeType="application/json",
-                responseSchema=Classification,
+                system_instruction=CLASSIFIER_SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                response_schema=gemini_classification_schema(),
             ),
         )
         classification = parse_classification_response(response)
     except Exception as exc:
-        return inbox_fallback(raw_text, reason=f"classifier failed: {type(exc).__name__}")
+        return inbox_fallback(raw_text, reason=_classifier_failure_reason(exc, api_key=api_key))
 
     return route_classification(
         classification,
@@ -113,5 +113,95 @@ def inbox_fallback(raw_text: str, *, reason: str) -> ClassificationOutcome:
     )
 
 
+def gemini_classification_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "folder": {
+                "type": "string",
+                "enum": ["people", "projects", "ideas", "learning", "admin", "inbox"],
+            },
+            "project": {
+                "type": "string",
+                "nullable": True,
+            },
+            "note_type": {
+                "type": "string",
+            },
+            "title": {
+                "type": "string",
+            },
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "body": {
+                "type": "string",
+            },
+            "actions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "status": {"type": "string", "enum": ["open", "done"]},
+                    },
+                    "required": ["text", "status"],
+                },
+            },
+            "needs_clarification": {
+                "type": "boolean",
+            },
+            "clarifying_question": {
+                "type": "string",
+                "nullable": True,
+            },
+            "confidence": {
+                "type": "number",
+            },
+        },
+        "required": [
+            "folder",
+            "project",
+            "note_type",
+            "title",
+            "tags",
+            "body",
+            "actions",
+            "needs_clarification",
+            "clarifying_question",
+            "confidence",
+        ],
+        "property_ordering": [
+            "folder",
+            "project",
+            "note_type",
+            "title",
+            "tags",
+            "body",
+            "actions",
+            "needs_clarification",
+            "clarifying_question",
+            "confidence",
+        ],
+    }
+
+
 def _build_prompt(raw_text: str) -> str:
     return f"Classify this raw Discord capture:\n\n{raw_text}"
+
+
+def _classifier_failure_reason(exc: Exception, *, api_key: str) -> str:
+    message = _safe_exception_message(exc, api_key=api_key)
+    if not message:
+        return f"classifier failed: {type(exc).__name__}"
+    return f"classifier failed: {type(exc).__name__}: {message}"
+
+
+def _safe_exception_message(exc: Exception, *, api_key: str) -> str:
+    message = str(exc).replace("\n", " ").strip()
+    if api_key:
+        message = message.replace(api_key, "[REDACTED_API_KEY]")
+    if len(message) > 500:
+        message = f"{message[:497]}..."
+    return message
