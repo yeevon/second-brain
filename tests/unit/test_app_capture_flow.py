@@ -12,10 +12,11 @@ def make_settings():
 
 
 def make_message(*, content="capture this", message_id=1001):
+    channel = FakeChannel()
     return SimpleNamespace(
         id=message_id,
         guild=SimpleNamespace(id=300),
-        channel=SimpleNamespace(id=200),
+        channel=channel,
         author=SimpleNamespace(id=400),
         content=content,
         attachments=[],
@@ -35,7 +36,7 @@ async def test_capture_handler_persists_receipts_and_enqueues_capture(tmp_path):
 
     assert capture.status == RECEIVED
     assert capture.raw_text == "Review reconnect handling."
-    assert capture.receipt_message_id == f"terminal-receipt-{capture.capture_id}"
+    assert capture.receipt_message_id == "9001"
 
 
 @pytest.mark.asyncio
@@ -55,3 +56,12 @@ async def test_capture_handler_rejects_sensitive_message_without_enqueueing(tmp_
     assert rejected[0].raw_text is None
     assert rejected[0].redacted_text == "[REDACTED]"
     assert "hunter2" not in rejected[0].redacted_text
+    assert rejected[0].receipt_message_id == "9001"
+
+
+class FakeChannel:
+    id = 200
+
+    async def send(self, content):
+        self.last_content = content
+        return SimpleNamespace(id=9001)

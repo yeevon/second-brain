@@ -6,13 +6,20 @@ import asyncio
 from secondbrain.config import Settings
 from secondbrain.discord_capture import create_discord_client, extract_attachment_metadata
 from secondbrain.ledger import Ledger
+from secondbrain.receipts import send_rejection_receipt, send_saved_receipt
 from secondbrain.reconcile import reconcile_discord_history
 from secondbrain.secret_screen import screen_text
 from secondbrain.vault_writer import VaultWriter
 from secondbrain.worker import CaptureQueue, enqueue_unfinished_captures, run_capture_worker
 
 
-def create_capture_handler(settings: Settings, ledger: Ledger, queue: CaptureQueue):
+def create_capture_handler(
+    settings: Settings,
+    ledger: Ledger,
+    queue: CaptureQueue,
+    *,
+    enqueue_captures: bool = True,
+):
     async def handle_capture(message) -> None:
         raw_text = message.content.strip() if message.content else ""
         secret_result = screen_text(raw_text)
@@ -26,6 +33,12 @@ def create_capture_handler(settings: Settings, ledger: Ledger, queue: CaptureQue
                 redacted_text=secret_result.redacted_text,
                 sensitivity_flags=secret_result.flags,
             )
+            receipt_message_id = await send_rejection_receipt(
+                message,
+                capture,
+                flags=secret_result.flags,
+            )
+            ledger.set_receipt_message_id(capture.capture_id, receipt_message_id)
             print(f"rejected sensitive Discord capture: {capture.capture_id}")
             print(f"  flags: {list(secret_result.flags)}")
             return
@@ -41,14 +54,19 @@ def create_capture_handler(settings: Settings, ledger: Ledger, queue: CaptureQue
             attachment_metadata=attachment_metadata,
         )
 
-        receipt_message_id = f"terminal-receipt-{capture.capture_id}"
+        receipt_message_id = await send_saved_receipt(
+            message,
+            capture,
+            has_attachments=bool(attachment_metadata),
+        )
         ledger.set_receipt_message_id(capture.capture_id, receipt_message_id)
-        await queue.enqueue(capture.capture_id)
+        if enqueue_captures:
+            await queue.enqueue(capture.capture_id)
 
         print(f"{capture.capture_id} received. Your note is saved. Processing...")
         print(f"  message_id: {message.id}")
         print(f"  receipt_message_id: {receipt_message_id}")
-        print(f"  queued: {capture.capture_id}")
+        print(f"  queued: {capture.capture_id}" if enqueue_captures else "  queued: deferred to startup recovery")
         if attachment_metadata:
             print("  attachment warning: attachment detected but not archived in the MVP")
             print(f"  attachments: {attachment_metadata}")
@@ -62,6 +80,7 @@ def run_discord_listener() -> None:
     queue = CaptureQueue(maxsize=settings.classifier_queue_maxsize)
     vault_writer = VaultWriter(settings.vault_path)
     handle_capture = create_capture_handler(settings, ledger, queue)
+    reconcile_capture = create_capture_handler(settings, ledger, queue, enqueue_captures=False)
     worker_started = False
 
     async def start_background_worker_once() -> None:
@@ -69,6 +88,13 @@ def run_discord_listener() -> None:
         if worker_started:
             return
 
+        reconcile_result = await reconcile_discord_history(
+            client=client,
+            settings=settings,
+            ledger=ledger,
+            handle_capture=reconcile_capture,
+        )
+        capture_ids = await enqueue_unfinished_captures(ledger, queue)
         worker_started = True
         asyncio.create_task(
             run_capture_worker(
@@ -76,15 +102,9 @@ def run_discord_listener() -> None:
                 ledger=ledger,
                 queue=queue,
                 vault_writer=vault_writer,
+                receipt_client=client,
             )
         )
-        reconcile_result = await reconcile_discord_history(
-            client=client,
-            settings=settings,
-            ledger=ledger,
-            handle_capture=handle_capture,
-        )
-        capture_ids = await enqueue_unfinished_captures(ledger, queue)
         print("startup Discord history reconciliation complete")
         print(f"  messages seen: {reconcile_result.seen}")
         print(f"  captures handled: {reconcile_result.handled}")

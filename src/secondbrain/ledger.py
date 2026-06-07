@@ -24,10 +24,15 @@ TERMINAL_STATUSES = {FILED, INBOX, REJECTED_SENSITIVE, FAILED}
 class CaptureRecord:
     capture_id: str
     discord_message_id: str
+    discord_channel_id: str
+    discord_guild_id: str
+    discord_author_id: str
     status: str
     raw_text: str | None
     redacted_text: str | None
     is_sensitive: bool
+    has_attachments: bool
+    attachment_metadata: list[dict[str, Any]]
     received_at: datetime
     receipt_message_id: str | None
     derived_note_path: str | None
@@ -420,10 +425,15 @@ def _record_from_row(row: sqlite3.Row) -> CaptureRecord:
     return CaptureRecord(
         capture_id=row["capture_id"],
         discord_message_id=row["discord_message_id"],
+        discord_channel_id=row["discord_channel_id"],
+        discord_guild_id=row["discord_guild_id"],
+        discord_author_id=row["discord_author_id"],
         status=row["status"],
         raw_text=row["raw_text"],
         redacted_text=row["redacted_text"],
         is_sensitive=bool(row["is_sensitive"]),
+        has_attachments=bool(row["has_attachments"]),
+        attachment_metadata=json.loads(row["attachment_metadata_json"] or "[]"),
         received_at=datetime.fromisoformat(row["received_at"]),
         receipt_message_id=row["receipt_message_id"],
         derived_note_path=row["derived_note_path"],

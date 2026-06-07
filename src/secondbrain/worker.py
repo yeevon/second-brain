@@ -4,6 +4,8 @@ from typing import Any
 
 from secondbrain.classifier import classify_capture
 from secondbrain.ledger import FAILED, FILED, INBOX, Ledger
+from secondbrain.models import Classification
+from secondbrain.receipts import edit_final_receipt
 from secondbrain.vault_writer import VaultWriter
 
 
@@ -39,6 +41,7 @@ async def process_capture_once(
     ledger: Ledger,
     vault_writer: VaultWriter,
     classifier_client: Any | None = None,
+    receipt_client: Any | None = None,
 ) -> ProcessingResult | None:
     if not ledger.mark_classifying(capture_id):
         return None
@@ -47,13 +50,16 @@ async def process_capture_once(
     if capture.raw_text is None:
         raise ValueError(f"capture has no raw text: {capture_id}")
 
-    outcome = await classify_capture(
-        capture.raw_text,
-        api_key=settings.gemini_api_key,
-        model=settings.gemini_model,
-        confidence_threshold=settings.classification_confidence_threshold,
-        client=classifier_client,
-    )
+    if not capture.raw_text.strip() and capture.has_attachments:
+        outcome = attachment_only_inbox_outcome()
+    else:
+        outcome = await classify_capture(
+            capture.raw_text,
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_model,
+            confidence_threshold=settings.classification_confidence_threshold,
+            client=classifier_client,
+        )
     try:
         write_result = vault_writer.write_note(
             capture_id=capture.capture_id,
@@ -74,6 +80,12 @@ async def process_capture_once(
         )
         print(f"{capture.capture_id} failed: vault write failed")
         print(f"  reason: {failure_reason}")
+        if receipt_client is not None:
+            await try_edit_final_receipt(
+                receipt_client,
+                ledger.get_capture(capture.capture_id),
+                f"{capture.capture_id} failed while writing to the vault.\nReason: {failure_reason}",
+            )
         return ProcessingResult(
             capture_id=capture.capture_id,
             status=FAILED,
@@ -100,8 +112,20 @@ async def process_capture_once(
     if status == INBOX:
         print(f"{capture.capture_id} filed to Inbox: {write_result.note_path}")
         print(f"  reason: {outcome.inbox_reason}")
+        receipt_content = (
+            f"{capture.capture_id} filed to Inbox: {write_result.note_path}\n"
+            f"Reason: {outcome.inbox_reason}"
+        )
     else:
         print(f"{capture.capture_id} filed: {write_result.note_path}")
+        receipt_content = f"{capture.capture_id} filed: {write_result.note_path}"
+
+    if receipt_client is not None:
+        await try_edit_final_receipt(
+            receipt_client,
+            ledger.get_capture(capture.capture_id),
+            receipt_content,
+        )
 
     return ProcessingResult(
         capture_id=capture.capture_id,
@@ -126,6 +150,7 @@ async def run_capture_worker(
     queue: CaptureQueue,
     vault_writer: VaultWriter,
     classifier_client: Any | None = None,
+    receipt_client: Any | None = None,
 ) -> None:
     while True:
         capture_id = await queue.get()
@@ -136,8 +161,63 @@ async def run_capture_worker(
                 ledger=ledger,
                 vault_writer=vault_writer,
                 classifier_client=classifier_client,
+                receipt_client=receipt_client,
             )
         except Exception as exc:
+            failure_reason = f"worker error: {type(exc).__name__}: {exc}"
+            try:
+                ledger.update_capture(
+                    capture_id,
+                    status=FAILED,
+                    last_error=failure_reason,
+                    event_type="CAPTURE_FAILED",
+                    event_payload={"reason": failure_reason},
+                )
+                if receipt_client is not None:
+                    await try_edit_final_receipt(
+                        receipt_client,
+                        ledger.get_capture(capture_id),
+                        f"{capture_id} failed during processing.\nReason: {failure_reason}",
+                    )
+            except Exception as update_exc:
+                print(
+                    f"{capture_id} failed to mark worker error: "
+                    f"{type(update_exc).__name__}: {update_exc}"
+                )
             print(f"{capture_id} worker error: {type(exc).__name__}: {exc}")
         finally:
             queue.task_done()
+
+
+class ClassificationOutcomeLike:
+    def __init__(self, classification: Classification, route: str, inbox_reason: str | None) -> None:
+        self.classification = classification
+        self.route = route
+        self.inbox_reason = inbox_reason
+
+
+def attachment_only_inbox_outcome() -> ClassificationOutcomeLike:
+    reason = "attachment-only capture; attachment content was not archived or classified"
+    return ClassificationOutcomeLike(
+        classification=Classification(
+            folder="inbox",
+            project=None,
+            note_type="attachment",
+            title="Attachment-only capture",
+            tags=["inbox", "attachment"],
+            body=reason,
+            actions=[],
+            needs_clarification=True,
+            clarifying_question=None,
+            confidence=0.0,
+        ),
+        route="inbox",
+        inbox_reason=reason,
+    )
+
+
+async def try_edit_final_receipt(receipt_client: Any, capture, content: str) -> None:
+    try:
+        await edit_final_receipt(receipt_client, capture, content)
+    except Exception as exc:
+        print(f"{capture.capture_id} receipt edit failed: {type(exc).__name__}: {exc}")

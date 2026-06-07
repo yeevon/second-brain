@@ -33,7 +33,7 @@ def make_message(
     return SimpleNamespace(
         id=message_id,
         guild=SimpleNamespace(id=guild_id),
-        channel=SimpleNamespace(id=channel_id),
+        channel=FakeMessageChannel(channel_id),
         author=SimpleNamespace(id=author_id, bot=author_bot),
         webhook_id=webhook_id,
         content=content,
@@ -47,7 +47,7 @@ async def test_reconcile_fetches_history_and_uses_capture_handler(tmp_path):
     queue = CaptureQueue()
     settings = make_settings()
     client = FakeClient([make_message(1001, content="Recovered note.")])
-    handle_capture = create_capture_handler(settings, ledger, queue)
+    handle_capture = create_capture_handler(settings, ledger, queue, enqueue_captures=False)
 
     result = await reconcile_discord_history(
         client=client,
@@ -56,11 +56,11 @@ async def test_reconcile_fetches_history_and_uses_capture_handler(tmp_path):
         handle_capture=handle_capture,
     )
 
-    capture_id = await queue.get()
-    capture = ledger.get_capture(capture_id)
     assert result.seen == 1
     assert result.handled == 1
     assert result.ignored == 0
+    assert queue.qsize() == 0
+    capture = ledger.captures_by_status("RECEIVED")[0]
     assert capture.discord_message_id == "1001"
     assert capture.raw_text == "Recovered note."
     assert ledger.get_system_state(LAST_RECONCILED_MESSAGE_ID) == "1001"
@@ -72,7 +72,7 @@ async def test_reconcile_advances_high_water_for_ignored_messages(tmp_path):
     queue = CaptureQueue()
     settings = make_settings()
     client = FakeClient([make_message(1001, author_bot=True)])
-    handle_capture = create_capture_handler(settings, ledger, queue)
+    handle_capture = create_capture_handler(settings, ledger, queue, enqueue_captures=False)
 
     result = await reconcile_discord_history(
         client=client,
@@ -101,7 +101,7 @@ async def test_reconcile_uses_last_reconciled_message_id_as_history_after(tmp_pa
             make_message(1002, content="New capture."),
         ]
     )
-    handle_capture = create_capture_handler(settings, ledger, queue)
+    handle_capture = create_capture_handler(settings, ledger, queue, enqueue_captures=False)
 
     result = await reconcile_discord_history(
         client=client,
@@ -110,9 +110,9 @@ async def test_reconcile_uses_last_reconciled_message_id_as_history_after(tmp_pa
         handle_capture=handle_capture,
     )
 
-    capture_id = await queue.get()
-    capture = ledger.get_capture(capture_id)
     assert result.seen == 1
+    assert queue.qsize() == 0
+    capture = ledger.captures_by_status("RECEIVED")[0]
     assert capture.discord_message_id == "1002"
     assert ledger.get_system_state(LAST_RECONCILED_MESSAGE_ID) == "1002"
 
@@ -128,7 +128,7 @@ async def test_reconcile_warns_when_limit_is_exceeded(tmp_path):
             make_message(1002, content="Second."),
         ]
     )
-    handle_capture = create_capture_handler(settings, ledger, queue)
+    handle_capture = create_capture_handler(settings, ledger, queue, enqueue_captures=False)
 
     result = await reconcile_discord_history(
         client=client,
@@ -140,6 +140,7 @@ async def test_reconcile_warns_when_limit_is_exceeded(tmp_path):
     assert result.warning is not None
     assert result.seen == 1
     assert result.handled == 1
+    assert queue.qsize() == 0
     assert ledger.get_system_state(LAST_RECONCILED_MESSAGE_ID) == "1001"
 
 
@@ -149,6 +150,14 @@ class FakeClient:
 
     def get_channel(self, channel_id):
         return self.channel
+
+
+class FakeMessageChannel:
+    def __init__(self, channel_id):
+        self.id = channel_id
+
+    async def send(self, content):
+        return SimpleNamespace(id=9001)
 
 
 class FakeChannel:
