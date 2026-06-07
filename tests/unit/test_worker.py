@@ -93,7 +93,7 @@ async def test_process_capture_routes_classifier_failure_to_inbox(tmp_path):
     note_path = tmp_path / "vault" / result.note_path
     assert note_path.exists()
     markdown = note_path.read_text(encoding="utf-8")
-    assert "area: inbox" in markdown
+    assert 'area: "inbox"' in markdown
     assert "# Unclassified capture" in markdown
     assert "Review reconnect handling." in markdown
 

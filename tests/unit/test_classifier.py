@@ -38,6 +38,28 @@ async def test_classify_capture_returns_file_route_for_valid_high_confidence_res
 
 
 @pytest.mark.asyncio
+async def test_classify_capture_preserves_model_selected_inbox_route():
+    payload = {
+        **VALID_CLASSIFICATION,
+        "folder": "inbox",
+        "project": None,
+        "confidence": 0.9,
+    }
+
+    outcome = await classify_capture(
+        "This is too vague to place.",
+        api_key="fake",
+        model="gemini-test",
+        confidence_threshold=0.75,
+        client=FakeClient(parsed=payload),
+    )
+
+    assert outcome.route == "inbox"
+    assert outcome.classification.folder == "inbox"
+    assert outcome.inbox_reason == "classifier selected inbox"
+
+
+@pytest.mark.asyncio
 async def test_classify_capture_routes_low_confidence_to_inbox():
     payload = {**VALID_CLASSIFICATION, "confidence": 0.2}
 

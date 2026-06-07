@@ -81,6 +81,13 @@ def route_classification(
     confidence_threshold: float,
     raw_text: str,
 ) -> ClassificationOutcome:
+    if classification.folder == "inbox":
+        return ClassificationOutcome(
+            classification=classification,
+            route="inbox",
+            inbox_reason="classifier selected inbox",
+        )
+
     if classification.needs_clarification:
         return inbox_fallback(raw_text, reason="classification needs clarification")
 

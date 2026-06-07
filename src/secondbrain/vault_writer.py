@@ -29,9 +29,10 @@ class WriteResult:
 
 class VaultWriter:
     def __init__(self, vault_path: Path | str) -> None:
-        self.vault_path = Path(vault_path)
-        if not self.vault_path.is_absolute():
+        configured_path = Path(vault_path)
+        if not configured_path.is_absolute():
             raise ValueError("vault_path must be absolute")
+        self.vault_path = configured_path.resolve()
 
     def write_note(
         self,
@@ -89,9 +90,15 @@ class VaultWriter:
         if not self.vault_path.exists():
             return None
 
-        needle = f"capture_id: {capture_id}"
+        needles = {
+            f"capture_id: {capture_id}",
+            f"capture_id: {yaml_scalar(capture_id)}",
+        }
         for path in self.vault_path.rglob("*.md"):
-            if path.is_file() and needle in path.read_text(encoding="utf-8"):
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8")
+            if any(needle in text for needle in needles):
                 return path
         return None
 
@@ -156,7 +163,10 @@ def render_markdown(
             "tags:",
         ]
     )
-    lines.extend(f"  - {yaml_scalar(tag)}" for tag in classification.tags)
+    if classification.tags:
+        lines.extend(f"  - {yaml_scalar(tag)}" for tag in classification.tags)
+    else:
+        lines.append("  []")
 
     lines.append("actions:")
     if classification.actions:
@@ -194,8 +204,6 @@ def sanitize_slug(value: str) -> str:
 
 
 def yaml_scalar(value: str) -> str:
-    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./@+\- ]*", value):
-        return value
     return json.dumps(value)
 
 

@@ -45,11 +45,11 @@ def test_write_project_note_creates_markdown_and_audit_event(tmp_path):
     assert result.absolute_path.exists()
 
     markdown = result.absolute_path.read_text(encoding="utf-8")
-    assert "capture_id: SB-20260607-0001" in markdown
+    assert 'capture_id: "SB-20260607-0001"' in markdown
     assert 'source_message_id: "1513233540316266517"' in markdown
-    assert "area: projects" in markdown
-    assert "project: halo" in markdown
-    assert "prompt_version: classifier-v1" in markdown
+    assert 'area: "projects"' in markdown
+    assert 'project: "halo"' in markdown
+    assert 'prompt_version: "classifier-v1"' in markdown
     assert "# Review WebSocket reconnect handling" in markdown
     assert "- [ ] Review WebSocket reconnect handling" in markdown
 
@@ -171,6 +171,26 @@ def test_refuses_relative_vault_path():
         VaultWriter("relative-vault")
 
 
+def test_resolves_configured_vault_root_for_symlink_paths(tmp_path):
+    real_vault = tmp_path / "real-vault"
+    symlink_vault = tmp_path / "current-vault"
+    real_vault.mkdir()
+    symlink_vault.symlink_to(real_vault, target_is_directory=True)
+
+    writer = VaultWriter(symlink_vault)
+    result = writer.write_note(
+        capture_id="SB-20260607-0001",
+        source_message_id="1513233540316266517",
+        created_at=datetime(2026, 6, 7, 12, 29, 24, tzinfo=UTC),
+        classification=make_classification(),
+        model="gemini-mock",
+    )
+
+    assert writer.vault_path == real_vault.resolve()
+    assert result.absolute_path.is_relative_to(real_vault.resolve())
+    assert result.note_path.startswith("20_projects/halo/")
+
+
 def test_render_markdown_omits_actions_section_when_no_actions():
     markdown = render_markdown(
         capture_id="SB-20260607-0001",
@@ -182,6 +202,18 @@ def test_render_markdown_omits_actions_section_when_no_actions():
 
     assert "actions:\n  []" in markdown
     assert "## Actions" not in markdown
+
+
+def test_render_markdown_writes_empty_tags_as_list():
+    markdown = render_markdown(
+        capture_id="SB-20260607-0001",
+        source_message_id="1513233540316266517",
+        created_at=datetime(2026, 6, 7, 12, 29, 24, tzinfo=UTC),
+        classification=make_classification(tags=[]),
+        model="gemini-mock",
+    )
+
+    assert "tags:\n  []" in markdown
 
 
 def test_render_markdown_quotes_frontmatter_values_when_needed():
@@ -198,8 +230,9 @@ def test_render_markdown_quotes_frontmatter_values_when_needed():
     )
 
     assert 'source_message_id: "1513233540316266517"' in markdown
-    assert "note_type: quick note" in markdown
-    assert "  - needs quote" in markdown
+    assert 'note_type: "quick note"' in markdown
+    assert '  - "needs quote"' in markdown
+    assert '  - "plain"' in markdown
     assert '  - text: "Review: reconnect handling"' in markdown
 
 
@@ -208,6 +241,9 @@ def test_sanitize_slug_blocks_path_separators_and_empty_values():
     assert sanitize_slug("   ") == "untitled"
 
 
-def test_yaml_scalar_quotes_unsafe_values():
-    assert yaml_scalar("plain value") == "plain value"
+def test_yaml_scalar_quotes_all_strings():
+    assert yaml_scalar("plain value") == '"plain value"'
     assert yaml_scalar("Review: reconnect") == '"Review: reconnect"'
+    assert yaml_scalar("null") == '"null"'
+    assert yaml_scalar("true") == '"true"'
+    assert yaml_scalar("123") == '"123"'
