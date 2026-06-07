@@ -14,19 +14,7 @@ GEMINI_MODEL=gemini-3.5-flash
 
 `gemini-3.5-flash` is the correct model as of June 2026. Fast, cheap, strong enough for classification. Update this when newer stable models are released.
 
-## 3. Add to n8n
-
-In n8n:
-
-1. Go to **Settings → Credentials**
-2. Click **Add Credential**
-3. Search for **HTTP Request** (we call Gemini via HTTP, not a native node)
-4. Add your API key as a header credential:
-   - Name: `Gemini API`
-   - Header: `x-goog-api-key`
-   - Value: your key
-
-## 4. Test the API
+## 3. Test the API
 
 You can test your key with a quick curl from your EC2:
 
@@ -42,7 +30,7 @@ curl -X POST \
 
 Expected response contains `"WORKING"` in the output.
 
-## 5. Pricing
+## 4. Pricing
 
 At personal capture volume (20–50 messages/day) expect well under $1/month.
 Gemini 3.5 Flash is priced per token — classification tasks are short inputs and outputs.
