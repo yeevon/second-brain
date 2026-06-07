@@ -113,6 +113,21 @@ async def test_classify_capture_routes_invalid_response_to_inbox():
 
 
 @pytest.mark.asyncio
+async def test_classify_capture_routes_malformed_json_text_to_inbox():
+    outcome = await classify_capture(
+        "Review reconnect handling.",
+        api_key="fake",
+        model="gemini-test",
+        confidence_threshold=0.75,
+        client=FakeTextClient(text='{"folder":'),
+    )
+
+    assert outcome.route == "inbox"
+    assert outcome.classification.folder == "inbox"
+    assert outcome.inbox_reason.startswith("classifier failed: JSONDecodeError:")
+
+
+@pytest.mark.asyncio
 async def test_classify_capture_routes_missing_required_field_to_inbox():
     payload = dict(VALID_CLASSIFICATION)
     payload.pop("tags")
@@ -253,3 +268,16 @@ class FakeModels:
         if self.error is not None:
             raise self.error
         return SimpleNamespace(parsed=self.parsed)
+
+
+class FakeTextClient:
+    def __init__(self, *, text):
+        self.aio = SimpleNamespace(models=FakeTextModels(text=text))
+
+
+class FakeTextModels:
+    def __init__(self, *, text):
+        self.text = text
+
+    async def generate_content(self, **kwargs):
+        return SimpleNamespace(text=self.text)

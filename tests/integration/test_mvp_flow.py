@@ -96,6 +96,21 @@ async def test_happy_path_capture_to_vault_edits_original_receipt(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_saved_receipt_is_sent_only_after_sqlite_commit(tmp_path):
+    settings = make_settings()
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    queue = CaptureQueue()
+    channel = CommitCheckingDiscordChannel(ledger)
+    handler = create_capture_handler(settings, ledger, queue)
+
+    await handler(make_message(1001, channel=channel, content="Review reconnect handling."))
+
+    capture_id = await queue.get()
+    assert channel.commit_observed is True
+    assert ledger.get_capture(capture_id).status == RECEIVED
+
+
+@pytest.mark.asyncio
 async def test_startup_catchup_recovers_missed_message_once(tmp_path):
     settings = make_settings()
     ledger = Ledger(tmp_path / "ledger.sqlite3")
@@ -298,6 +313,20 @@ class FakeDiscordChannel:
         if oldest_first:
             messages = sorted(messages, key=lambda message: message.id)
         return FakeHistory(messages[:limit])
+
+
+class CommitCheckingDiscordChannel(FakeDiscordChannel):
+    def __init__(self, ledger):
+        super().__init__()
+        self.ledger = ledger
+        self.commit_observed = False
+
+    async def send(self, content):
+        captures = self.ledger.captures_by_status(RECEIVED)
+        assert len(captures) == 1
+        assert captures[0].receipt_message_id is None
+        self.commit_observed = True
+        return await super().send(content)
 
 
 class FakeDiscordReceiptMessage:

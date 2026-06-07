@@ -191,6 +191,26 @@ def test_resolves_configured_vault_root_for_symlink_paths(tmp_path):
     assert result.note_path.startswith("20_projects/halo/")
 
 
+def test_write_note_sanitizes_traversal_inputs_and_stays_inside_vault(tmp_path):
+    vault = tmp_path / "vault"
+    writer = VaultWriter(vault)
+
+    result = writer.write_note(
+        capture_id="SB-20260607-0001",
+        source_message_id="1513233540316266517",
+        created_at=datetime(2026, 6, 7, 12, 29, 24, tzinfo=UTC),
+        classification=make_classification(
+            project="../../outside",
+            title="../../../escape",
+        ),
+        model="gemini-mock",
+    )
+
+    assert result.absolute_path.is_relative_to(vault.resolve())
+    assert result.note_path == "20_projects/outside/2026-06-07--SB-20260607-0001--escape.md"
+    assert result.absolute_path.exists()
+
+
 def test_render_markdown_omits_actions_section_when_no_actions():
     markdown = render_markdown(
         capture_id="SB-20260607-0001",
@@ -202,6 +222,21 @@ def test_render_markdown_omits_actions_section_when_no_actions():
 
     assert "actions:\n  []" in markdown
     assert "## Actions" not in markdown
+
+
+def test_render_markdown_is_byte_for_byte_deterministic():
+    kwargs = {
+        "capture_id": "SB-20260607-0001",
+        "source_message_id": "1513233540316266517",
+        "created_at": datetime(2026, 6, 7, 12, 29, 24, tzinfo=UTC),
+        "classification": make_classification(),
+        "model": "gemini-mock",
+    }
+
+    first = render_markdown(**kwargs)
+    second = render_markdown(**kwargs)
+
+    assert first == second
 
 
 def test_render_markdown_writes_empty_tags_as_list():
