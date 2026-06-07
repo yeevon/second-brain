@@ -50,3 +50,11 @@ def test_multiple_secret_flags_can_be_returned():
     assert "api_key_assignment" in result.flags
     assert "hunter2" not in result.redacted_text
     assert "abc123456789" not in result.redacted_text
+
+
+def test_assignment_redaction_preserves_key_name_only():
+    result = screen_text("password=hunter2 secret=topsecret api_key=abc123456789")
+
+    assert result.redacted_text == (
+        "password=[REDACTED] secret=[REDACTED] api_key=[REDACTED]"
+    )

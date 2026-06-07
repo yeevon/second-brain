@@ -45,7 +45,9 @@ async def test_capture_handler_rejects_sensitive_message_without_enqueueing(tmp_
     queue = CaptureQueue()
     handler = create_capture_handler(make_settings(), ledger, queue)
 
-    await handler(make_message(content="password=hunter2"))
+    message = make_message(content="password=hunter2")
+
+    await handler(message)
 
     assert queue.qsize() == 0
     assert ledger.status_counts() == {REJECTED_SENSITIVE: 1}
@@ -54,9 +56,11 @@ async def test_capture_handler_rejects_sensitive_message_without_enqueueing(tmp_
     rejected = ledger.captures_by_status(REJECTED_SENSITIVE)
     assert len(rejected) == 1
     assert rejected[0].raw_text is None
-    assert rejected[0].redacted_text == "[REDACTED]"
+    assert rejected[0].redacted_text == "password=[REDACTED]"
     assert "hunter2" not in rejected[0].redacted_text
     assert rejected[0].receipt_message_id == "9001"
+    assert "hunter2" not in message.channel.last_content
+    assert "password_assignment" in message.channel.last_content
 
 
 class FakeChannel:
