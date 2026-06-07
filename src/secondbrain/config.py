@@ -1,0 +1,75 @@
+import os
+from dotenv import load_dotenv
+from pathlib import Path
+
+load_dotenv()
+
+
+class Settings:
+    def __init__(self) -> None:
+        # Discord
+        self.discord_bot_token          = os.getenv("DISCORD_BOT_TOKEN")
+        self.discord_guild_id           = os.getenv("DISCORD_GUILD_ID")
+        self.discord_capture_channel_id = os.getenv("DISCORD_CAPTURE_CHANNEL_ID")
+        self.discord_allowed_user_id    = os.getenv("DISCORD_ALLOWED_USER_ID")
+
+        # Gemini
+        self.gemini_api_key                      = os.getenv("GEMINI_API_KEY")
+        self.gemini_model                        = os.getenv("GEMINI_MODEL")
+        self.classification_confidence_threshold = os.getenv("CLASSIFICATION_CONFIDENCE_THRESHOLD")
+        self.classifier_worker_count             = os.getenv("CLASSIFIER_WORKER_COUNT")
+        self.classifier_queue_maxsize            = os.getenv("CLASSIFIER_QUEUE_MAXSIZE")
+
+        # Github vault sync
+        # self.github_token       = os.getenv("GITHUB_TOKEN")
+        # self.github_vault_repo  = os.getenv("GITHUB_VAULT_REPO")
+        # self.github_vault_branch = os.getenv("GITHUB_VAULT_BRANCH")
+
+        # n8n
+        # self.n8n_webhook_url = os.getenv("N8N_WEBHOOK_URL")
+
+        # Vault
+        self.vault_path              = os.getenv("VAULT_PATH")
+        self.ledger_path             = os.getenv("LEDGER_PATH")
+        self.startup_reconcile_limit = os.getenv("STARTUP_RECONCILE_LIMIT")
+
+        # Prompt version
+        # self.prompt_version = os.getenv("PROMPT_VERSION")
+
+        if not (
+            self.discord_bot_token 
+            and self.discord_guild_id 
+            and self.discord_capture_channel_id 
+            and self.discord_allowed_user_id 
+            and self.gemini_api_key 
+            and self.gemini_model 
+            and self.classification_confidence_threshold 
+            and self.classifier_worker_count 
+            and self.classifier_queue_maxsize 
+            # and self.github_token 
+            # and self.github_vault_repo 
+            # and self.github_vault_branch 
+            # and self.n8n_webhook_url 
+            and self.vault_path 
+            and self.ledger_path 
+            and self.startup_reconcile_limit 
+            # and self.prompt_version
+        ): 
+            raise RuntimeError("Missing required configuration")
+        
+        
+        self.discord_guild_id           = int(self.discord_guild_id)
+        self.discord_capture_channel_id = int(self.discord_capture_channel_id)
+        self.discord_allowed_user_id    = int(self.discord_allowed_user_id)
+        self.classifier_worker_count    = int(self.classifier_worker_count)
+        self.classifier_queue_maxsize   = int(self.classifier_queue_maxsize)
+        self.startup_reconcile_limit    = int(self.startup_reconcile_limit)
+        
+        self.classification_confidence_threshold = float(self.classification_confidence_threshold)
+
+        self.vault_path = Path(self.vault_path)
+        self.ledger_path = Path(self.ledger_path)
+
+        if not self.vault_path.is_absolute():
+            raise RuntimeError("Vault path should be absolute path to your vault")
+
