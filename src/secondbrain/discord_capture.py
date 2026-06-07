@@ -8,6 +8,10 @@ def create_discord_client(settings, handle_capture):
     client = discord.Client(intents=_intents)
 
     @client.event
+    async def on_ready():
+        print(f"discord client ready as {client.user}")
+
+    @client.event
     async def on_message(message):
         if not should_capture_message(message, settings):
             return
