@@ -11,21 +11,21 @@ class ClassifiedAction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(min_length=1)
-    status: ActionStatus = "open"
+    status: ActionStatus
 
 
 class Classification(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     folder: AllowedFolder
-    project: str | None = None
+    project: str | None
     note_type: str = Field(min_length=1)
     title: str = Field(min_length=1)
-    tags: list[str] = Field(default_factory=list)
+    tags: list[str]
     body: str = Field(min_length=1)
-    actions: list[ClassifiedAction] = Field(default_factory=list)
-    needs_clarification: bool = False
-    clarifying_question: str | None = None
+    actions: list[ClassifiedAction]
+    needs_clarification: bool
+    clarifying_question: str | None
     confidence: float = Field(ge=0.0, le=1.0)
 
     @field_validator("tags")

@@ -102,6 +102,9 @@ class VaultWriter:
         created_at: datetime,
         classification: Classification,
     ) -> Path:
+        if classification.folder not in FOLDER_MAPPING:
+            raise ValueError(f"unsupported folder: {classification.folder}")
+
         folder = FOLDER_MAPPING[classification.folder]
         relative_parts = [folder]
         if classification.folder == "projects":
@@ -138,36 +141,36 @@ def render_markdown(
 ) -> str:
     lines = [
         "---",
-        f"capture_id: {capture_id}",
-        f'source_message_id: "{source_message_id}"',
-        f"created_at: {_iso(created_at)}",
-        f"area: {classification.folder}",
+        f"capture_id: {yaml_scalar(capture_id)}",
+        f"source_message_id: {json.dumps(source_message_id)}",
+        f"created_at: {yaml_scalar(_iso(created_at))}",
+        f"area: {yaml_scalar(classification.folder)}",
     ]
 
     if classification.project:
-        lines.append(f"project: {sanitize_slug(classification.project)}")
+        lines.append(f"project: {yaml_scalar(sanitize_slug(classification.project))}")
 
     lines.extend(
         [
-            f"note_type: {classification.note_type}",
+            f"note_type: {yaml_scalar(classification.note_type)}",
             "tags:",
         ]
     )
-    lines.extend(f"  - {tag}" for tag in classification.tags)
+    lines.extend(f"  - {yaml_scalar(tag)}" for tag in classification.tags)
 
     lines.append("actions:")
     if classification.actions:
         for action in classification.actions:
-            lines.append(f"  - text: {action.text}")
-            lines.append(f"    status: {action.status}")
+            lines.append(f"  - text: {yaml_scalar(action.text)}")
+            lines.append(f"    status: {yaml_scalar(action.status)}")
     else:
         lines.append("  []")
 
     lines.extend(
         [
             "lifecycle_status: active",
-            f"model: {model}",
-            f"prompt_version: {CLASSIFIER_PROMPT_VERSION}",
+            f"model: {yaml_scalar(model)}",
+            f"prompt_version: {yaml_scalar(CLASSIFIER_PROMPT_VERSION)}",
             "schema_version: 1",
             "---",
             "",
@@ -188,6 +191,12 @@ def sanitize_slug(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower())
     slug = slug.strip("-")
     return slug or "untitled"
+
+
+def yaml_scalar(value: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./@+\- ]*", value):
+        return value
+    return json.dumps(value)
 
 
 def _relative_posix(path: Path, root: Path) -> str:

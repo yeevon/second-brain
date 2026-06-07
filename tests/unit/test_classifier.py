@@ -91,6 +91,41 @@ async def test_classify_capture_routes_invalid_response_to_inbox():
 
 
 @pytest.mark.asyncio
+async def test_classify_capture_routes_missing_required_field_to_inbox():
+    payload = dict(VALID_CLASSIFICATION)
+    payload.pop("tags")
+
+    outcome = await classify_capture(
+        "Review reconnect handling.",
+        api_key="fake",
+        model="gemini-test",
+        confidence_threshold=0.75,
+        client=FakeClient(parsed=payload),
+    )
+
+    assert outcome.route == "inbox"
+    assert outcome.classification.folder == "inbox"
+    assert outcome.inbox_reason.startswith("classifier failed: ValidationError:")
+
+
+@pytest.mark.asyncio
+async def test_classify_capture_routes_action_missing_status_to_inbox():
+    payload = {**VALID_CLASSIFICATION, "actions": [{"text": "Review reconnect handling"}]}
+
+    outcome = await classify_capture(
+        "Review reconnect handling.",
+        api_key="fake",
+        model="gemini-test",
+        confidence_threshold=0.75,
+        client=FakeClient(parsed=payload),
+    )
+
+    assert outcome.route == "inbox"
+    assert outcome.classification.folder == "inbox"
+    assert outcome.inbox_reason.startswith("classifier failed: ValidationError:")
+
+
+@pytest.mark.asyncio
 async def test_classify_capture_routes_api_failure_to_inbox():
     outcome = await classify_capture(
         "Review reconnect handling.",
@@ -148,6 +183,36 @@ def test_gemini_schema_omits_unsupported_additional_properties():
     assert "additionalProperties" not in str(schema)
     assert "additional_properties" not in str(schema)
     assert schema["properties"]["actions"]["items"]["required"] == ["text", "status"]
+    assert schema["required"] == [
+        "folder",
+        "project",
+        "note_type",
+        "title",
+        "tags",
+        "body",
+        "actions",
+        "needs_clarification",
+        "clarifying_question",
+        "confidence",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_classify_capture_sends_structured_output_config_to_gemini():
+    client = FakeClient(parsed=VALID_CLASSIFICATION)
+
+    await classify_capture(
+        "Review reconnect handling.",
+        api_key="fake",
+        model="gemini-test",
+        confidence_threshold=0.75,
+        client=client,
+    )
+
+    call = client.aio.models.calls[0]
+    assert call["model"] == "gemini-test"
+    assert call["config"].response_mime_type == "application/json"
+    assert call["config"].response_schema == gemini_classification_schema()
 
 
 class FakeClient:
