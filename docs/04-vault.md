@@ -9,10 +9,11 @@
 
 ## 2. Create the vault folder structure locally
 
+> Run these commands on your local PC, not on EC2.
+
 ```bash
 mkdir -p my-vault/{People,Projects,Ideas,Learning,Admin,_log}
 
-# add gitkeep files so empty folders commit
 touch my-vault/People/.gitkeep
 touch my-vault/Projects/.gitkeep
 touch my-vault/Ideas/.gitkeep
@@ -37,7 +38,7 @@ git push -u origin main
 
 n8n needs this to write files to your vault repo.
 
-1. Go to [github access token](https://github.com/settings/tokens)
+1. Go to [github tokens](https://github.com/settings/tokens)
 2. Click **Generate new token (classic)**
 3. Name: `second-brain-n8n`
 4. Expiration: No expiration (or set a reminder to rotate)
@@ -51,13 +52,5 @@ Also set:
 GITHUB_VAULT_REPO=your-username/my-vault
 GITHUB_VAULT_BRANCH=main
 ```
-
-## 5. Add token to n8n
-
-In n8n:
-
-1. Go to **Settings → Credentials**
-2. Add a **GitHub** credential
-3. Enter your personal access token
 
 Next: [MCP server setup](05-mcp.md)
