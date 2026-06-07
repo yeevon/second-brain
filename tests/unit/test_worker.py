@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from secondbrain.ledger import INBOX, Ledger
+from secondbrain.ledger import FAILED, INBOX, Ledger
 from secondbrain.vault_writer import VaultWriter
 from secondbrain.worker import process_capture_once
 
@@ -93,6 +93,33 @@ async def test_process_capture_routes_low_confidence_to_inbox(tmp_path):
     assert updated.derived_note_path.startswith("00_inbox/")
 
 
+@pytest.mark.asyncio
+async def test_process_capture_marks_failed_when_vault_write_fails(tmp_path, capsys):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture = insert_capture(ledger)
+
+    result = await process_capture_once(
+        capture_id=capture.capture_id,
+        settings=make_settings(),
+        ledger=ledger,
+        vault_writer=FailingVaultWriter(),
+        classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
+    )
+
+    updated = ledger.get_capture(capture.capture_id)
+    assert result is not None
+    assert result.status == FAILED
+    assert result.note_path is None
+    assert updated.status == FAILED
+    assert updated.raw_text == "Review reconnect handling."
+    assert updated.derived_note_path is None
+    assert updated.last_error == "vault write failed: OSError: vault unavailable"
+
+    output = capsys.readouterr().out
+    assert f"{capture.capture_id} failed: vault write failed" in output
+    assert "vault unavailable" in output
+
+
 class FakeClient:
     def __init__(self, *, parsed=None, error=None):
         self.aio = SimpleNamespace(models=FakeModels(parsed=parsed, error=error))
@@ -107,3 +134,8 @@ class FakeModels:
         if self.error is not None:
             raise self.error
         return SimpleNamespace(parsed=self.parsed)
+
+
+class FailingVaultWriter:
+    def write_note(self, **kwargs):
+        raise OSError("vault unavailable")

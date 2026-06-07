@@ -30,6 +30,7 @@ class CaptureRecord:
     received_at: datetime
     receipt_message_id: str | None
     derived_note_path: str | None
+    last_error: str | None
 
 
 class Ledger:
@@ -393,6 +394,7 @@ def _record_from_row(row: sqlite3.Row) -> CaptureRecord:
         received_at=datetime.fromisoformat(row["received_at"]),
         receipt_message_id=row["receipt_message_id"],
         derived_note_path=row["derived_note_path"],
+        last_error=row["last_error"],
     )
 
 

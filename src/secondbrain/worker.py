@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from secondbrain.classifier import classify_capture
-from secondbrain.ledger import FILED, INBOX, Ledger
+from secondbrain.ledger import FAILED, FILED, INBOX, Ledger
 from secondbrain.vault_writer import VaultWriter
 
 
@@ -28,7 +28,7 @@ class CaptureQueue:
 class ProcessingResult:
     capture_id: str
     status: str
-    note_path: str
+    note_path: str | None
     inbox_reason: str | None
 
 
@@ -54,13 +54,32 @@ async def process_capture_once(
         confidence_threshold=settings.classification_confidence_threshold,
         client=classifier_client,
     )
-    write_result = vault_writer.write_note(
-        capture_id=capture.capture_id,
-        source_message_id=capture.discord_message_id,
-        created_at=capture.received_at,
-        classification=outcome.classification,
-        model=settings.gemini_model,
-    )
+    try:
+        write_result = vault_writer.write_note(
+            capture_id=capture.capture_id,
+            source_message_id=capture.discord_message_id,
+            created_at=capture.received_at,
+            classification=outcome.classification,
+            model=settings.gemini_model,
+        )
+    except Exception as exc:
+        failure_reason = f"vault write failed: {type(exc).__name__}: {exc}"
+        ledger.update_capture(
+            capture.capture_id,
+            status=FAILED,
+            classification_json=outcome.classification.model_dump(mode="json"),
+            last_error=failure_reason,
+            event_type="CAPTURE_FAILED",
+            event_payload={"reason": failure_reason},
+        )
+        print(f"{capture.capture_id} failed: vault write failed")
+        print(f"  reason: {failure_reason}")
+        return ProcessingResult(
+            capture_id=capture.capture_id,
+            status=FAILED,
+            note_path=None,
+            inbox_reason=failure_reason,
+        )
 
     status = INBOX if outcome.route == "inbox" else FILED
     event_type = "CAPTURE_INBOX" if status == INBOX else "CAPTURE_FILED"
