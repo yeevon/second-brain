@@ -12,7 +12,7 @@ def make_settings():
     return SimpleNamespace(classifier_queue_maxsize=10)
 
 
-def make_message(*, content="capture this", message_id=1001):
+def make_message(*, content="capture this", message_id=1001, attachments=None):
     channel = FakeChannel()
     return SimpleNamespace(
         id=message_id,
@@ -20,7 +20,7 @@ def make_message(*, content="capture this", message_id=1001):
         channel=channel,
         author=SimpleNamespace(id=400),
         content=content,
-        attachments=[],
+        attachments=attachments or [],
     )
 
 
@@ -29,8 +29,9 @@ async def test_capture_handler_persists_receipts_and_enqueues_capture(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     queue = CaptureQueue()
     handler = create_capture_handler(make_settings(), ledger, queue)
+    message = make_message(content="Review reconnect handling.")
 
-    await handler(make_message(content="Review reconnect handling."))
+    await handler(message)
 
     capture_id = await queue.get()
     capture = ledger.get_capture(capture_id)
@@ -38,6 +39,10 @@ async def test_capture_handler_persists_receipts_and_enqueues_capture(tmp_path):
     assert capture.status == RECEIVED
     assert capture.raw_text == "Review reconnect handling."
     assert capture.receipt_message_id == "9001"
+    assert message.channel.last_content == (
+        f"⏳ {capture.capture_id} received.\n"
+        "Your note is saved. Processing…"
+    )
 
 
 @pytest.mark.asyncio
@@ -90,6 +95,21 @@ async def test_saved_receipt_failure_does_not_block_enqueue(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_saved_receipt_warns_when_attachment_is_not_archived(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    queue = CaptureQueue()
+    handler = create_capture_handler(make_settings(), ledger, queue)
+    message = make_message(
+        content="Review this attached sketch.",
+        attachments=[SimpleNamespace(filename="sketch.png", content_type="image/png", size=100, url="url")],
+    )
+
+    await handler(message)
+
+    assert "⚠️ Attachment detected but not archived in the MVP." in message.channel.last_content
+
+
+@pytest.mark.asyncio
 async def test_capture_handler_rejects_sensitive_message_without_enqueueing(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     queue = CaptureQueue()
@@ -110,7 +130,11 @@ async def test_capture_handler_rejects_sensitive_message_without_enqueueing(tmp_
     assert "hunter2" not in rejected[0].redacted_text
     assert rejected[0].receipt_message_id == "9001"
     assert "hunter2" not in message.channel.last_content
-    assert "password_assignment" in message.channel.last_content
+    assert message.channel.last_content == (
+        "⚠️ Message rejected.\n"
+        "It appears to contain a credential or sensitive identifier.\n"
+        "The original text was not saved or sent to Gemini."
+    )
 
 
 class FakeChannel:

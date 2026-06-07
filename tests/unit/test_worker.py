@@ -182,7 +182,53 @@ async def test_process_capture_preserves_attachment_warning_in_final_receipt(tmp
         receipt_client=receipt_client,
     )
 
-    assert "Attachment detected but not archived in the MVP." in receipt_client.edited_content
+    assert "⚠️ Attachment detected but not archived in the MVP." in receipt_client.edited_content
+
+
+@pytest.mark.asyncio
+async def test_process_capture_edits_successful_filing_receipt(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture = insert_capture(ledger)
+    ledger.set_receipt_message_id(capture.capture_id, "9001")
+    receipt_client = RecordingReceiptClient()
+
+    await process_capture_once(
+        capture_id=capture.capture_id,
+        settings=make_settings(),
+        ledger=ledger,
+        vault_writer=VaultWriter(tmp_path / "vault"),
+        classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
+        receipt_client=receipt_client,
+    )
+
+    assert receipt_client.edited_content == (
+        f"✅ {capture.capture_id} filed.\n"
+        "Location: 20_projects / halo\n"
+        "Type: task\n"
+        "Tags: telemetry, websocket"
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_capture_edits_classifier_failure_inbox_receipt(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture = insert_capture(ledger)
+    ledger.set_receipt_message_id(capture.capture_id, "9001")
+    receipt_client = RecordingReceiptClient()
+
+    await process_capture_once(
+        capture_id=capture.capture_id,
+        settings=make_settings(),
+        ledger=ledger,
+        vault_writer=VaultWriter(tmp_path / "vault"),
+        classifier_client=FakeClient(error=RuntimeError("timeout")),
+        receipt_client=receipt_client,
+    )
+
+    assert receipt_client.edited_content == (
+        f"⚠️ {capture.capture_id} saved to 00_inbox.\n"
+        "Reason: automatic classification failed. Your note is safe."
+    )
 
 
 @pytest.mark.asyncio
@@ -210,6 +256,28 @@ async def test_process_capture_marks_failed_when_vault_write_fails(tmp_path, cap
     output = capsys.readouterr().out
     assert f"{capture.capture_id} failed: vault write failed" in output
     assert "vault unavailable" in output
+
+
+@pytest.mark.asyncio
+async def test_process_capture_edits_vault_failure_receipt(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture = insert_capture(ledger)
+    ledger.set_receipt_message_id(capture.capture_id, "9001")
+    receipt_client = RecordingReceiptClient()
+
+    await process_capture_once(
+        capture_id=capture.capture_id,
+        settings=make_settings(),
+        ledger=ledger,
+        vault_writer=FailingVaultWriter(),
+        classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
+        receipt_client=receipt_client,
+    )
+
+    assert receipt_client.edited_content == (
+        f"❌ {capture.capture_id} captured but vault filing failed.\n"
+        "Your original note is safe in the local ledger."
+    )
 
 
 @pytest.mark.asyncio
@@ -336,6 +404,35 @@ async def test_process_capture_keeps_filed_status_when_receipt_edit_fails(tmp_pa
     assert updated.last_error is None
 
 
+@pytest.mark.asyncio
+async def test_process_capture_replaces_failed_receipt_edit_once(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture = insert_capture(ledger)
+    ledger.set_receipt_message_id(capture.capture_id, "9001")
+    receipt_client = ReplacementReceiptClient()
+
+    await process_capture_once(
+        capture_id=capture.capture_id,
+        settings=make_settings(),
+        ledger=ledger,
+        vault_writer=VaultWriter(tmp_path / "vault"),
+        classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
+        receipt_client=receipt_client,
+    )
+
+    updated = ledger.get_capture(capture.capture_id)
+    assert updated.receipt_message_id == "9002"
+    assert receipt_client.channel.sent_contents == [
+        (
+            f"✅ {capture.capture_id} filed.\n"
+            "Location: 20_projects / halo\n"
+            "Type: task\n"
+            "Tags: telemetry, websocket"
+        )
+    ]
+    assert event_types(ledger, capture.capture_id)[-1] == "RECEIPT_REPLACED"
+
+
 class FakeClient:
     def __init__(self, *, parsed=None, error=None):
         self.aio = SimpleNamespace(models=FakeModels(parsed=parsed, error=error))
@@ -383,7 +480,8 @@ class RecordingReceiptChannel:
 
 
 class RecordingReceiptMessage:
-    edited_content = None
+    def __init__(self):
+        self.edited_content = None
 
     async def edit(self, *, content):
         self.edited_content = content
@@ -392,6 +490,26 @@ class RecordingReceiptMessage:
 class FailingReceiptChannel:
     async def fetch_message(self, message_id):
         raise RuntimeError("receipt missing")
+
+
+class ReplacementReceiptClient:
+    def __init__(self):
+        self.channel = ReplacementReceiptChannel()
+
+    def get_channel(self, channel_id):
+        return self.channel
+
+
+class ReplacementReceiptChannel:
+    def __init__(self):
+        self.sent_contents = []
+
+    async def fetch_message(self, message_id):
+        raise RuntimeError("receipt missing")
+
+    async def send(self, content):
+        self.sent_contents.append(content)
+        return SimpleNamespace(id=9002)
 
 
 def insert_accepted_capture(ledger: Ledger, **kwargs):
@@ -404,3 +522,11 @@ async def wait_for_status(ledger: Ledger, capture_id: str, status: str) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError(f"capture did not reach status {status}")
+
+
+def event_types(ledger: Ledger, capture_id: str) -> list[str]:
+    rows = ledger._connection.execute(
+        "SELECT event_type FROM capture_events WHERE capture_id = ? ORDER BY id",
+        (capture_id,),
+    ).fetchall()
+    return [row["event_type"] for row in rows]
