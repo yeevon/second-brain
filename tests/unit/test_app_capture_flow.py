@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from secondbrain.app import create_capture_handler
-from secondbrain.ledger import RECEIVED, REJECTED_SENSITIVE, Ledger
+from secondbrain.app import create_capture_handler, format_status_report
+from secondbrain.ledger import FAILED, FILED, INBOX, RECEIVED, REJECTED_SENSITIVE, Ledger
 from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID
 from secondbrain.worker import CaptureQueue
 
@@ -43,6 +43,20 @@ async def test_capture_handler_persists_receipts_and_enqueues_capture(tmp_path):
         f"⏳ {capture.capture_id} received.\n"
         "Your note is saved. Processing…"
     )
+
+
+@pytest.mark.asyncio
+async def test_capture_handler_logs_metadata_without_raw_text(tmp_path, capsys):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    queue = CaptureQueue()
+    handler = create_capture_handler(make_settings(), ledger, queue)
+
+    await handler(make_message(content="Review reconnect handling."))
+
+    output = capsys.readouterr().out
+    assert "capture_received" in output
+    assert "discord_message_id" in output
+    assert "Review reconnect handling." not in output
 
 
 @pytest.mark.asyncio
@@ -110,7 +124,7 @@ async def test_saved_receipt_warns_when_attachment_is_not_archived(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_capture_handler_rejects_sensitive_message_without_enqueueing(tmp_path):
+async def test_capture_handler_rejects_sensitive_message_without_enqueueing(tmp_path, capsys):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     queue = CaptureQueue()
     handler = create_capture_handler(make_settings(), ledger, queue)
@@ -135,6 +149,46 @@ async def test_capture_handler_rejects_sensitive_message_without_enqueueing(tmp_
         "It appears to contain a credential or sensitive identifier.\n"
         "The original text was not saved or sent to Gemini."
     )
+    output = capsys.readouterr().out
+    assert "capture_rejected_sensitive" in output
+    assert "hunter2" not in output
+    assert "password=[REDACTED]" not in output
+
+
+def test_format_status_report_includes_operational_counts(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    filed = insert_capture(ledger, discord_message_id="1001")
+    inbox = insert_capture(ledger, discord_message_id="1002")
+    rejected = ledger.insert_sensitive_rejection(
+        discord_message_id="1003",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        redacted_text="password=[REDACTED]",
+        sensitivity_flags=("password_assignment",),
+    ).capture
+    failed = insert_capture(ledger, discord_message_id="1004")
+    ledger.update_capture(filed.capture_id, status=FILED, derived_note_path="20_projects/halo/filed.md")
+    ledger.update_capture(inbox.capture_id, status=INBOX, derived_note_path="00_inbox/inbox.md")
+    ledger.update_capture(failed.capture_id, status=FAILED)
+    ledger.set_system_state(LAST_RECONCILED_MESSAGE_ID, "1513233540316266517")
+    settings = SimpleNamespace(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        vault_path=tmp_path / "vault",
+    )
+
+    report = format_status_report(settings, ledger)
+
+    assert f"ledger path: {tmp_path / 'ledger.sqlite3'}" in report
+    assert f"vault path: {tmp_path / 'vault'}" in report
+    assert "total captures: 4" in report
+    assert "captures filed: 1" in report
+    assert "captures in inbox: 1" in report
+    assert "captures rejected as sensitive: 1" in report
+    assert "captures failed: 1" in report
+    assert "last reconciled Discord message ID: 1513233540316266517" in report
+    assert "last successful vault write: 00_inbox/inbox.md" in report
+    assert rejected.status == REJECTED_SENSITIVE
 
 
 class FakeChannel:
@@ -149,3 +203,13 @@ class FakeChannel:
         self.sent_contents.append(content)
         self.last_content = content
         return SimpleNamespace(id=9001)
+
+
+def insert_capture(ledger: Ledger, *, discord_message_id: str = "1001"):
+    return ledger.insert_accepted_capture(
+        discord_message_id=discord_message_id,
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="Review reconnect handling.",
+    ).capture

@@ -355,6 +355,23 @@ class Ledger:
         ).fetchall()
         return {row["status"]: row["count"] for row in rows}
 
+    def total_captures(self) -> int:
+        row = self._connection.execute("SELECT COUNT(*) AS count FROM captures").fetchone()
+        return int(row["count"])
+
+    def last_successful_vault_write(self) -> str | None:
+        row = self._connection.execute(
+            """
+            SELECT derived_note_path
+            FROM captures
+            WHERE status IN (?, ?) AND derived_note_path IS NOT NULL
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            (FILED, INBOX),
+        ).fetchone()
+        return None if row is None else row["derived_note_path"]
+
     def set_system_state(self, key: str, value: str) -> None:
         with self._lock, self._connection:
             self._connection.execute(

@@ -5,6 +5,7 @@ from typing import Any
 from secondbrain.classifier import classify_capture
 from secondbrain.ledger import FAILED, FILED, INBOX, Ledger
 from secondbrain.models import Classification
+from secondbrain.observability import log_metadata
 from secondbrain.receipts import (
     deliver_final_receipt,
     format_filed_receipt,
@@ -52,6 +53,12 @@ async def process_capture_once(
         return None
 
     capture = ledger.get_capture(capture_id)
+    log_metadata(
+        "capture_classifying",
+        capture_id=capture.capture_id,
+        discord_message_id=capture.discord_message_id,
+        status_transition="RECEIVED->CLASSIFYING",
+    )
     if capture.raw_text is None:
         raise ValueError(f"capture has no raw text: {capture_id}")
 
@@ -85,6 +92,14 @@ async def process_capture_once(
         )
         print(f"{capture.capture_id} failed: vault write failed")
         print(f"  reason: {failure_reason}")
+        log_metadata(
+            "capture_failed",
+            capture_id=capture.capture_id,
+            discord_message_id=capture.discord_message_id,
+            status_transition=f"CLASSIFYING->{FAILED}",
+            classification_confidence=outcome.classification.confidence,
+            error_type=type(exc).__name__,
+        )
         if receipt_client is not None:
             await try_deliver_final_receipt(
                 receipt_client,
@@ -118,6 +133,14 @@ async def process_capture_once(
     if status == INBOX:
         print(f"{capture.capture_id} filed to Inbox: {write_result.note_path}")
         print(f"  reason: {outcome.inbox_reason}")
+        log_metadata(
+            "capture_inbox",
+            capture_id=capture.capture_id,
+            discord_message_id=capture.discord_message_id,
+            status_transition=f"CLASSIFYING->{INBOX}",
+            classification_confidence=outcome.classification.confidence,
+            derived_note_path=write_result.note_path,
+        )
         receipt_content = format_inbox_receipt(
             capture_id=capture.capture_id,
             note_path=write_result.note_path,
@@ -126,6 +149,14 @@ async def process_capture_once(
         )
     else:
         print(f"{capture.capture_id} filed: {write_result.note_path}")
+        log_metadata(
+            "capture_filed",
+            capture_id=capture.capture_id,
+            discord_message_id=capture.discord_message_id,
+            status_transition=f"CLASSIFYING->{FILED}",
+            classification_confidence=outcome.classification.confidence,
+            derived_note_path=write_result.note_path,
+        )
         receipt_content = format_filed_receipt(
             capture_id=capture.capture_id,
             note_path=write_result.note_path,
@@ -203,6 +234,12 @@ async def run_capture_worker(
                     f"{type(update_exc).__name__}: {update_exc}"
                 )
             print(f"{capture_id} worker error: {type(exc).__name__}: {exc}")
+            log_metadata(
+                "capture_worker_error",
+                capture_id=capture_id,
+                status_transition=f"CLASSIFYING->{FAILED}",
+                error_type=type(exc).__name__,
+            )
         finally:
             queue.task_done()
 

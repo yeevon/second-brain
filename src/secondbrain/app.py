@@ -5,7 +5,8 @@ import asyncio
 
 from secondbrain.config import Settings
 from secondbrain.discord_capture import create_discord_client, extract_attachment_metadata
-from secondbrain.ledger import Ledger
+from secondbrain.ledger import FAILED, FILED, INBOX, RECEIVED, REJECTED_SENSITIVE, Ledger
+from secondbrain.observability import log_metadata
 from secondbrain.receipts import send_rejection_receipt, send_saved_receipt
 from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID, reconcile_discord_history
 from secondbrain.secret_screen import screen_text
@@ -38,7 +39,12 @@ def create_capture_handler(
             if advance_reconcile_marker:
                 ledger.set_system_state(LAST_RECONCILED_MESSAGE_ID, str(message.id))
             if not result.created:
-                print(f"duplicate Discord capture ignored: {capture.capture_id}")
+                log_metadata(
+                    "duplicate_capture_ignored",
+                    capture_id=capture.capture_id,
+                    discord_message_id=capture.discord_message_id,
+                    status=capture.status,
+                )
                 return
 
             try:
@@ -51,8 +57,12 @@ def create_capture_handler(
                 print(f"{capture.capture_id} rejection receipt failed: {type(exc).__name__}: {exc}")
             else:
                 ledger.set_receipt_message_id(capture.capture_id, receipt_message_id)
-            print(f"rejected sensitive Discord capture: {capture.capture_id}")
-            print(f"  flags: {list(secret_result.flags)}")
+            log_metadata(
+                "capture_rejected_sensitive",
+                capture_id=capture.capture_id,
+                discord_message_id=capture.discord_message_id,
+                status_transition=f"NEW->{REJECTED_SENSITIVE}",
+            )
             return
 
         attachment_metadata = extract_attachment_metadata(message)
@@ -69,7 +79,12 @@ def create_capture_handler(
         if advance_reconcile_marker:
             ledger.set_system_state(LAST_RECONCILED_MESSAGE_ID, str(message.id))
         if not result.created:
-            print(f"duplicate Discord capture ignored: {capture.capture_id}")
+            log_metadata(
+                "duplicate_capture_ignored",
+                capture_id=capture.capture_id,
+                discord_message_id=capture.discord_message_id,
+                status=capture.status,
+            )
             return
 
         receipt_message_id = None
@@ -86,13 +101,21 @@ def create_capture_handler(
         if enqueue_captures:
             await queue.enqueue(capture.capture_id)
 
-        print(f"{capture.capture_id} received. Your note is saved. Processing...")
-        print(f"  message_id: {message.id}")
-        print(f"  receipt_message_id: {receipt_message_id}")
-        print(f"  queued: {capture.capture_id}" if enqueue_captures else "  queued: deferred to startup recovery")
+        log_metadata(
+            "capture_received",
+            capture_id=capture.capture_id,
+            discord_message_id=capture.discord_message_id,
+            status_transition=f"NEW->{RECEIVED}",
+            receipt_message_id=receipt_message_id,
+            queued=enqueue_captures,
+        )
         if attachment_metadata:
-            print("  attachment warning: attachment detected but not archived in the MVP")
-            print(f"  attachments: {attachment_metadata}")
+            log_metadata(
+                "capture_has_unarchived_attachments",
+                capture_id=capture.capture_id,
+                discord_message_id=capture.discord_message_id,
+                attachment_count=len(attachment_metadata),
+            )
 
     return handle_capture
 
@@ -153,14 +176,47 @@ def run_discord_listener() -> None:
     client.run(settings.discord_bot_token)
 
 
+def format_status_report(settings: Settings, ledger: Ledger) -> str:
+    counts = ledger.status_counts()
+    last_reconciled = ledger.get_system_state(LAST_RECONCILED_MESSAGE_ID) or "none"
+    last_successful_vault_write = ledger.last_successful_vault_write() or "none"
+    return "\n".join(
+        [
+            "Second Brain status",
+            f"ledger path: {settings.ledger_path}",
+            f"vault path: {settings.vault_path}",
+            f"total captures: {ledger.total_captures()}",
+            f"captures filed: {counts.get(FILED, 0)}",
+            f"captures in inbox: {counts.get(INBOX, 0)}",
+            f"captures rejected as sensitive: {counts.get(REJECTED_SENSITIVE, 0)}",
+            f"captures failed: {counts.get(FAILED, 0)}",
+            f"last reconciled Discord message ID: {last_reconciled}",
+            f"last successful vault write: {last_successful_vault_write}",
+        ]
+    )
+
+
+def run_status() -> None:
+    settings = Settings()
+    ledger = Ledger(settings.ledger_path)
+    try:
+        print(format_status_report(settings, ledger))
+    finally:
+        ledger.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="secondbrain")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("run", help="listen for Discord captures and print them")
+    subparsers.add_parser("status", help="report local ledger and vault status")
 
     args = parser.parse_args(argv)
     if args.command == "run":
         run_discord_listener()
+        return 0
+    if args.command == "status":
+        run_status()
         return 0
 
     parser.error(f"unknown command: {args.command}")
