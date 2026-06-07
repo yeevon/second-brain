@@ -7,7 +7,13 @@ import pytest
 from secondbrain.ledger import FAILED, FILED, INBOX, RECEIVED, Ledger
 from secondbrain.vault_writer import VaultWriter
 import secondbrain.worker as worker_module
-from secondbrain.worker import CaptureQueue, enqueue_unfinished_captures, process_capture_once, run_capture_worker
+from secondbrain.worker import (
+    CaptureQueue,
+    enqueue_capture_ids,
+    process_capture_once,
+    run_capture_worker,
+    unfinished_capture_ids,
+)
 
 
 VALID_CLASSIFICATION = {
@@ -240,7 +246,7 @@ async def test_run_capture_worker_marks_unexpected_errors_failed(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_enqueue_unfinished_captures_resets_classifying_and_queues_work(tmp_path):
+async def test_unfinished_capture_ids_resets_classifying_and_returns_work(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     first = insert_capture(ledger)
     second = insert_accepted_capture(ledger,
@@ -252,14 +258,29 @@ async def test_enqueue_unfinished_captures_resets_classifying_and_queues_work(tm
         received_at=datetime(2026, 6, 7, 12, 30, 0, tzinfo=UTC),
     )
     ledger.mark_classifying(second.capture_id)
-    queue = CaptureQueue()
 
-    queued = await enqueue_unfinished_captures(ledger, queue)
+    queued = unfinished_capture_ids(ledger)
 
     assert queued == [first.capture_id, second.capture_id]
     assert ledger.get_capture(second.capture_id).status == RECEIVED
-    assert await queue.get() == first.capture_id
-    assert await queue.get() == second.capture_id
+
+
+@pytest.mark.asyncio
+async def test_enqueue_capture_ids_waits_for_consumer_on_bounded_queue():
+    queue = CaptureQueue(maxsize=1)
+    consumed = []
+
+    async def consume_two():
+        for _ in range(2):
+            consumed.append(await queue.get())
+            queue.task_done()
+
+    consumer = asyncio.create_task(consume_two())
+    queued = await asyncio.wait_for(enqueue_capture_ids(["one", "two"], queue), timeout=1)
+    await consumer
+
+    assert queued == ["one", "two"]
+    assert consumed == ["one", "two"]
 
 
 @pytest.mark.asyncio

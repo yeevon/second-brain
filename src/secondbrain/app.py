@@ -10,7 +10,7 @@ from secondbrain.receipts import send_rejection_receipt, send_saved_receipt
 from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID, reconcile_discord_history
 from secondbrain.secret_screen import screen_text
 from secondbrain.vault_writer import VaultWriter
-from secondbrain.worker import CaptureQueue, enqueue_unfinished_captures, run_capture_worker
+from secondbrain.worker import CaptureQueue, enqueue_capture_ids, run_capture_worker, unfinished_capture_ids
 
 
 def create_capture_handler(
@@ -122,7 +122,7 @@ def run_discord_listener() -> None:
             ledger=ledger,
             handle_capture=reconcile_capture,
         )
-        capture_ids = await enqueue_unfinished_captures(ledger, queue)
+        capture_ids = unfinished_capture_ids(ledger)
         worker_started = True
         asyncio.create_task(
             run_capture_worker(
@@ -133,6 +133,7 @@ def run_discord_listener() -> None:
                 receipt_client=client,
             )
         )
+        await enqueue_capture_ids(capture_ids, queue)
         print("startup Discord history reconciliation complete")
         print(f"  messages seen: {reconcile_result.seen}")
         print(f"  captures handled: {reconcile_result.handled}")

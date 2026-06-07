@@ -138,9 +138,12 @@ async def process_capture_once(
     )
 
 
-async def enqueue_unfinished_captures(ledger: Ledger, queue: CaptureQueue) -> list[str]:
+def unfinished_capture_ids(ledger: Ledger) -> list[str]:
     ledger.reset_classifying_to_received()
-    capture_ids = ledger.enqueueable_capture_ids()
+    return ledger.enqueueable_capture_ids()
+
+
+async def enqueue_capture_ids(capture_ids: list[str], queue: CaptureQueue) -> list[str]:
     for capture_id in capture_ids:
         await queue.enqueue(capture_id)
     return capture_ids
