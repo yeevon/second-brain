@@ -18,7 +18,7 @@ from secondbrain.ledger import (
 def test_insert_accepted_capture_creates_received_record(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
 
-    capture = ledger.insert_accepted_capture(
+    capture = insert_accepted_capture(ledger,
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -134,7 +134,7 @@ def test_minimal_schema_foreign_keys_and_sensitive_check_constraint(tmp_path):
 def test_duplicate_discord_message_id_returns_existing_capture(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
 
-    first = ledger.insert_accepted_capture(
+    first = insert_accepted_capture(ledger,
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -142,7 +142,7 @@ def test_duplicate_discord_message_id_returns_existing_capture(tmp_path):
         raw_text="First text.",
         received_at=datetime(2026, 6, 7, 12, 0, tzinfo=UTC),
     )
-    second = ledger.insert_accepted_capture(
+    second = insert_accepted_capture(ledger,
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -159,7 +159,7 @@ def test_duplicate_discord_message_id_returns_existing_capture(tmp_path):
 def test_duplicate_discord_message_id_for_sensitive_rejection_returns_existing_capture(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
 
-    first = ledger.insert_sensitive_rejection(
+    first = insert_sensitive_rejection(ledger,
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -168,7 +168,7 @@ def test_duplicate_discord_message_id_for_sensitive_rejection_returns_existing_c
         sensitivity_flags=("password_assignment",),
         received_at=datetime(2026, 6, 7, 12, 0, tzinfo=UTC),
     )
-    second = ledger.insert_sensitive_rejection(
+    second = insert_sensitive_rejection(ledger,
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -186,7 +186,7 @@ def test_duplicate_discord_message_id_for_sensitive_rejection_returns_existing_c
 def test_capture_id_counter_is_per_day(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
 
-    first = ledger.insert_accepted_capture(
+    first = insert_accepted_capture(ledger,
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -194,7 +194,7 @@ def test_capture_id_counter_is_per_day(tmp_path):
         raw_text="One.",
         received_at=datetime(2026, 6, 7, 12, 0, tzinfo=UTC),
     )
-    second = ledger.insert_accepted_capture(
+    second = insert_accepted_capture(ledger,
         discord_message_id="1002",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -202,7 +202,7 @@ def test_capture_id_counter_is_per_day(tmp_path):
         raw_text="Two.",
         received_at=datetime(2026, 6, 7, 12, 1, tzinfo=UTC),
     )
-    next_day = ledger.insert_accepted_capture(
+    next_day = insert_accepted_capture(ledger,
         discord_message_id="1003",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -219,7 +219,7 @@ def test_capture_id_counter_is_per_day(tmp_path):
 def test_capture_id_format_is_human_readable(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
 
-    capture = ledger.insert_accepted_capture(
+    capture = insert_accepted_capture(ledger,
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -234,7 +234,7 @@ def test_capture_id_format_is_human_readable(tmp_path):
 def test_insert_sensitive_rejection_stores_redacted_text_only(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
 
-    capture = ledger.insert_sensitive_rejection(
+    capture = insert_sensitive_rejection(ledger,
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -252,7 +252,7 @@ def test_insert_sensitive_rejection_stores_redacted_text_only(tmp_path):
 
 def test_set_receipt_message_id_updates_capture(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
-    capture = ledger.insert_accepted_capture(
+    capture = insert_accepted_capture(ledger,
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -268,7 +268,7 @@ def test_set_receipt_message_id_updates_capture(tmp_path):
 
 def test_mark_classifying_transitions_only_received_rows(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
-    capture = ledger.insert_accepted_capture(
+    capture = insert_accepted_capture(ledger,
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -283,7 +283,7 @@ def test_mark_classifying_transitions_only_received_rows(tmp_path):
 
 def test_update_capture_rejects_unknown_status(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
-    capture = ledger.insert_accepted_capture(
+    capture = insert_accepted_capture(ledger,
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -303,14 +303,14 @@ def test_update_capture_rejects_unknown_status(tmp_path):
 
 def test_enqueueable_capture_ids_include_received_and_classifying(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
-    first = ledger.insert_accepted_capture(
+    first = insert_accepted_capture(ledger,
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
         discord_author_id="400",
         raw_text="One.",
     )
-    second = ledger.insert_accepted_capture(
+    second = insert_accepted_capture(ledger,
         discord_message_id="1002",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -324,7 +324,7 @@ def test_enqueueable_capture_ids_include_received_and_classifying(tmp_path):
 
 def test_reset_classifying_to_received_requeues_stale_work(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
-    capture = ledger.insert_accepted_capture(
+    capture = insert_accepted_capture(ledger,
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -385,3 +385,11 @@ def unique_index_exists(ledger: Ledger, table_name: str, columns: list[str]) -> 
         if index_columns(ledger, index["name"]) == columns:
             return True
     return False
+
+
+def insert_accepted_capture(ledger: Ledger, **kwargs):
+    return ledger.insert_accepted_capture(**kwargs).capture
+
+
+def insert_sensitive_rejection(ledger: Ledger, **kwargs):
+    return ledger.insert_sensitive_rejection(**kwargs).capture

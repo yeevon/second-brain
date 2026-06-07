@@ -120,6 +120,9 @@ async def process_capture_once(
         print(f"{capture.capture_id} filed: {write_result.note_path}")
         receipt_content = f"{capture.capture_id} filed: {write_result.note_path}"
 
+    if capture.has_attachments:
+        receipt_content += "\nAttachment detected but not archived in the MVP."
+
     if receipt_client is not None:
         await try_edit_final_receipt(
             receipt_client,

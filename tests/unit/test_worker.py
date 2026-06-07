@@ -33,7 +33,7 @@ def make_settings():
 
 
 def insert_capture(ledger: Ledger):
-    return ledger.insert_accepted_capture(
+    return insert_accepted_capture(ledger,
         discord_message_id="1513233540316266517",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -44,7 +44,7 @@ def insert_capture(ledger: Ledger):
 
 
 def insert_attachment_only_capture(ledger: Ledger):
-    return ledger.insert_accepted_capture(
+    return insert_accepted_capture(ledger,
         discord_message_id="1513233540316266519",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -144,6 +144,42 @@ async def test_process_capture_routes_attachment_only_capture_to_inbox_without_g
 
 
 @pytest.mark.asyncio
+async def test_process_capture_preserves_attachment_warning_in_final_receipt(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture = insert_accepted_capture(
+        ledger,
+        discord_message_id="1513233540316270000",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="Review reconnect handling.",
+        has_attachments=True,
+        attachment_metadata=[
+            {
+                "filename": "image.png",
+                "content_type": "image/png",
+                "size": 100,
+                "url": "https://cdn.discordapp.com/attachments/image.png",
+            }
+        ],
+        received_at=datetime(2026, 6, 7, 12, 32, 0, tzinfo=UTC),
+    )
+    ledger.set_receipt_message_id(capture.capture_id, "9001")
+    receipt_client = RecordingReceiptClient()
+
+    await process_capture_once(
+        capture_id=capture.capture_id,
+        settings=make_settings(),
+        ledger=ledger,
+        vault_writer=VaultWriter(tmp_path / "vault"),
+        classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
+        receipt_client=receipt_client,
+    )
+
+    assert "Attachment detected but not archived in the MVP." in receipt_client.edited_content
+
+
+@pytest.mark.asyncio
 async def test_process_capture_marks_failed_when_vault_write_fails(tmp_path, capsys):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     capture = insert_capture(ledger)
@@ -207,7 +243,7 @@ async def test_run_capture_worker_marks_unexpected_errors_failed(tmp_path, monke
 async def test_enqueue_unfinished_captures_resets_classifying_and_queues_work(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     first = insert_capture(ledger)
-    second = ledger.insert_accepted_capture(
+    second = insert_accepted_capture(ledger,
         discord_message_id="1513233540316266518",
         discord_channel_id="200",
         discord_guild_id="300",
@@ -305,9 +341,40 @@ class FailingReceiptClient:
         return FailingReceiptChannel()
 
 
+class RecordingReceiptClient:
+    def __init__(self):
+        self.channel = RecordingReceiptChannel()
+
+    @property
+    def edited_content(self):
+        return self.channel.message.edited_content
+
+    def get_channel(self, channel_id):
+        return self.channel
+
+
+class RecordingReceiptChannel:
+    def __init__(self):
+        self.message = RecordingReceiptMessage()
+
+    async def fetch_message(self, message_id):
+        return self.message
+
+
+class RecordingReceiptMessage:
+    edited_content = None
+
+    async def edit(self, *, content):
+        self.edited_content = content
+
+
 class FailingReceiptChannel:
     async def fetch_message(self, message_id):
         raise RuntimeError("receipt missing")
+
+
+def insert_accepted_capture(ledger: Ledger, **kwargs):
+    return ledger.insert_accepted_capture(**kwargs).capture
 
 
 async def wait_for_status(ledger: Ledger, capture_id: str, status: str) -> None:

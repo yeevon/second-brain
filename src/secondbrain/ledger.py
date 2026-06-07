@@ -39,6 +39,12 @@ class CaptureRecord:
     last_error: str | None
 
 
+@dataclass(frozen=True)
+class InsertResult:
+    capture: CaptureRecord
+    created: bool
+
+
 class Ledger:
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
@@ -81,7 +87,11 @@ class Ledger:
                     updated_at TEXT NOT NULL,
 
                     CHECK (
-                        (is_sensitive = 0 AND raw_text IS NOT NULL)
+                        (
+                            is_sensitive = 0
+                            AND raw_text IS NOT NULL
+                            AND (raw_text != '' OR has_attachments = 1)
+                        )
                         OR
                         (is_sensitive = 1 AND raw_text IS NULL AND redacted_text IS NOT NULL)
                     )
@@ -119,12 +129,12 @@ class Ledger:
         has_attachments: bool = False,
         attachment_metadata: list[dict[str, Any]] | None = None,
         received_at: datetime | None = None,
-    ) -> CaptureRecord:
+    ) -> InsertResult:
         received_at = received_at or _now()
         with self._lock, self._connection:
             existing = self._get_by_discord_message_id(discord_message_id)
             if existing is not None:
-                return _record_from_row(existing)
+                return InsertResult(capture=_record_from_row(existing), created=False)
 
             capture_id = self._next_capture_id(received_at)
             now = _iso(_now())
@@ -161,7 +171,7 @@ class Ledger:
                 ),
             )
             self._append_event(capture_id, "CAPTURE_RECEIVED", {"status": RECEIVED})
-            return _record_from_row(self._get_by_capture_id(capture_id))
+            return InsertResult(capture=_record_from_row(self._get_by_capture_id(capture_id)), created=True)
 
     def insert_sensitive_rejection(
         self,
@@ -173,12 +183,12 @@ class Ledger:
         redacted_text: str,
         sensitivity_flags: tuple[str, ...] | list[str],
         received_at: datetime | None = None,
-    ) -> CaptureRecord:
+    ) -> InsertResult:
         received_at = received_at or _now()
         with self._lock, self._connection:
             existing = self._get_by_discord_message_id(discord_message_id)
             if existing is not None:
-                return _record_from_row(existing)
+                return InsertResult(capture=_record_from_row(existing), created=False)
 
             capture_id = self._next_capture_id(received_at)
             now = _iso(_now())
@@ -218,7 +228,7 @@ class Ledger:
                 "CAPTURE_REJECTED_SENSITIVE",
                 {"flags": list(sensitivity_flags)},
             )
-            return _record_from_row(self._get_by_capture_id(capture_id))
+            return InsertResult(capture=_record_from_row(self._get_by_capture_id(capture_id)), created=True)
 
     def get_capture(self, capture_id: str) -> CaptureRecord:
         row = self._connection.execute(

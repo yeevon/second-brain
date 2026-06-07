@@ -4,6 +4,7 @@ import pytest
 
 from secondbrain.app import create_capture_handler
 from secondbrain.ledger import RECEIVED, REJECTED_SENSITIVE, Ledger
+from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID
 from secondbrain.worker import CaptureQueue
 
 
@@ -40,6 +41,55 @@ async def test_capture_handler_persists_receipts_and_enqueues_capture(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_live_capture_advances_reconcile_marker_after_commit(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    queue = CaptureQueue()
+    handler = create_capture_handler(
+        make_settings(),
+        ledger,
+        queue,
+        advance_reconcile_marker=True,
+    )
+
+    await handler(make_message(content="Review reconnect handling.", message_id=1002))
+
+    assert ledger.get_system_state(LAST_RECONCILED_MESSAGE_ID) == "1002"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_capture_does_not_send_new_receipt_or_enqueue(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    queue = CaptureQueue()
+    handler = create_capture_handler(make_settings(), ledger, queue)
+    original = make_message(content="Review reconnect handling.", message_id=1001)
+    duplicate = make_message(content="Review reconnect handling again.", message_id=1001)
+
+    await handler(original)
+    await queue.get()
+    await handler(duplicate)
+
+    assert queue.qsize() == 0
+    assert duplicate.channel.sent_contents == []
+    assert ledger.status_counts() == {RECEIVED: 1}
+
+
+@pytest.mark.asyncio
+async def test_saved_receipt_failure_does_not_block_enqueue(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    queue = CaptureQueue()
+    handler = create_capture_handler(make_settings(), ledger, queue)
+    message = make_message(content="Review reconnect handling.")
+    message.channel.fail_send = True
+
+    await handler(message)
+
+    capture_id = await queue.get()
+    capture = ledger.get_capture(capture_id)
+    assert capture.status == RECEIVED
+    assert capture.receipt_message_id is None
+
+
+@pytest.mark.asyncio
 async def test_capture_handler_rejects_sensitive_message_without_enqueueing(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     queue = CaptureQueue()
@@ -64,8 +114,14 @@ async def test_capture_handler_rejects_sensitive_message_without_enqueueing(tmp_
 
 
 class FakeChannel:
-    id = 200
+    def __init__(self):
+        self.id = 200
+        self.fail_send = False
+        self.sent_contents = []
 
     async def send(self, content):
+        if self.fail_send:
+            raise RuntimeError("discord unavailable")
+        self.sent_contents.append(content)
         self.last_content = content
         return SimpleNamespace(id=9001)
