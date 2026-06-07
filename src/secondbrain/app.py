@@ -6,6 +6,7 @@ import asyncio
 from secondbrain.config import Settings
 from secondbrain.discord_capture import create_discord_client, extract_attachment_metadata
 from secondbrain.ledger import Ledger
+from secondbrain.reconcile import reconcile_discord_history
 from secondbrain.secret_screen import screen_text
 from secondbrain.vault_writer import VaultWriter
 from secondbrain.worker import CaptureQueue, enqueue_unfinished_captures, run_capture_worker
@@ -77,7 +78,19 @@ def run_discord_listener() -> None:
                 vault_writer=vault_writer,
             )
         )
+        reconcile_result = await reconcile_discord_history(
+            client=client,
+            settings=settings,
+            ledger=ledger,
+            handle_capture=handle_capture,
+        )
         capture_ids = await enqueue_unfinished_captures(ledger, queue)
+        print("startup Discord history reconciliation complete")
+        print(f"  messages seen: {reconcile_result.seen}")
+        print(f"  captures handled: {reconcile_result.handled}")
+        print(f"  ignored messages: {reconcile_result.ignored}")
+        if reconcile_result.warning:
+            print(f"  warning: {reconcile_result.warning}")
         print("background classifier worker started")
         print(f"  recovered captures queued: {len(capture_ids)}")
 

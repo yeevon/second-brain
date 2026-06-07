@@ -492,7 +492,7 @@ A crash between Discord event receipt and SQLite commit is therefore a temporary
 
 ## 12. SQLite ledger
 
-## 11.1 MVP database rule
+## 12.1 MVP database rule
 
 Use one SQLite repository inside the local Python process.
 
@@ -513,7 +513,7 @@ Never hold a SQLite transaction open across a network request.
 
 The MVP does not need WAL mode. The monolithic local process has low write volume and one mutation path. WAL hardening belongs in the EC2 architecture.
 
-## 11.2 Minimal schema
+## 12.2 Minimal schema
 
 ```sql
 CREATE TABLE captures (
@@ -566,7 +566,7 @@ CREATE INDEX idx_captures_status ON captures(status);
 CREATE INDEX idx_capture_events_capture_id ON capture_events(capture_id);
 ```
 
-## 11.3 Capture statuses
+## 12.3 Capture statuses
 
 ```text
 RECEIVED
@@ -577,7 +577,7 @@ REJECTED_SENSITIVE
 FAILED
 ```
 
-## 11.4 Capture IDs
+## 12.4 Capture IDs
 
 Use the Discord message ID as the true idempotency key.
 
