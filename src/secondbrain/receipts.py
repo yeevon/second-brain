@@ -5,6 +5,7 @@ from typing import Any
 
 from secondbrain.ledger import CaptureRecord
 from secondbrain.models import Classification
+from secondbrain.observability import log_metadata
 
 
 ATTACHMENT_WARNING = "⚠️ Attachment detected but not archived in the MVP."
@@ -44,12 +45,22 @@ async def deliver_final_receipt(client: Any, ledger: Any, capture: CaptureRecord
             await edit_final_receipt(client, capture, content)
             return
         except Exception as exc:
-            print(f"{capture.capture_id} receipt edit failed: {type(exc).__name__}: {exc}")
+            log_metadata(
+                "receipt_edit_failed",
+                capture_id=capture.capture_id,
+                discord_message_id=capture.discord_message_id,
+                error_type=type(exc).__name__,
+            )
 
     try:
         replacement_receipt_message_id = await send_replacement_final_receipt(client, capture, content)
     except Exception as exc:
-        print(f"{capture.capture_id} replacement receipt failed: {type(exc).__name__}: {exc}")
+        log_metadata(
+            "replacement_receipt_failed",
+            capture_id=capture.capture_id,
+            discord_message_id=capture.discord_message_id,
+            error_type=type(exc).__name__,
+        )
         return
 
     ledger.update_capture(

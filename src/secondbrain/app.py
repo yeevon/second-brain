@@ -54,7 +54,12 @@ def create_capture_handler(
                     flags=secret_result.flags,
                 )
             except Exception as exc:
-                print(f"{capture.capture_id} rejection receipt failed: {type(exc).__name__}: {exc}")
+                log_metadata(
+                    "rejection_receipt_failed",
+                    capture_id=capture.capture_id,
+                    discord_message_id=capture.discord_message_id,
+                    error_type=type(exc).__name__,
+                )
             else:
                 ledger.set_receipt_message_id(capture.capture_id, receipt_message_id)
             log_metadata(
@@ -95,7 +100,12 @@ def create_capture_handler(
                 has_attachments=bool(attachment_metadata),
             )
         except Exception as exc:
-            print(f"{capture.capture_id} saved receipt failed: {type(exc).__name__}: {exc}")
+            log_metadata(
+                "saved_receipt_failed",
+                capture_id=capture.capture_id,
+                discord_message_id=capture.discord_message_id,
+                error_type=type(exc).__name__,
+            )
         else:
             ledger.set_receipt_message_id(capture.capture_id, receipt_message_id)
         if enqueue_captures:

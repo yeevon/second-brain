@@ -90,8 +90,6 @@ async def process_capture_once(
             event_type="CAPTURE_FAILED",
             event_payload={"reason": failure_reason},
         )
-        print(f"{capture.capture_id} failed: vault write failed")
-        print(f"  reason: {failure_reason}")
         log_metadata(
             "capture_failed",
             capture_id=capture.capture_id,
@@ -134,8 +132,6 @@ async def process_capture_once(
     )
 
     if status == INBOX:
-        print(f"{capture.capture_id} filed to Inbox: {write_result.note_path}")
-        print(f"  reason: {outcome.inbox_reason}")
         log_metadata(
             "capture_inbox",
             capture_id=capture.capture_id,
@@ -143,6 +139,8 @@ async def process_capture_once(
             status_transition=f"CLASSIFYING->{INBOX}",
             classification_confidence=outcome.classification.confidence,
             derived_note_path=write_result.note_path,
+            inbox_reason_type=_safe_inbox_reason_type(outcome.inbox_reason),
+            error_type=_safe_inbox_error_type(outcome.inbox_reason),
         )
         receipt_content = format_inbox_receipt(
             capture_id=capture.capture_id,
@@ -151,7 +149,6 @@ async def process_capture_once(
             has_attachments=capture.has_attachments,
         )
     else:
-        print(f"{capture.capture_id} filed: {write_result.note_path}")
         log_metadata(
             "capture_filed",
             capture_id=capture.capture_id,
@@ -236,11 +233,11 @@ async def run_capture_worker(
                         ),
                     )
             except Exception as update_exc:
-                print(
-                    f"{capture_id} failed to mark worker error: "
-                    f"{type(update_exc).__name__}: {update_exc}"
+                log_metadata(
+                    "capture_worker_error_update_failed",
+                    capture_id=capture_id,
+                    error_type=type(update_exc).__name__,
                 )
-            print(f"{capture_id} worker error: {type(exc).__name__}: {exc}")
             log_metadata(
                 "capture_worker_error",
                 capture_id=capture_id,
@@ -282,4 +279,34 @@ async def try_deliver_final_receipt(receipt_client: Any, ledger: Ledger, capture
     try:
         await deliver_final_receipt(receipt_client, ledger, capture, content)
     except Exception as exc:
-        print(f"{capture.capture_id} final receipt failed: {type(exc).__name__}: {exc}")
+        log_metadata(
+            "final_receipt_failed",
+            capture_id=capture.capture_id,
+            discord_message_id=capture.discord_message_id,
+            error_type=type(exc).__name__,
+        )
+
+
+def _safe_inbox_reason_type(reason: str | None) -> str:
+    if not reason:
+        return "unspecified"
+    if reason.startswith("classifier failed:"):
+        return "classifier_failure"
+    if reason == "classification confidence below threshold":
+        return "low_confidence"
+    if reason == "classification needs clarification":
+        return "needs_clarification"
+    if reason == "classifier selected inbox":
+        return "classifier_selected_inbox"
+    if reason.startswith("attachment-only capture"):
+        return "attachment_only"
+    return "other"
+
+
+def _safe_inbox_error_type(reason: str | None) -> str | None:
+    if not reason or not reason.startswith("classifier failed:"):
+        return None
+    parts = reason.split(":", maxsplit=2)
+    if len(parts) < 2:
+        return "ClassifierError"
+    return parts[1].strip() or "ClassifierError"

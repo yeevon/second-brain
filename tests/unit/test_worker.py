@@ -99,6 +99,33 @@ async def test_process_capture_routes_classifier_failure_to_inbox(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_classifier_validation_failure_does_not_log_model_output(tmp_path, capsys):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture = insert_capture(ledger)
+
+    await process_capture_once(
+        capture_id=capture.capture_id,
+        settings=make_settings(),
+        ledger=ledger,
+        vault_writer=VaultWriter(tmp_path / "vault"),
+        classifier_client=FakeClient(
+            parsed={
+                "folder": "projects",
+                "body": "DO NOT PRINT THIS CAPTURE TEXT",
+            }
+        ),
+    )
+
+    output = capsys.readouterr().out
+
+    assert "DO NOT PRINT THIS CAPTURE TEXT" not in output
+    assert "classifier_failure" in output
+    assert "error_type" in output
+    assert "timestamp" in output
+    assert capture.capture_id in output
+
+
+@pytest.mark.asyncio
 async def test_process_capture_routes_low_confidence_to_inbox(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     capture = insert_capture(ledger)
@@ -254,8 +281,9 @@ async def test_process_capture_marks_failed_when_vault_write_fails(tmp_path, cap
     assert updated.last_error == "vault write failed: OSError: vault unavailable"
 
     output = capsys.readouterr().out
-    assert f"{capture.capture_id} failed: vault write failed" in output
-    assert "vault unavailable" in output
+    assert "capture_failed" in output
+    assert '"error_type":"OSError"' in output
+    assert "vault unavailable" not in output
 
 
 @pytest.mark.asyncio
