@@ -16,6 +16,7 @@ INBOX = "INBOX"
 REJECTED_SENSITIVE = "REJECTED_SENSITIVE"
 FAILED = "FAILED"
 
+ALL_STATUSES = {RECEIVED, CLASSIFYING, FILED, INBOX, REJECTED_SENSITIVE, FAILED}
 TERMINAL_STATUSES = {FILED, INBOX, REJECTED_SENSITIVE, FAILED}
 
 
@@ -288,6 +289,7 @@ class Ledger:
         updates: list[str] = []
         values: list[Any] = []
         if status is not None:
+            _validate_status(status)
             updates.append("status = ?")
             values.append(status)
         if classification_json is not None:
@@ -390,6 +392,7 @@ class Ledger:
         event_type: str,
         event_payload: dict[str, Any] | None = None,
     ) -> None:
+        self._assert_mutation_lock_held()
         self._connection.execute(
             """
             INSERT INTO capture_events (
@@ -407,6 +410,10 @@ class Ledger:
                 _iso(_now()),
             ),
         )
+
+    def _assert_mutation_lock_held(self) -> None:
+        if not self._lock.locked():
+            raise RuntimeError("ledger mutation lock must be held for SQLite writes")
 
 
 def _record_from_row(row: sqlite3.Row) -> CaptureRecord:
@@ -426,6 +433,11 @@ def _record_from_row(row: sqlite3.Row) -> CaptureRecord:
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+def _validate_status(status: str) -> None:
+    if status not in ALL_STATUSES:
+        raise ValueError(f"unknown capture status: {status}")
 
 
 def _now() -> datetime:
