@@ -27,6 +27,7 @@ class CaptureRecord:
     raw_text: str | None
     redacted_text: str | None
     is_sensitive: bool
+    received_at: datetime
     receipt_message_id: str | None
     derived_note_path: str | None
 
@@ -153,7 +154,7 @@ class Ledger:
                 ),
             )
             self._append_event(capture_id, "CAPTURE_RECEIVED", {"status": RECEIVED})
-            return self.get_capture(capture_id)
+            return _record_from_row(self._get_by_capture_id(capture_id))
 
     def insert_sensitive_rejection(
         self,
@@ -210,7 +211,7 @@ class Ledger:
                 "CAPTURE_REJECTED_SENSITIVE",
                 {"flags": list(sensitivity_flags)},
             )
-            return self.get_capture(capture_id)
+            return _record_from_row(self._get_by_capture_id(capture_id))
 
     def get_capture(self, capture_id: str) -> CaptureRecord:
         row = self._connection.execute(
@@ -297,6 +298,13 @@ class Ledger:
         ).fetchall()
         return [row["capture_id"] for row in rows]
 
+    def captures_by_status(self, status: str) -> list[CaptureRecord]:
+        rows = self._connection.execute(
+            "SELECT * FROM captures WHERE status = ? ORDER BY id",
+            (status,),
+        ).fetchall()
+        return [_record_from_row(row) for row in rows]
+
     def status_counts(self) -> dict[str, int]:
         rows = self._connection.execute(
             "SELECT status, COUNT(*) AS count FROM captures GROUP BY status"
@@ -328,6 +336,15 @@ class Ledger:
             "SELECT * FROM captures WHERE discord_message_id = ?",
             (discord_message_id,),
         ).fetchone()
+
+    def _get_by_capture_id(self, capture_id: str) -> sqlite3.Row:
+        row = self._connection.execute(
+            "SELECT * FROM captures WHERE capture_id = ?",
+            (capture_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"capture not found: {capture_id}")
+        return row
 
     def _next_capture_id(self, received_at: datetime) -> str:
         prefix = f"SB-{received_at.strftime('%Y%m%d')}-"
@@ -373,6 +390,7 @@ def _record_from_row(row: sqlite3.Row) -> CaptureRecord:
         raw_text=row["raw_text"],
         redacted_text=row["redacted_text"],
         is_sensitive=bool(row["is_sensitive"]),
+        received_at=datetime.fromisoformat(row["received_at"]),
         receipt_message_id=row["receipt_message_id"],
         derived_note_path=row["derived_note_path"],
     )
