@@ -2,7 +2,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from secondbrain.discord_capture import create_discord_client, should_capture_message
+from secondbrain.discord_capture import (
+    create_discord_client,
+    extract_attachment_metadata,
+    should_capture_message,
+)
 
 
 def make_settings():
@@ -21,6 +25,7 @@ def make_message(
     author_bot=False,
     webhook_id=None,
     content="capture this",
+    attachments=None,
 ):
     guild = None if guild_id is None else SimpleNamespace(id=guild_id)
     return SimpleNamespace(
@@ -29,11 +34,24 @@ def make_message(
         author=SimpleNamespace(id=author_id, bot=author_bot),
         webhook_id=webhook_id,
         content=content,
+        attachments=attachments or [],
     )
 
 
 def test_should_capture_allowlisted_text_message():
     assert should_capture_message(make_message(), make_settings()) is True
+
+
+def test_should_capture_text_message_with_attachment():
+    message = make_message(attachments=[make_attachment()])
+
+    assert should_capture_message(message, make_settings()) is True
+
+
+def test_should_capture_attachment_only_message():
+    message = make_message(content="", attachments=[make_attachment()])
+
+    assert should_capture_message(message, make_settings()) is True
 
 
 @pytest.mark.parametrize(
@@ -51,6 +69,28 @@ def test_should_capture_allowlisted_text_message():
 )
 def test_should_ignore_messages_that_fail_required_filters(message):
     assert should_capture_message(message, make_settings()) is False
+
+
+def test_extract_attachment_metadata_from_discord_message():
+    message = make_message(
+        attachments=[
+            make_attachment(
+                filename="bug.png",
+                content_type="image/png",
+                size=1234,
+                url="https://cdn.discordapp.com/attachments/bug.png",
+            )
+        ]
+    )
+
+    assert extract_attachment_metadata(message) == [
+        {
+            "filename": "bug.png",
+            "content_type": "image/png",
+            "size": 1234,
+            "url": "https://cdn.discordapp.com/attachments/bug.png",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -79,3 +119,18 @@ async def test_client_does_not_hand_ignored_message_to_capture_handler():
     await client.on_message(make_message(author_id=999))
 
     assert captured == []
+
+
+def make_attachment(
+    *,
+    filename="screenshot.png",
+    content_type="image/png",
+    size=42,
+    url="https://cdn.discordapp.com/attachments/screenshot.png",
+):
+    return SimpleNamespace(
+        filename=filename,
+        content_type=content_type,
+        size=size,
+        url=url,
+    )
