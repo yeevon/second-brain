@@ -105,7 +105,10 @@ async def process_capture_once(
                 receipt_client,
                 ledger,
                 ledger.get_capture(capture.capture_id),
-                format_vault_failure_receipt(capture.capture_id),
+                format_vault_failure_receipt(
+                    capture.capture_id,
+                    has_attachments=capture.has_attachments,
+                ),
             )
         return ProcessingResult(
             capture_id=capture.capture_id,
@@ -222,11 +225,15 @@ async def run_capture_worker(
                     event_payload={"reason": failure_reason},
                 )
                 if receipt_client is not None:
+                    failed_capture = ledger.get_capture(capture_id)
                     await try_deliver_final_receipt(
                         receipt_client,
                         ledger,
-                        ledger.get_capture(capture_id),
-                        format_vault_failure_receipt(capture_id),
+                        failed_capture,
+                        format_vault_failure_receipt(
+                            capture_id,
+                            has_attachments=failed_capture.has_attachments,
+                        ),
                     )
             except Exception as update_exc:
                 print(

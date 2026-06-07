@@ -281,6 +281,34 @@ async def test_process_capture_edits_vault_failure_receipt(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_vault_failure_receipt_preserves_attachment_warning(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture = insert_accepted_capture(
+        ledger,
+        discord_message_id="attachment-failure",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="Review attached sketch.",
+        has_attachments=True,
+        attachment_metadata=[],
+    )
+    ledger.set_receipt_message_id(capture.capture_id, "9001")
+    receipt_client = RecordingReceiptClient()
+
+    await process_capture_once(
+        capture_id=capture.capture_id,
+        settings=make_settings(),
+        ledger=ledger,
+        vault_writer=FailingVaultWriter(),
+        classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
+        receipt_client=receipt_client,
+    )
+
+    assert "⚠️ Attachment detected but not archived in the MVP." in receipt_client.edited_content
+
+
+@pytest.mark.asyncio
 async def test_run_capture_worker_marks_unexpected_errors_failed(tmp_path, monkeypatch):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     capture = insert_capture(ledger)
@@ -409,6 +437,34 @@ async def test_process_capture_replaces_failed_receipt_edit_once(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     capture = insert_capture(ledger)
     ledger.set_receipt_message_id(capture.capture_id, "9001")
+    receipt_client = ReplacementReceiptClient()
+
+    await process_capture_once(
+        capture_id=capture.capture_id,
+        settings=make_settings(),
+        ledger=ledger,
+        vault_writer=VaultWriter(tmp_path / "vault"),
+        classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
+        receipt_client=receipt_client,
+    )
+
+    updated = ledger.get_capture(capture.capture_id)
+    assert updated.receipt_message_id == "9002"
+    assert receipt_client.channel.sent_contents == [
+        (
+            f"✅ {capture.capture_id} filed.\n"
+            "Location: 20_projects / halo\n"
+            "Type: task\n"
+            "Tags: telemetry, websocket"
+        )
+    ]
+    assert event_types(ledger, capture.capture_id)[-1] == "RECEIPT_REPLACED"
+
+
+@pytest.mark.asyncio
+async def test_process_capture_sends_replacement_when_initial_receipt_is_missing(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture = insert_capture(ledger)
     receipt_client = ReplacementReceiptClient()
 
     await process_capture_once(
