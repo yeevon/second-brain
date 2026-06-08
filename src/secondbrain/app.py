@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
+import sys
 
 from secondbrain.api_server import InternalApiServer
 from secondbrain.capture_models import CaptureStatusSnapshot
@@ -183,7 +184,10 @@ async def run_service_runtime(
 
 
 def run_discord_listener() -> None:
-    asyncio.run(run_service())
+    try:
+        asyncio.run(run_service())
+    except KeyboardInterrupt:
+        print("shutdown complete")
 
 
 def format_status_report(settings: Settings, snapshot: CaptureStatusSnapshot) -> str:
@@ -221,12 +225,16 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.add_parser("status", help="report local ledger and vault status")
 
     args = parser.parse_args(argv)
-    if args.command == "run":
-        run_discord_listener()
-        return 0
-    if args.command == "status":
-        run_status()
-        return 0
+    try:
+        if args.command == "run":
+            run_discord_listener()
+            return 0
+        if args.command == "status":
+            run_status()
+            return 0
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     parser.error(f"unknown command: {args.command}")
     return 2
