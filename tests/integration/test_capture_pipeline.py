@@ -13,6 +13,7 @@ from tests.support import (
     ledger_rows,
     make_app,
     note_files,
+    sqlite_dump,
 )
 
 
@@ -155,16 +156,19 @@ async def test_secret_like_input_stores_redacted_rejection_only(
     await ingest_if_allowed(message, test_settings, capture_handler)
     await drain_worker(app)
 
-    output = capsys.readouterr().out
+    captured = capsys.readouterr()
     rows = ledger_rows(ledger)
+    database_dump = sqlite_dump(ledger)
 
     assert len(rows) == 1
     assert rows[0]["status"] == REJECTED_SENSITIVE
     assert rows[0]["is_sensitive"] == 1
     assert rows[0]["raw_text"] is None
     assert rows[0]["redacted_text"] == "api_key=[REDACTED]"
-    assert secret not in rows[0]["redacted_text"]
-    assert secret not in output
+    assert secret not in database_dump
+    assert secret not in captured.out
+    assert secret not in captured.err
+    assert all(secret not in content for _id, content in fake_channel.sent_receipts)
     assert fake_classifier.call_count == 0
     assert note_files(test_settings.vault_path) == []
     assert len(fake_channel.sent_receipts) == 1
@@ -205,6 +209,102 @@ async def test_classifier_failure_routes_capture_to_inbox(
     assert "automatic classification failed" in final_receipt
     assert "Your note is safe." in final_receipt
     assert audit_events(test_settings.vault_path)[0]["event"] == "INBOX"
+
+
+@pytest.mark.asyncio
+async def test_empty_classifier_result_routes_capture_to_inbox(
+    test_settings,
+    ledger,
+    queue,
+    vault_writer,
+    fake_channel,
+    fake_discord,
+    capture_handler,
+):
+    classifier = FakeClassifier({})
+    message = FakeDiscordMessage(
+        message_id=1006,
+        channel=fake_channel,
+        content="This malformed classifier result should not file.",
+    )
+    app = make_app(test_settings, ledger, queue, vault_writer, classifier, fake_discord)
+
+    await ingest_if_allowed(message, test_settings, capture_handler)
+    await drain_worker(app)
+
+    capture = ledger_rows(ledger)[0]
+
+    assert classifier.call_count == 1
+    assert capture["status"] == INBOX
+    assert len(note_files(test_settings.vault_path)) == 1
+    assert note_files(test_settings.vault_path)[0].relative_to(
+        test_settings.vault_path
+    ).as_posix().startswith("00_inbox/")
+
+
+@pytest.mark.asyncio
+async def test_duplicate_event_after_filing_does_not_refile_or_resend(
+    test_settings,
+    ledger,
+    queue,
+    vault_writer,
+    fake_classifier,
+    fake_channel,
+    fake_discord,
+    capture_handler,
+):
+    message = FakeDiscordMessage(
+        message_id=1007,
+        channel=fake_channel,
+        content="Review reconnect handling.",
+    )
+    app = make_app(test_settings, ledger, queue, vault_writer, fake_classifier, fake_discord)
+
+    await ingest_if_allowed(message, test_settings, capture_handler)
+    await drain_worker(app)
+    await ingest_if_allowed(message, test_settings, capture_handler)
+    await drain_worker(app)
+
+    capture = ledger.get_capture(ledger_rows(ledger)[0]["capture_id"])
+
+    assert len(ledger_rows(ledger)) == 1
+    assert len(note_files(test_settings.vault_path)) == 1
+    assert fake_classifier.call_count == 1
+    assert len(fake_channel.sent_receipts) == 1
+    assert event_types(ledger, capture.capture_id).count("CAPTURE_FILED") == 1
+
+
+@pytest.mark.asyncio
+async def test_initial_receipt_send_failure_still_files_and_sends_final_receipt(
+    test_settings,
+    ledger,
+    queue,
+    vault_writer,
+    fake_classifier,
+    fake_channel,
+    fake_discord,
+    capture_handler,
+):
+    fake_channel.fail_initial_send = True
+    message = FakeDiscordMessage(
+        message_id=1008,
+        channel=fake_channel,
+        content="File this even if the first receipt cannot send.",
+    )
+    app = make_app(test_settings, ledger, queue, vault_writer, fake_classifier, fake_discord)
+
+    await ingest_if_allowed(message, test_settings, capture_handler)
+    assert ledger_rows(ledger)[0]["status"] == RECEIVED
+    await drain_worker(app)
+
+    capture = ledger.get_capture(ledger_rows(ledger)[0]["capture_id"])
+
+    assert capture.status == FILED
+    assert len(note_files(test_settings.vault_path)) == 1
+    assert fake_channel.initial_send_failed is True
+    assert len(fake_channel.replacement_receipts) == 1
+    assert fake_channel.replacement_receipts[0][1].startswith(f"✅ {capture.capture_id} filed.")
+    assert capture.receipt_message_id == str(fake_channel.replacement_receipts[0][0])
 
 
 @pytest.mark.asyncio

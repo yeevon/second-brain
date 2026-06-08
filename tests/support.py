@@ -58,6 +58,10 @@ def ledger_rows(ledger):
     return ledger._connection.execute("SELECT * FROM captures ORDER BY id").fetchall()
 
 
+def sqlite_dump(ledger):
+    return "\n".join(ledger._connection.iterdump())
+
+
 def event_types(ledger, capture_id):
     rows = ledger._connection.execute(
         "SELECT event_type FROM capture_events WHERE capture_id = ? ORDER BY id",
