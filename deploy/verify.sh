@@ -30,8 +30,23 @@ if [[ "$ports" != *'"8000/tcp":null'* ]]; then
   exit 1
 fi
 
-if [[ ! -d "$DATA_DIR" ]]; then
-  echo "persistent data directory missing: $DATA_DIR" >&2
+if ! mountpoint -q "$DATA_DIR"; then
+  echo "persistent data volume is not mounted at: $DATA_DIR" >&2
+  exit 1
+fi
+
+mount_source="$(
+  docker inspect \
+    --format '{{range .Mounts}}{{if eq .Destination "/var/lib/second-brain"}}{{.Source}}{{end}}{{end}}' \
+    "$CONTAINER"
+)"
+if [[ "$mount_source" != "$DATA_DIR" ]]; then
+  echo "unexpected ledger bind mount source: $mount_source" >&2
+  exit 1
+fi
+
+if [[ ! -f "$DATA_DIR/ledger.sqlite3" ]]; then
+  echo "ledger file missing from persistent data volume" >&2
   exit 1
 fi
 

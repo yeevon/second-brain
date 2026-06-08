@@ -14,6 +14,72 @@ Use one Ubuntu LTS instance with:
 - no inbound rules for `8000`, `5678`, `80`, or `443`.
 - outbound internet enabled for Discord Gateway access.
 
+### Verify EBS DeleteOnTermination
+
+After launch, confirm the data volume will survive instance termination:
+
+```bash
+aws ec2 describe-instances \
+  --instance-ids <INSTANCE_ID> \
+  --query 'Reservations[].Instances[].BlockDeviceMappings[?DeviceName!=`/dev/sda1`].Ebs.DeleteOnTermination'
+```
+
+Expected: `false`. If not, update it:
+
+```bash
+aws ec2 modify-instance-attribute \
+  --instance-id <INSTANCE_ID> \
+  --block-device-mappings '[{"DeviceName":"<DATA_DEVICE>","Ebs":{"DeleteOnTermination":false}}]'
+```
+
+This is separate from reboot persistence. `/etc/fstab` handles remounting after reboot. `DeleteOnTermination=false` protects the data volume if the EC2 instance itself is terminated and replaced.
+
+### Verify IMDSv2 enforcement
+
+```bash
+aws ec2 describe-instances \
+  --instance-ids <INSTANCE_ID> \
+  --query 'Reservations[].Instances[].MetadataOptions.HttpTokens'
+```
+
+Expected: `"required"`. If not:
+
+```bash
+aws ec2 modify-instance-metadata-options \
+  --instance-id <INSTANCE_ID> \
+  --http-tokens required
+```
+
+### Verify SSH hardening
+
+After logging in, confirm password authentication and root login are disabled:
+
+```bash
+sudo sshd -T | grep -E '^(passwordauthentication|pubkeyauthentication|permitrootlogin) '
+```
+
+Expected:
+
+```text
+passwordauthentication no
+pubkeyauthentication yes
+permitrootlogin no
+```
+
+`permitrootlogin prohibit-password` is acceptable on a standard Ubuntu image if documented.
+
+### Verify security group
+
+Confirm inbound rules allow only SSH from your intentional `/32` source and nothing else:
+
+```bash
+aws ec2 describe-security-groups \
+  --group-ids <SG_ID> \
+  --query 'SecurityGroups[].IpPermissions'
+```
+
+Expected: one rule — TCP port 22 from your `/32` IP. No rules for ports `8000`, `5678`, `80`, or `443`.
+
 Do not run the desktop listener while this EC2 service owns Discord intake.
 
 ## Host Provisioning
@@ -50,12 +116,11 @@ sudo chown -R 10001:10001 /opt/second-brain/data
 
 ## Environment
 
-Create the real environment file on the EC2 host:
+Create the real environment file on the EC2 host (the deploy user owns `/opt/second-brain/config` after provisioning):
 
 ```bash
-sudo install -m 600 deploy/capture-service.env.example /opt/second-brain/config/capture-service.env
-sudo nano /opt/second-brain/config/capture-service.env
-sudo chmod 600 /opt/second-brain/config/capture-service.env
+install -m 600 deploy/capture-service.env.example /opt/second-brain/config/capture-service.env
+nano /opt/second-brain/config/capture-service.env
 ```
 
 Generate the internal token with:

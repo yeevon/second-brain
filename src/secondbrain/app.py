@@ -95,8 +95,9 @@ class CaptureOnlyStartup:
         async with self._startup_lock:
             if self._started:
                 return None
+            result = await self.capture_service.startup_reconcile(client)
             self._started = True
-            return await self.capture_service.startup_reconcile(client)
+            return result
 
 
 async def run_service() -> None:
