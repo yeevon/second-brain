@@ -710,6 +710,56 @@ async def test_repeated_ready_callback_does_not_start_second_worker(tmp_path):
     assert startup.worker_task is first.worker_task
 
 
+@pytest.mark.asyncio
+async def test_enqueue_failure_cancels_started_worker_and_allows_clean_retry(tmp_path, monkeypatch):
+    started = []
+    cancelled = []
+
+    async def recording_worker(**kwargs):
+        marker = object()
+        started.append(marker)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(marker)
+            raise
+
+    monkeypatch.setattr("secondbrain.app.run_capture_worker", recording_worker)
+
+    settings = make_settings(tmp_path)
+    queue = CaptureQueue(maxsize=1)
+    service = FlakyEnqueueService()
+    startup = LocalWorkerStartup(
+        settings=settings,
+        capture_service=service,
+        queue=queue,
+        vault_writer=VaultWriter(settings.vault_path),
+    )
+
+    with pytest.raises(RuntimeError, match="simulated enqueue failure"):
+        await startup.start_once(FakeHistoryClient([]))
+
+    assert startup.worker_task is None
+    assert len(started) == 1
+    assert cancelled == started
+
+    result = await startup.start_once(FakeHistoryClient([]))
+    await asyncio.sleep(0)
+
+    assert result is not None
+    assert result.capture_ids == ["recovered-capture"]
+    assert startup.worker_task is result.worker_task
+    assert len(started) == 2
+    assert cancelled == started[:1]
+    assert not result.worker_task.done()
+
+    result.worker_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await result.worker_task
+
+    assert cancelled == started
+
+
 class FakeChannel:
     def __init__(self):
         self.id = 200
