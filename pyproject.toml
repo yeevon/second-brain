@@ -1,6 +1,6 @@
 [project]
 name = "second-brain"
-version = "1.0.0"
+version = "1.0.1"
 description = "A Discord bot that captures messages and automatically files them into an Obsidian vault using Gemini AI classification."
 readme = "README.md"
 requires-python = ">=3.13"
