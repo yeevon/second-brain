@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -20,20 +19,8 @@ class ReceiptDeliveryResult:
     receipt_message_id: str | None
 
 
-async def send_saved_receipt(
-    message,
-    capture: CaptureRecord,
-    *,
-    has_attachments: bool,
-    downstream_processing_enabled: bool = True,
-) -> str:
-    receipt = await message.channel.send(
-        format_saved_receipt(
-            capture,
-            has_attachments=has_attachments,
-            downstream_processing_enabled=downstream_processing_enabled,
-        )
-    )
+async def send_saved_receipt(message, capture: CaptureRecord, *, has_attachments: bool) -> str:
+    receipt = await message.channel.send(format_saved_receipt(capture, has_attachments=has_attachments))
     return str(receipt.id)
 
 
@@ -99,24 +86,8 @@ async def deliver_final_receipt(
     )
 
 
-def format_saved_receipt(
-    capture: CaptureRecord,
-    *,
-    has_attachments: bool,
-    downstream_processing_enabled: bool = True,
-) -> str:
-    if downstream_processing_enabled:
-        content = (
-            f"⏳ {capture.capture_id} received.\n"
-            "Your note is safely captured.\n"
-            "Queued for downstream filing."
-        )
-    else:
-        content = (
-            f"⏳ {capture.capture_id} received.\n"
-            "Your note is safely captured.\n"
-            "Downstream filing is not enabled yet."
-        )
+def format_saved_receipt(capture: CaptureRecord, *, has_attachments: bool) -> str:
+    content = f"⏳ {capture.capture_id} received.\nYour note is saved. Processing…"
     if has_attachments:
         content += f"\n{ATTACHMENT_WARNING}"
     return content
@@ -161,69 +132,6 @@ def format_sensitive_rejection_receipt() -> str:
         "⚠️ Message rejected.\n"
         "It appears to contain a credential or sensitive identifier.\n"
         "The original text was not saved or sent to Gemini."
-    )
-
-
-def format_downstream_filed_receipt(
-    *,
-    capture_id: str,
-    note_path: str,
-    has_attachments: bool,
-) -> str:
-    content = (
-        f"✅ {capture_id} filed.\n"
-        f"Location: {_location_from_note_path(note_path)}"
-    )
-    if has_attachments:
-        content += f"\n{ATTACHMENT_WARNING}"
-    return content
-
-
-def format_delivery_retry_scheduled_receipt(
-    capture_id: str,
-    *,
-    retry_attempts: int,
-    next_attempt_at: datetime,
-) -> str:
-    return (
-        f"⚠️ {capture_id} captured, but downstream processing was interrupted.\n"
-        "Your original note is safe.\n"
-        f"Automatic retry {retry_attempts} is scheduled."
-    )
-
-
-def format_delivery_retry_exhausted_receipt(capture_id: str) -> str:
-    return (
-        f"❌ {capture_id} captured, but filing failed after repeated retries.\n"
-        "Your original note is safe in the local ledger.\n"
-        "Manual retry is available."
-    )
-
-
-def format_stub_filed_receipt(capture_id: str, *, has_attachments: bool) -> str:
-    content = (
-        f"✅ {capture_id} filed (stub).\n"
-        "Vault write is not yet enabled. Note is durably captured in the ledger."
-    )
-    if has_attachments:
-        content += f"\n{ATTACHMENT_WARNING}"
-    return content
-
-
-def format_stub_inbox_receipt(capture_id: str, *, has_attachments: bool) -> str:
-    content = (
-        f"⚠️ {capture_id} saved to inbox (stub).\n"
-        "Vault write is not yet enabled. Note is durably captured in the ledger."
-    )
-    if has_attachments:
-        content += f"\n{ATTACHMENT_WARNING}"
-    return content
-
-
-def format_manual_retry_accepted_receipt(capture_id: str) -> str:
-    return (
-        f"⏳ {capture_id} queued for manual retry.\n"
-        "Your original note remains safe in the local ledger."
     )
 
 

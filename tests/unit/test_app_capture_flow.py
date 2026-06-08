@@ -1,12 +1,14 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
-from secondbrain.app import format_status_report
+from secondbrain.app import format_status_report, start_local_worker_and_enqueue_recovered
 from secondbrain.capture_service import CaptureService
 from secondbrain.ledger import FAILED, FILED, INBOX, RECEIVED, REJECTED_SENSITIVE, Ledger
 from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID
 from secondbrain.worker import CaptureQueue
+from secondbrain.vault_writer import VaultWriter
 
 
 def make_settings(tmp_path):
@@ -16,6 +18,9 @@ def make_settings(tmp_path):
         discord_allowed_user_id=400,
         classifier_queue_maxsize=10,
         startup_reconcile_limit=10,
+        gemini_api_key="fake",
+        gemini_model="gemini-test",
+        classification_confidence_threshold=0.75,
         ledger_path=tmp_path / "ledger.sqlite3",
         vault_path=tmp_path / "vault",
     )
@@ -207,6 +212,40 @@ def test_format_status_report_includes_operational_counts(tmp_path):
     assert rejected.status == REJECTED_SENSITIVE
 
 
+@pytest.mark.asyncio
+async def test_startup_recovery_does_not_deadlock_when_backlog_exceeds_queue_size(tmp_path):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    first = insert_attachment_only_capture(ledger, discord_message_id="1001")
+    second = insert_attachment_only_capture(ledger, discord_message_id="1002")
+    queue = CaptureQueue(maxsize=1)
+    service = CaptureService(
+        settings=settings,
+        ledger=ledger,
+        notify_capture=queue.enqueue,
+    )
+
+    worker_task, capture_ids = await asyncio.wait_for(
+        start_local_worker_and_enqueue_recovered(
+            settings=settings,
+            capture_service=service,
+            queue=queue,
+            vault_writer=VaultWriter(settings.vault_path),
+        ),
+        timeout=1,
+    )
+
+    try:
+        await asyncio.wait_for(queue.join(), timeout=1)
+    finally:
+        worker_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker_task
+
+    assert capture_ids == [first.capture_id, second.capture_id]
+    assert ledger.status_counts() == {INBOX: 2}
+
+
 class FakeChannel:
     def __init__(self):
         self.id = 200
@@ -271,4 +310,23 @@ def insert_capture(ledger: Ledger, *, discord_message_id: str = "1001"):
         discord_guild_id="300",
         discord_author_id="400",
         raw_text="Review reconnect handling.",
+    ).capture
+
+
+def insert_attachment_only_capture(ledger: Ledger, *, discord_message_id: str):
+    return ledger.insert_accepted_capture(
+        discord_message_id=discord_message_id,
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="",
+        has_attachments=True,
+        attachment_metadata=[
+            {
+                "filename": "image.png",
+                "content_type": "image/png",
+                "size": 100,
+                "url": "https://cdn.discordapp.com/attachments/image.png",
+            }
+        ],
     ).capture

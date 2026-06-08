@@ -10,10 +10,8 @@ from secondbrain.vault_writer import VaultWriter
 import secondbrain.worker as worker_module
 from secondbrain.worker import (
     CaptureQueue,
-    enqueue_capture_ids,
     process_capture_once,
     run_capture_worker,
-    unfinished_capture_ids,
 )
 
 
@@ -374,8 +372,9 @@ async def test_run_capture_worker_marks_unexpected_errors_failed(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_unfinished_capture_ids_resets_classifying_and_returns_work(tmp_path):
+async def test_service_enqueue_unfinished_captures_resets_classifying_and_returns_work(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
+    queue = CaptureQueue()
     first = insert_capture(ledger)
     second = insert_accepted_capture(ledger,
         discord_message_id="1513233540316266518",
@@ -386,15 +385,23 @@ async def test_unfinished_capture_ids_resets_classifying_and_returns_work(tmp_pa
         received_at=datetime(2026, 6, 7, 12, 30, 0, tzinfo=UTC),
     )
     ledger.mark_classifying(second.capture_id)
+    service = CaptureService(
+        settings=make_settings(),
+        ledger=ledger,
+        notify_capture=queue.enqueue,
+    )
 
-    queued = unfinished_capture_ids(make_capture_service(ledger))
+    queued = await service.enqueue_unfinished_captures()
+    first_queued = await queue.get()
+    second_queued = await queue.get()
 
     assert queued == [first.capture_id, second.capture_id]
+    assert [first_queued, second_queued] == queued
     assert ledger.get_capture(second.capture_id).status == RECEIVED
 
 
 @pytest.mark.asyncio
-async def test_enqueue_capture_ids_waits_for_consumer_on_bounded_queue():
+async def test_capture_queue_waits_for_consumer_on_bounded_queue():
     queue = CaptureQueue(maxsize=1)
     consumed = []
 
@@ -404,10 +411,11 @@ async def test_enqueue_capture_ids_waits_for_consumer_on_bounded_queue():
             queue.task_done()
 
     consumer = asyncio.create_task(consume_two())
-    queued = await asyncio.wait_for(enqueue_capture_ids(["one", "two"], queue), timeout=1)
+    await queue.enqueue("one")
+    producer = asyncio.create_task(queue.enqueue("two"))
     await consumer
+    await producer
 
-    assert queued == ["one", "two"]
     assert consumed == ["one", "two"]
 
 

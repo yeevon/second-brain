@@ -16,36 +16,6 @@ class ReconcileResult:
     warning: str | None
 
 
-async def reconcile_discord_history(
-    *,
-    client: discord.Client,
-    settings,
-    last_message_id: str | None,
-    handle_capture,
-) -> ReconcileResult:
-    messages, warning = await fetch_discord_history(
-        client=client,
-        settings=settings,
-        last_message_id=last_message_id,
-    )
-
-    handled = 0
-    ignored = 0
-    for message in messages:
-        created = await handle_capture(message)
-        if created is None:
-            ignored += 1
-        else:
-            handled += 1
-
-    return ReconcileResult(
-        seen=len(messages),
-        handled=handled,
-        ignored=ignored,
-        warning=warning,
-    )
-
-
 async def fetch_discord_history(
     *,
     client: discord.Client,

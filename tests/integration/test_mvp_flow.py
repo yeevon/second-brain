@@ -6,7 +6,7 @@ from secondbrain.capture_service import CaptureService
 from secondbrain.ledger import FILED, RECEIVED, Ledger
 from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID
 from secondbrain.vault_writer import VaultWriter
-from secondbrain.worker import CaptureQueue, enqueue_capture_ids, process_capture_once, unfinished_capture_ids
+from secondbrain.worker import CaptureQueue, process_capture_once
 
 
 VALID_CLASSIFICATION = {
@@ -127,7 +127,7 @@ async def test_startup_catchup_recovers_missed_message_once(tmp_path):
     assert ledger.status_counts() == {RECEIVED: 1}
     assert ledger.get_system_state(LAST_RECONCILED_MESSAGE_ID) == "1001"
 
-    queued = await enqueue_capture_ids(unfinished_capture_ids(service), queue)
+    queued = await service.enqueue_unfinished_captures()
     assert len(queued) == 1
     capture_id = await queue.get()
     await process_capture_once(
