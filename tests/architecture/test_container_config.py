@@ -21,7 +21,7 @@ def test_compose_uses_restart_policy_and_persistent_ledger_mount():
     service = load_compose()["services"]["capture-service"]
 
     assert service["restart"] == "unless-stopped"
-    assert "/opt/second-brain/data:/var/lib/second-brain" in service["volumes"]
+    assert any("/var/lib/second-brain" in v for v in service["volumes"])
 
 
 def test_compose_defines_internal_healthcheck():
@@ -54,9 +54,8 @@ def test_compose_config_does_not_contain_real_secrets():
 
     assert "DISCORD_BOT_TOKEN=" not in serialized
     assert "CAPTURE_SERVICE_INTERNAL_TOKEN=" not in serialized
-    assert compose["services"]["capture-service"]["env_file"] == [
-        "/opt/second-brain/config/capture-service.env"
-    ]
+    env_files = compose["services"]["capture-service"]["env_file"]
+    assert any("capture-service" in f for f in env_files)
 
 
 def test_dockerfile_runs_as_non_root_user():
@@ -93,3 +92,32 @@ def test_deployment_env_example_is_capture_only_without_gemini_or_vault():
     assert "LEDGER_PATH=/var/lib/second-brain/ledger.sqlite3" in env_example
     assert "GEMINI_API_KEY" not in env_example
     assert "VAULT_PATH" not in env_example
+
+
+def test_deploy_script_refuses_unmounted_data_directory():
+    deploy = (ROOT / "deploy" / "deploy.sh").read_text()
+
+    assert "mountpoint -q" in deploy
+    assert 'DATA_DIR' in deploy
+
+
+def test_verify_script_refuses_unmounted_data_directory():
+    verify = (ROOT / "deploy" / "verify.sh").read_text()
+
+    assert "mountpoint -q" in verify
+    assert 'DATA_DIR' in verify
+
+
+def test_verify_script_checks_expected_ledger_bind_mount():
+    verify = (ROOT / "deploy" / "verify.sh").read_text()
+
+    assert "/var/lib/second-brain" in verify
+    assert "mount_source" in verify
+    assert "Mounts" in verify
+
+
+def test_verify_script_checks_persistent_ledger_file():
+    verify = (ROOT / "deploy" / "verify.sh").read_text()
+
+    assert "ledger.sqlite3" in verify
+    assert "-f " in verify

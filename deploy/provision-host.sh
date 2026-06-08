@@ -22,10 +22,10 @@ sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plug
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$DEPLOY_USER"
 
-sudo mkdir -p /opt/second-brain/app /opt/second-brain/config /opt/second-brain/data
+sudo mkdir -p /opt/second-brain/app /opt/second-brain/data
+sudo install -d -m 700 -o "$DEPLOY_USER" -g "$DEPLOY_USER" /opt/second-brain/config
 sudo chown -R "$DEPLOY_USER:$DEPLOY_USER" /opt/second-brain/app
 sudo chown -R 10001:10001 /opt/second-brain/data
-sudo chmod 700 /opt/second-brain/config
 
 echo "Docker installed. Log out and back in for docker group membership to refresh."
 echo "Mount the encrypted EBS data volume at /opt/second-brain/data before starting the service."

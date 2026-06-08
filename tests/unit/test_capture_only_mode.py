@@ -1,9 +1,13 @@
+import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
+from secondbrain.app import CaptureOnlyStartup
 from secondbrain.config import Settings
 from secondbrain.receipts import ATTACHMENT_WARNING, format_saved_receipt
+from secondbrain.reconcile import ReconcileResult
 
 
 BASE_ENV = {
@@ -116,6 +120,41 @@ def test_capture_only_receipt_preserves_attachment_warning():
     )
 
     assert content.endswith(ATTACHMENT_WARNING)
+
+
+@pytest.mark.asyncio
+async def test_capture_only_reconciliation_failure_allows_retry():
+    fake_result = ReconcileResult(seen=1, handled=1, ignored=0, warning=None)
+    mock_service = SimpleNamespace(
+        startup_reconcile=AsyncMock(side_effect=[RuntimeError("transient failure"), fake_result])
+    )
+    startup = CaptureOnlyStartup(capture_service=mock_service)
+    fake_client = object()
+
+    with pytest.raises(RuntimeError, match="transient failure"):
+        await startup.start_once(fake_client)
+
+    result = await startup.start_once(fake_client)
+
+    assert result is fake_result
+    assert mock_service.startup_reconcile.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_capture_only_repeated_ready_callback_reconciles_only_once_after_success():
+    fake_result = ReconcileResult(seen=1, handled=1, ignored=0, warning=None)
+    mock_service = SimpleNamespace(
+        startup_reconcile=AsyncMock(return_value=fake_result)
+    )
+    startup = CaptureOnlyStartup(capture_service=mock_service)
+    fake_client = object()
+
+    first = await startup.start_once(fake_client)
+    second = await startup.start_once(fake_client)
+
+    assert first is fake_result
+    assert second is None
+    assert mock_service.startup_reconcile.call_count == 1
 
 
 def _set_env(monkeypatch, env):

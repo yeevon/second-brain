@@ -6,12 +6,12 @@ services:
     image: second-brain-capture-service:local
     container_name: second-brain-capture-service
     env_file:
-      - /opt/second-brain/config/capture-service.env
+      - ${CAPTURE_SERVICE_ENV_FILE:-/opt/second-brain/config/capture-service.env}
     restart: unless-stopped
     init: true
 
     volumes:
-      - /opt/second-brain/data:/var/lib/second-brain
+      - ${CAPTURE_DATA_DIR:-/opt/second-brain/data}:/var/lib/second-brain
 
     expose:
       - "8000"
