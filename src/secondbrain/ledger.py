@@ -13,11 +13,13 @@ from secondbrain.capture_models import (
     CLASSIFYING,
     FAILED,
     FILED,
+    FORWARDED,
     INBOX,
     RECEIVED,
     REJECTED_SENSITIVE,
     TERMINAL_STATUSES,
     CaptureRecord,
+    TransitionResult,
 )
 
 
@@ -317,6 +319,76 @@ class Ledger:
             if event_type is not None:
                 self._append_event(capture_id, event_type, event_payload or {})
 
+    def transition_capture(
+        self,
+        capture_id: str,
+        *,
+        from_statuses: set[str],
+        to_status: str,
+        classification_json: dict[str, Any] | None = None,
+        derived_note_path: str | None = None,
+        last_error: str | None = None,
+        event_type: str,
+        event_payload: dict[str, Any] | None = None,
+    ) -> TransitionResult | None:
+        _validate_status(to_status)
+        for status in from_statuses:
+            _validate_status(status)
+
+        with self._lock, self._connection:
+            current_row = self._get_by_capture_id(capture_id)
+            previous_status = current_row["status"]
+            if previous_status not in from_statuses:
+                return None
+
+            updates = ["status = ?"]
+            values: list[Any] = [to_status]
+            if classification_json is not None:
+                updates.append("classification_json = ?")
+                values.append(_json_dumps(classification_json))
+            if derived_note_path is not None:
+                updates.append("derived_note_path = ?")
+                values.append(derived_note_path)
+            if last_error is not None:
+                updates.append("last_error = ?")
+                values.append(last_error)
+
+            updates.append("updated_at = ?")
+            values.append(_iso(_now()))
+            values.append(capture_id)
+            values.extend(sorted(from_statuses))
+
+            placeholders = ", ".join("?" for _ in from_statuses)
+            cursor = self._connection.execute(
+                f"""
+                UPDATE captures
+                SET {', '.join(updates)}
+                WHERE capture_id = ?
+                  AND status IN ({placeholders})
+                """,
+                values,
+            )
+            if cursor.rowcount == 0:
+                return None
+            self._append_event(capture_id, event_type, event_payload or {})
+            return TransitionResult(
+                capture_id=capture_id,
+                previous_status=previous_status,
+                status=to_status,
+                changed=True,
+            )
+
+    def capture_classification_json(self, capture_id: str) -> dict[str, Any] | None:
+        row = self._connection.execute(
+            "SELECT classification_json FROM captures WHERE capture_id = ?",
+            (capture_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"capture not found: {capture_id}")
+        if row["classification_json"] is None:
+            return None
+        return json.loads(row["classification_json"])
+
     def enqueueable_capture_ids(self) -> list[str]:
         rows = self._connection.execute(
             "SELECT capture_id FROM captures WHERE status IN (?, ?) ORDER BY id",
@@ -340,6 +412,9 @@ class Ledger:
     def total_captures(self) -> int:
         row = self._connection.execute("SELECT COUNT(*) AS count FROM captures").fetchone()
         return int(row["count"])
+
+    def ping(self) -> None:
+        self._connection.execute("SELECT 1").fetchone()
 
     def last_successful_vault_write(self) -> str | None:
         row = self._connection.execute(

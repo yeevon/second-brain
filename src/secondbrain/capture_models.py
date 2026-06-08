@@ -6,13 +6,14 @@ from typing import Any
 
 
 RECEIVED = "RECEIVED"
+FORWARDED = "FORWARDED"
 CLASSIFYING = "CLASSIFYING"
 FILED = "FILED"
 INBOX = "INBOX"
 REJECTED_SENSITIVE = "REJECTED_SENSITIVE"
 FAILED = "FAILED"
 
-ALL_STATUSES = {RECEIVED, CLASSIFYING, FILED, INBOX, REJECTED_SENSITIVE, FAILED}
+ALL_STATUSES = {RECEIVED, FORWARDED, CLASSIFYING, FILED, INBOX, REJECTED_SENSITIVE, FAILED}
 TERMINAL_STATUSES = {FILED, INBOX, REJECTED_SENSITIVE, FAILED}
 
 
@@ -44,3 +45,11 @@ class CaptureStatusSnapshot:
     failed: int
     last_reconciled_discord_message_id: str | None
     last_successful_vault_write: str | None
+
+
+@dataclass(frozen=True)
+class TransitionResult:
+    capture_id: str
+    previous_status: str
+    status: str
+    changed: bool

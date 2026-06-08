@@ -33,6 +33,11 @@ class Settings:
         self.ledger_path             = os.getenv("LEDGER_PATH")
         self.startup_reconcile_limit = os.getenv("STARTUP_RECONCILE_LIMIT")
 
+        # Internal capture API
+        self.capture_service_internal_token = os.getenv("CAPTURE_SERVICE_INTERNAL_TOKEN")
+        self.capture_api_host               = os.getenv("CAPTURE_API_HOST")
+        self.capture_api_port               = os.getenv("CAPTURE_API_PORT")
+
         # Prompt version
         # self.prompt_version = os.getenv("PROMPT_VERSION")
 
@@ -53,6 +58,9 @@ class Settings:
             and self.vault_path 
             and self.ledger_path 
             and self.startup_reconcile_limit 
+            and self.capture_service_internal_token
+            and self.capture_api_host
+            and self.capture_api_port
             # and self.prompt_version
         ): 
             raise RuntimeError("Missing required configuration")
@@ -64,6 +72,7 @@ class Settings:
         self.classifier_worker_count    = int(self.classifier_worker_count)
         self.classifier_queue_maxsize   = int(self.classifier_queue_maxsize)
         self.startup_reconcile_limit    = int(self.startup_reconcile_limit)
+        self.capture_api_port           = int(self.capture_api_port)
         
         self.classification_confidence_threshold = float(self.classification_confidence_threshold)
 
@@ -73,3 +82,8 @@ class Settings:
         if not self.vault_path.is_absolute():
             raise RuntimeError("Vault path should be absolute path to your vault")
 
+        if not self.capture_service_internal_token.strip():
+            raise RuntimeError("Capture service internal token is required")
+
+        if not (1 <= self.capture_api_port <= 65535):
+            raise RuntimeError("Capture API port must be between 1 and 65535")

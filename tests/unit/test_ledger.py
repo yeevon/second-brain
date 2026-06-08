@@ -7,6 +7,7 @@ from secondbrain.ledger import (
     CLASSIFYING,
     FAILED,
     FILED,
+    FORWARDED,
     INBOX,
     RECEIVED,
     REJECTED_SENSITIVE,
@@ -38,6 +39,7 @@ def test_insert_accepted_capture_creates_received_record(tmp_path):
 def test_capture_status_constants_match_mvp_contract():
     assert ALL_STATUSES == {
         RECEIVED,
+        FORWARDED,
         CLASSIFYING,
         FILED,
         INBOX,
