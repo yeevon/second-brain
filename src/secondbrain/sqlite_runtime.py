@@ -5,7 +5,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import Future
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, TypeVar
 
 from secondbrain.migrations import run_migrations

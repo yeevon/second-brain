@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+import json
 import re
 import sqlite3
 import threading
@@ -732,6 +733,62 @@ def test_sqlite_busy_exhausted_raises_and_leaves_no_partial_row(tmp_path):
         blocker.close()
 
     assert ledger.total_captures() == 0
+    ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# Structured log: retry events include operation_name from Ledger
+# ---------------------------------------------------------------------------
+
+def test_sqlite_busy_retry_log_includes_operation_name(tmp_path, capsys):
+    """sqlite_busy_retry log lines must carry the operation_name supplied by Ledger."""
+    from secondbrain.sqlite_runtime import SQLiteBusyError
+
+    db_path = tmp_path / "ledger.sqlite3"
+    ledger = make_ledger(tmp_path,
+        sqlite_busy_timeout_ms=0,
+        sqlite_busy_retry_attempts=3,
+        sqlite_busy_retry_base_delay_ms=5,
+    )
+
+    blocker = sqlite3.connect(str(db_path), check_same_thread=False)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(SQLiteBusyError):
+            ledger.insert_accepted_capture(
+                discord_message_id="1001",
+                discord_channel_id="200",
+                discord_guild_id="300",
+                discord_author_id="400",
+                raw_text="Log me.",
+            )
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+
+    captured = capsys.readouterr().out
+    # Parse every JSON line and filter by the event field — a string search on
+    # "sqlite_busy_retry" would also match the sqlite_runtime_started line
+    # because pytest embeds the test function name in the tmp_path directory.
+    retry_logs = []
+    for line in captured.splitlines():
+        if not line.strip():
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if data.get("event") == "sqlite_busy_retry":
+            retry_logs.append(data)
+
+    assert len(retry_logs) >= 1
+    log = retry_logs[0]
+    assert log["event"] == "sqlite_busy_retry"
+    assert log["operation_name"] == "insert_accepted_capture"
+    assert log["attempt"] >= 1
+    assert log["error_type"] == "OperationalError"
+    assert isinstance(log["retrying"], bool)
+
     ledger.close()
 
 

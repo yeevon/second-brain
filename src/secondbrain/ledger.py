@@ -54,6 +54,16 @@ class Ledger:
         self._runtime.close()
 
     # ------------------------------------------------------------------
+    # Internal dispatch helpers
+    # ------------------------------------------------------------------
+
+    def _write(self, operation_name: str, operation):
+        return self._runtime.write(operation, operation_name=operation_name)
+
+    def _read(self, operation_name: str, operation):
+        return self._runtime.read(operation, operation_name=operation_name)
+
+    # ------------------------------------------------------------------
     # Writes
     # ------------------------------------------------------------------
 
@@ -70,7 +80,8 @@ class Ledger:
         received_at: datetime | None = None,
     ) -> InsertResult:
         received_at = received_at or _now()
-        return self._runtime.write(
+        return self._write(
+            "insert_accepted_capture",
             lambda conn: self._insert_accepted_capture(
                 conn,
                 discord_message_id=discord_message_id,
@@ -81,7 +92,7 @@ class Ledger:
                 has_attachments=has_attachments,
                 attachment_metadata=attachment_metadata,
                 received_at=received_at,
-            )
+            ),
         )
 
     def insert_sensitive_rejection(
@@ -97,7 +108,8 @@ class Ledger:
     ) -> InsertResult:
         received_at = received_at or _now()
         flags = list(sensitivity_flags)
-        return self._runtime.write(
+        return self._write(
+            "insert_sensitive_rejection",
             lambda conn: self._insert_sensitive_rejection(
                 conn,
                 discord_message_id=discord_message_id,
@@ -107,7 +119,7 @@ class Ledger:
                 redacted_text=redacted_text,
                 sensitivity_flags=flags,
                 received_at=received_at,
-            )
+            ),
         )
 
     def set_receipt_message_id(self, capture_id: str, receipt_message_id: str) -> None:
@@ -119,12 +131,13 @@ class Ledger:
         )
 
     def mark_classifying(self, capture_id: str) -> bool:
-        return self._runtime.write(
-            lambda conn: self._mark_classifying(conn, capture_id)
+        return self._write(
+            "mark_classifying",
+            lambda conn: self._mark_classifying(conn, capture_id),
         )
 
     def reset_classifying_to_received(self) -> int:
-        return self._runtime.write(self._reset_classifying_to_received)
+        return self._write("reset_classifying_to_received", self._reset_classifying_to_received)
 
     def update_capture(
         self,
@@ -143,7 +156,8 @@ class Ledger:
             return
         if status is not None:
             _validate_status(status)
-        self._runtime.write(
+        self._write(
+            "update_capture",
             lambda conn: self._update_capture(
                 conn,
                 capture_id,
@@ -154,7 +168,7 @@ class Ledger:
                 last_error=last_error,
                 event_type=event_type,
                 event_payload=event_payload,
-            )
+            ),
         )
 
     def transition_capture(
@@ -172,7 +186,8 @@ class Ledger:
         _validate_status(to_status)
         for s in from_statuses:
             _validate_status(s)
-        return self._runtime.write(
+        return self._write(
+            "transition_capture",
             lambda conn: self._transition_capture(
                 conn,
                 capture_id,
@@ -183,15 +198,16 @@ class Ledger:
                 last_error=last_error,
                 event_type=event_type,
                 event_payload=event_payload,
-            )
+            ),
         )
 
     def set_system_state(self, key: str, value: str) -> None:
-        self._runtime.write(lambda conn: self._set_system_state(conn, key, value))
+        self._write("set_system_state", lambda conn: self._set_system_state(conn, key, value))
 
     def advance_system_state_snowflake(self, key: str, candidate: str) -> None:
-        self._runtime.write(
-            lambda conn: self._advance_system_state_snowflake(conn, key, candidate)
+        self._write(
+            "advance_system_state_snowflake",
+            lambda conn: self._advance_system_state_snowflake(conn, key, candidate),
         )
 
     # ------------------------------------------------------------------
@@ -199,33 +215,34 @@ class Ledger:
     # ------------------------------------------------------------------
 
     def get_capture(self, capture_id: str) -> CaptureRecord:
-        return self._runtime.read(lambda conn: self._get_capture(conn, capture_id))
+        return self._read("get_capture", lambda conn: self._get_capture(conn, capture_id))
 
     def capture_classification_json(self, capture_id: str) -> dict[str, Any] | None:
-        return self._runtime.read(
-            lambda conn: self._capture_classification_json(conn, capture_id)
+        return self._read(
+            "capture_classification_json",
+            lambda conn: self._capture_classification_json(conn, capture_id),
         )
 
     def enqueueable_capture_ids(self) -> list[str]:
-        return self._runtime.read(self._enqueueable_capture_ids)
+        return self._read("enqueueable_capture_ids", self._enqueueable_capture_ids)
 
     def captures_by_status(self, status: str) -> list[CaptureRecord]:
-        return self._runtime.read(lambda conn: self._captures_by_status(conn, status))
+        return self._read("captures_by_status", lambda conn: self._captures_by_status(conn, status))
 
     def status_counts(self) -> dict[str, int]:
-        return self._runtime.read(self._status_counts)
+        return self._read("status_counts", self._status_counts)
 
     def total_captures(self) -> int:
-        return self._runtime.read(self._total_captures)
+        return self._read("total_captures", self._total_captures)
 
     def ping(self) -> None:
-        self._runtime.read(lambda conn: conn.execute("SELECT 1").fetchone())
+        self._read("ping", lambda conn: conn.execute("SELECT 1").fetchone())
 
     def last_successful_vault_write(self) -> str | None:
-        return self._runtime.read(self._last_successful_vault_write)
+        return self._read("last_successful_vault_write", self._last_successful_vault_write)
 
     def get_system_state(self, key: str) -> str | None:
-        return self._runtime.read(lambda conn: self._get_system_state(conn, key))
+        return self._read("get_system_state", lambda conn: self._get_system_state(conn, key))
 
     # ------------------------------------------------------------------
     # Private write implementations (run inside worker-owned connection)
