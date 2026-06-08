@@ -615,6 +615,36 @@ async def test_runtime_record_stop_called_exactly_once_and_close_is_last():
     assert events[-1] == "capture_service.close"
 
 
+def test_main_reports_configuration_errors_without_traceback(monkeypatch, capsys):
+    def fail_to_run():
+        raise RuntimeError("Missing required configuration: CAPTURE_SERVICE_INTERNAL_TOKEN")
+
+    monkeypatch.setattr("secondbrain.app.run_discord_listener", fail_to_run)
+
+    exit_code = main(["run"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert captured.err == "error: Missing required configuration: CAPTURE_SERVICE_INTERNAL_TOKEN\n"
+    assert "Traceback" not in captured.err
+
+
+def test_run_discord_listener_handles_keyboard_interrupt_cleanly(monkeypatch, capsys):
+    def raise_keyboard_interrupt(coro):
+        coro.close()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        "secondbrain.app.asyncio.run",
+        raise_keyboard_interrupt,
+    )
+
+    run_discord_listener()
+
+    captured = capsys.readouterr()
+    assert "shutdown complete" in captured.out
+
+
 @pytest.mark.asyncio
 async def test_startup_recovery_does_not_deadlock_when_backlog_exceeds_queue_size(tmp_path):
     settings = make_settings(tmp_path)
