@@ -28,6 +28,9 @@ class CaptureQueue:
     def task_done(self) -> None:
         self._queue.task_done()
 
+    async def join(self) -> None:
+        await self._queue.join()
+
     def qsize(self) -> int:
         return self._queue.qsize()
 
