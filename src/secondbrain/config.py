@@ -1,8 +1,13 @@
 import os
 from dotenv import load_dotenv
 from pathlib import Path
+from typing import Literal
 
 load_dotenv()
+
+
+CaptureProcessingMode = Literal["local-full", "capture-only"]
+SUPPORTED_CAPTURE_PROCESSING_MODES = {"local-full", "capture-only"}
 
 
 class Settings:
@@ -38,46 +43,64 @@ class Settings:
         self.capture_api_host               = os.getenv("CAPTURE_API_HOST")
         self.capture_api_port               = os.getenv("CAPTURE_API_PORT")
 
+        # Runtime
+        self.capture_processing_mode = os.getenv("CAPTURE_PROCESSING_MODE")
+
         # Prompt version
         # self.prompt_version = os.getenv("PROMPT_VERSION")
 
         required = {
+            "CAPTURE_PROCESSING_MODE": self.capture_processing_mode,
             "DISCORD_BOT_TOKEN": self.discord_bot_token,
             "DISCORD_GUILD_ID": self.discord_guild_id,
             "DISCORD_CAPTURE_CHANNEL_ID": self.discord_capture_channel_id,
             "DISCORD_ALLOWED_USER_ID": self.discord_allowed_user_id,
-            "GEMINI_API_KEY": self.gemini_api_key,
-            "GEMINI_MODEL": self.gemini_model,
-            "CLASSIFICATION_CONFIDENCE_THRESHOLD": self.classification_confidence_threshold,
-            "CLASSIFIER_WORKER_COUNT": self.classifier_worker_count,
-            "CLASSIFIER_QUEUE_MAXSIZE": self.classifier_queue_maxsize,
-            "VAULT_PATH": self.vault_path,
             "LEDGER_PATH": self.ledger_path,
             "STARTUP_RECONCILE_LIMIT": self.startup_reconcile_limit,
             "CAPTURE_SERVICE_INTERNAL_TOKEN": self.capture_service_internal_token,
             "CAPTURE_API_HOST": self.capture_api_host,
             "CAPTURE_API_PORT": self.capture_api_port,
         }
+        if self.capture_processing_mode == "local-full":
+            required.update(
+                {
+                    "GEMINI_API_KEY": self.gemini_api_key,
+                    "GEMINI_MODEL": self.gemini_model,
+                    "CLASSIFICATION_CONFIDENCE_THRESHOLD": self.classification_confidence_threshold,
+                    "CLASSIFIER_WORKER_COUNT": self.classifier_worker_count,
+                    "CLASSIFIER_QUEUE_MAXSIZE": self.classifier_queue_maxsize,
+                    "VAULT_PATH": self.vault_path,
+                }
+            )
         missing = [name for name, value in required.items() if value is None or not value.strip()]
         if missing:
             raise RuntimeError(f"Missing required configuration: {', '.join(missing)}")
+
+        if self.capture_processing_mode not in SUPPORTED_CAPTURE_PROCESSING_MODES:
+            raise RuntimeError(f"Unsupported capture processing mode: {self.capture_processing_mode}")
         
         
         self.discord_guild_id           = int(self.discord_guild_id)
         self.discord_capture_channel_id = int(self.discord_capture_channel_id)
         self.discord_allowed_user_id    = int(self.discord_allowed_user_id)
-        self.classifier_worker_count    = int(self.classifier_worker_count)
-        self.classifier_queue_maxsize   = int(self.classifier_queue_maxsize)
         self.startup_reconcile_limit    = int(self.startup_reconcile_limit)
         self.capture_api_port           = int(self.capture_api_port)
-        
-        self.classification_confidence_threshold = float(self.classification_confidence_threshold)
 
-        self.vault_path = Path(self.vault_path)
         self.ledger_path = Path(self.ledger_path)
 
-        if not self.vault_path.is_absolute():
-            raise RuntimeError("Vault path should be absolute path to your vault")
+        if self.capture_processing_mode == "local-full":
+            self.classifier_worker_count = int(self.classifier_worker_count)
+            self.classifier_queue_maxsize = int(self.classifier_queue_maxsize)
+            self.classification_confidence_threshold = float(self.classification_confidence_threshold)
+            self.vault_path = Path(self.vault_path)
+
+            if not self.vault_path.is_absolute():
+                raise RuntimeError("Vault path should be absolute path to your vault")
+        else:
+            self.classifier_worker_count = None
+            self.classifier_queue_maxsize = None
+            self.classification_confidence_threshold = None
+            self.vault_path = None
 
         if not self.capture_service_internal_token.strip():
             raise RuntimeError("Capture service internal token is required")

@@ -7,6 +7,7 @@ from secondbrain.config import Settings
 
 
 REQUIRED_ENV = {
+    "CAPTURE_PROCESSING_MODE": "local-full",
     "DISCORD_BOT_TOKEN": "discord-token",
     "DISCORD_GUILD_ID": "100",
     "DISCORD_CAPTURE_CHANNEL_ID": "200",

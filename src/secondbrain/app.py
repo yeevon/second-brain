@@ -84,8 +84,33 @@ class LocalWorkerStartup:
             )
 
 
+class CaptureOnlyStartup:
+    def __init__(self, *, capture_service: CaptureService) -> None:
+        self.capture_service = capture_service
+        self._startup_lock = asyncio.Lock()
+        self._started = False
+        self.worker_task: asyncio.Task | None = None
+
+    async def start_once(self, client) -> ReconcileResult | None:
+        async with self._startup_lock:
+            if self._started:
+                return None
+            self._started = True
+            return await self.capture_service.startup_reconcile(client)
+
+
 async def run_service() -> None:
     settings = Settings()
+    if settings.capture_processing_mode == "local-full":
+        await run_local_full_runtime(settings)
+        return
+    if settings.capture_processing_mode == "capture-only":
+        await run_capture_only_runtime(settings)
+        return
+    raise RuntimeError(f"unsupported capture processing mode: {settings.capture_processing_mode}")
+
+
+async def run_local_full_runtime(settings: Settings) -> None:
     queue = CaptureQueue(maxsize=settings.classifier_queue_maxsize)
     vault_writer = VaultWriter(settings.vault_path)
     capture_service = CaptureService.open(
@@ -128,6 +153,8 @@ async def run_service() -> None:
         start_background_worker_once,
     )
     capture_service.attach_receipt_client(client)
+    print("capture-service runtime mode: local-full")
+    print("downstream processing: enabled")
     print("starting Discord listener")
     print(f"  guild_id: {settings.discord_guild_id}")
     print(f"  capture_channel_id: {settings.discord_capture_channel_id}")
@@ -137,6 +164,61 @@ async def run_service() -> None:
     print(f"  internal API host: {settings.capture_api_host}")
     print(f"  internal API port: {settings.capture_api_port}")
     print("  internal API authentication: configured")
+    print(f"capture-service API started on internal container port {settings.capture_api_port}")
+
+    api_task = asyncio.create_task(api_server.serve())
+    discord_task = asyncio.create_task(client.start(settings.discord_bot_token))
+    await run_service_runtime(
+        api_task=api_task,
+        discord_task=discord_task,
+        api_server=api_server,
+        client=client,
+        startup=startup,
+        capture_service=capture_service,
+    )
+
+
+async def run_capture_only_runtime(settings: Settings) -> None:
+    capture_service = CaptureService.open(settings, notify_capture=None)
+    startup = CaptureOnlyStartup(capture_service=capture_service)
+    api = create_capture_api(
+        capture_service=capture_service,
+        internal_token=settings.capture_service_internal_token,
+    )
+    api_server = InternalApiServer(
+        api,
+        host=settings.capture_api_host,
+        port=settings.capture_api_port,
+    )
+
+    async def reconcile_once() -> None:
+        reconcile_result = await startup.start_once(client)
+        if reconcile_result is None:
+            return
+        print("startup Discord history reconciliation complete")
+        print(f"  messages seen: {reconcile_result.seen}")
+        print(f"  captures handled: {reconcile_result.handled}")
+        print(f"  ignored messages: {reconcile_result.ignored}")
+        if reconcile_result.warning:
+            print(f"  warning: {reconcile_result.warning}")
+        print("Discord listener ready")
+
+    client = create_discord_client(
+        capture_service.handle_gateway_message,
+        reconcile_once,
+    )
+    capture_service.attach_receipt_client(client)
+    print("capture-service runtime mode: capture-only")
+    print("downstream processing: disabled")
+    print("starting Discord listener")
+    print(f"  guild_id: {settings.discord_guild_id}")
+    print(f"  capture_channel_id: {settings.discord_capture_channel_id}")
+    print(f"  allowed_user_id: {settings.discord_allowed_user_id}")
+    print(f"  ledger_path: {settings.ledger_path}")
+    print(f"  internal API host: {settings.capture_api_host}")
+    print(f"  internal API port: {settings.capture_api_port}")
+    print("  internal API authentication: configured")
+    print(f"capture-service API started on internal container port {settings.capture_api_port}")
 
     api_task = asyncio.create_task(api_server.serve())
     discord_task = asyncio.create_task(client.start(settings.discord_bot_token))
