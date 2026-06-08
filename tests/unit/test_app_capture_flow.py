@@ -656,6 +656,19 @@ class FakeHistory:
             raise StopAsyncIteration from exc
 
 
+@pytest.mark.asyncio
+async def test_live_gateway_capture_does_not_advance_reconcile_marker(tmp_path):
+    """handle_gateway_message is the live path and must never touch the history-scan cursor."""
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    queue = CaptureQueue()
+    service = make_service(make_settings(tmp_path), ledger, queue)
+
+    await service.handle_gateway_message(make_message(message_id=1002, content="Live capture."))
+
+    assert ledger.get_system_state(LAST_RECONCILED_MESSAGE_ID) is None
+    assert queue.qsize() == 1
+
+
 def insert_capture(ledger: Ledger, *, discord_message_id: str = "1001"):
     return ledger.insert_accepted_capture(
         discord_message_id=discord_message_id,

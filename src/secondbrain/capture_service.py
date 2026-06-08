@@ -27,7 +27,12 @@ from secondbrain.receipts import (
     send_rejection_receipt,
     send_saved_receipt,
 )
-from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID, ReconcileResult, fetch_discord_history
+from secondbrain.reconcile import (
+    LAST_RECONCILED_MESSAGE_ID,
+    CaptureDisposition,
+    ReconcileResult,
+    reconcile_discord_history,
+)
 from secondbrain.secret_screen import screen_text
 
 
@@ -83,39 +88,26 @@ class CaptureService:
         self._receipt_client = client
 
     async def handle_gateway_message(self, message) -> None:
-        await self._capture_if_allowed(
-            message,
-            notify_downstream=True,
-            advance_reconcile_marker=True,
-        )
+        await self._capture_if_allowed(message, notify_downstream=True)
 
     async def startup_reconcile(self, client: Any) -> ReconcileResult:
-        messages, warning = await fetch_discord_history(
+        return await reconcile_discord_history(
             client=client,
             settings=self.settings,
-            last_message_id=self.last_reconciled_message_id(),
+            ledger=self._ledger,
+            handle_capture=self.make_capture_handler(notify_downstream=False),
+            mode="startup",
+            scan_limit=self.settings.startup_reconcile_limit,
         )
 
-        handled = 0
-        ignored = 0
-        for message in messages:
-            created = await self._capture_if_allowed(
-                message,
-                notify_downstream=False,
-                advance_reconcile_marker=False,
-            )
-            if created:
-                handled += 1
-            else:
-                ignored += 1
-            self._advance_reconcile_marker(str(message.id))
+    def make_capture_handler(self, *, notify_downstream: bool):
+        async def handle(message):
+            return await self._capture_if_allowed(message, notify_downstream=notify_downstream)
+        return handle
 
-        return ReconcileResult(
-            seen=len(messages),
-            handled=handled,
-            ignored=ignored,
-            warning=warning,
-        )
+    @property
+    def ledger(self) -> "Ledger":
+        return self._ledger
 
     async def enqueue_unfinished_captures(self) -> list[str]:
         capture_ids = self.unfinished_capture_ids()
@@ -401,34 +393,26 @@ class CaptureService:
         message,
         *,
         notify_downstream: bool,
-        advance_reconcile_marker: bool = False,
-    ) -> bool | None:
+    ) -> CaptureDisposition | None:
         if not should_capture_message(message, self.settings):
             return None
 
         raw_text = message.content.strip() if message.content else ""
         secret_result = screen_text(raw_text)
         if secret_result.is_sensitive:
-            return await self._persist_sensitive_rejection(
-                message,
-                secret_result,
-                advance_reconcile_marker=advance_reconcile_marker,
-            )
+            return await self._persist_sensitive_rejection(message, secret_result)
 
         return await self._persist_accepted_capture(
             message,
             raw_text=raw_text,
             notify_downstream=notify_downstream,
-            advance_reconcile_marker=advance_reconcile_marker,
         )
 
     async def _persist_sensitive_rejection(
         self,
         message,
         secret_result,
-        *,
-        advance_reconcile_marker: bool,
-    ) -> bool:
+    ) -> CaptureDisposition:
         result = self._ledger.insert_sensitive_rejection(
             discord_message_id=str(message.id),
             discord_channel_id=str(message.channel.id),
@@ -438,11 +422,14 @@ class CaptureService:
             sensitivity_flags=secret_result.flags,
         )
         capture = result.capture
-        if advance_reconcile_marker:
-            self._advance_reconcile_marker(str(message.id))
         if not result.created:
             self._log_duplicate(capture)
-            return False
+            return CaptureDisposition(
+                capture_id=capture.capture_id,
+                created=False,
+                status=capture.status,
+                queued=False,
+            )
 
         try:
             receipt_message_id = await send_rejection_receipt(
@@ -466,7 +453,12 @@ class CaptureService:
             discord_message_id=capture.discord_message_id,
             status_transition=f"NEW->{REJECTED_SENSITIVE}",
         )
-        return True
+        return CaptureDisposition(
+            capture_id=capture.capture_id,
+            created=True,
+            status=capture.status,
+            queued=False,
+        )
 
     async def _persist_accepted_capture(
         self,
@@ -474,8 +466,7 @@ class CaptureService:
         *,
         raw_text: str,
         notify_downstream: bool,
-        advance_reconcile_marker: bool,
-    ) -> bool:
+    ) -> CaptureDisposition:
         attachment_metadata = extract_attachment_metadata(message)
         result = self._ledger.insert_accepted_capture(
             discord_message_id=str(message.id),
@@ -487,11 +478,14 @@ class CaptureService:
             attachment_metadata=attachment_metadata,
         )
         capture = result.capture
-        if advance_reconcile_marker:
-            self._advance_reconcile_marker(str(message.id))
         if not result.created:
             self._log_duplicate(capture)
-            return False
+            return CaptureDisposition(
+                capture_id=capture.capture_id,
+                created=False,
+                status=capture.status,
+                queued=False,
+            )
 
         receipt_message_id = None
         try:
@@ -537,7 +531,12 @@ class CaptureService:
                 discord_message_id=capture.discord_message_id,
                 attachment_count=len(attachment_metadata),
             )
-        return True
+        return CaptureDisposition(
+            capture_id=capture.capture_id,
+            created=True,
+            status=capture.status,
+            queued=queued,
+        )
 
     async def _deliver_final_receipt(self, capture: CaptureRecord, content: str) -> ReceiptDeliveryResult:
         if self._receipt_client is None:
@@ -616,8 +615,8 @@ class CaptureService:
             return False
         return True
 
-    def _advance_reconcile_marker(self, message_id: str) -> None:
-        self._ledger.advance_system_state_snowflake(LAST_RECONCILED_MESSAGE_ID, message_id)
+    def periodic_reconcile_snapshot(self) -> dict:
+        return self._ledger.periodic_reconcile_snapshot()
 
     @staticmethod
     def _log_duplicate(capture: CaptureRecord) -> None:

@@ -12,7 +12,7 @@ from secondbrain.capture_api import create_capture_api
 from secondbrain.capture_service import CaptureService
 from secondbrain.config import Settings
 from secondbrain.discord_capture import create_discord_client
-from secondbrain.reconcile import ReconcileResult
+from secondbrain.reconcile import ReconcileResult, run_periodic_reconciliation
 from secondbrain.vault_writer import VaultWriter
 from secondbrain.worker import CaptureQueue, run_capture_worker
 
@@ -64,6 +64,7 @@ class LocalWorkerStartup:
         self.vault_writer = vault_writer
         self._startup_lock = asyncio.Lock()
         self.worker_task: asyncio.Task | None = None
+        self.periodic_task: asyncio.Task | None = None
 
     async def start_once(self, client) -> LocalWorkerStartupResult | None:
         async with self._startup_lock:
@@ -90,6 +91,7 @@ class CaptureOnlyStartup:
         self._startup_lock = asyncio.Lock()
         self._started = False
         self.worker_task: asyncio.Task | None = None
+        self.periodic_task: asyncio.Task | None = None
 
     async def start_once(self, client) -> ReconcileResult | None:
         async with self._startup_lock:
@@ -148,6 +150,16 @@ async def run_local_full_runtime(settings: Settings) -> None:
             print(f"  warning: {reconcile_result.warning}")
         print("background classifier worker started")
         print(f"  recovered captures queued: {len(capture_ids)}")
+        if startup.periodic_task is None or startup.periodic_task.done():
+            startup.periodic_task = asyncio.create_task(
+                run_periodic_reconciliation(
+                    client=client,
+                    settings=settings,
+                    ledger=capture_service.ledger,
+                    handle_capture=capture_service.make_capture_handler(notify_downstream=True),
+                )
+            )
+            print(f"  periodic reconciliation started (interval: {settings.periodic_reconcile_interval_seconds}s)")
 
     client = create_discord_client(
         capture_service.handle_gateway_message,
@@ -203,6 +215,16 @@ async def run_capture_only_runtime(settings: Settings) -> None:
         if reconcile_result.warning:
             print(f"  warning: {reconcile_result.warning}")
         print("Discord listener ready")
+        if startup.periodic_task is None or startup.periodic_task.done():
+            startup.periodic_task = asyncio.create_task(
+                run_periodic_reconciliation(
+                    client=client,
+                    settings=settings,
+                    ledger=capture_service.ledger,
+                    handle_capture=capture_service.make_capture_handler(notify_downstream=True),
+                )
+            )
+            print(f"  periodic reconciliation started (interval: {settings.periodic_reconcile_interval_seconds}s)")
 
     client = create_discord_client(
         capture_service.handle_gateway_message,
@@ -251,6 +273,12 @@ async def run_service_runtime(
         await api_server.stop()
         await client.close()
 
+        periodic_task = getattr(startup, "periodic_task", None)
+        if periodic_task is not None and not periodic_task.done():
+            periodic_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await periodic_task
+
         worker_task = getattr(startup, "worker_task", None)
         if worker_task is not None and not worker_task.done():
             worker_task.cancel()
@@ -273,30 +301,51 @@ def run_discord_listener() -> None:
         print("shutdown complete")
 
 
-def format_status_report(settings: Settings, snapshot: CaptureStatusSnapshot) -> str:
+def format_status_report(
+    settings: Settings,
+    snapshot: CaptureStatusSnapshot,
+    periodic_snapshot: dict | None = None,
+) -> str:
     last_reconciled = snapshot.last_reconciled_discord_message_id or "none"
     last_successful_vault_write = snapshot.last_successful_vault_write or "none"
-    return "\n".join(
-        [
-            "Second Brain status",
-            f"ledger path: {settings.ledger_path}",
-            f"vault path: {settings.vault_path}",
-            f"total captures: {snapshot.total_captures}",
-            f"captures filed: {snapshot.filed}",
-            f"captures in inbox: {snapshot.inbox}",
-            f"captures rejected as sensitive: {snapshot.rejected_sensitive}",
-            f"captures failed: {snapshot.failed}",
-            f"last reconciled Discord message ID: {last_reconciled}",
-            f"last successful vault write: {last_successful_vault_write}",
+    lines = [
+        "Second Brain status",
+        f"ledger path: {settings.ledger_path}",
+        f"vault path: {settings.vault_path}",
+        f"total captures: {snapshot.total_captures}",
+        f"captures filed: {snapshot.filed}",
+        f"captures in inbox: {snapshot.inbox}",
+        f"captures rejected as sensitive: {snapshot.rejected_sensitive}",
+        f"captures failed: {snapshot.failed}",
+        f"last reconciled Discord message ID: {last_reconciled}",
+        f"last successful vault write: {last_successful_vault_write}",
+    ]
+    if periodic_snapshot is not None:
+        p = periodic_snapshot
+        interval = getattr(settings, "periodic_reconcile_interval_seconds", "?")
+        limit = getattr(settings, "periodic_reconcile_limit", "?")
+        lines += [
+            f"periodic reconciliation interval: {interval} seconds",
+            f"periodic reconciliation scan limit: {limit}",
+            f"periodic reconciliation runs: {p.get('periodic_reconcile_runs_total') or '0'}",
+            f"periodic reconciliation recovered total: {p.get('periodic_reconcile_recovered_total') or '0'}",
+            f"periodic reconciliation duplicate total: {p.get('periodic_reconcile_duplicates_total') or '0'}",
+            f"periodic reconciliation failures: {p.get('periodic_reconcile_failures_total') or '0'}",
+            f"periodic reconciliation limit exceeded count: {p.get('periodic_reconcile_limit_exceeded_total') or '0'}",
+            f"periodic reconciliation last run: {p.get('periodic_reconcile_last_run_at') or 'never'}",
+            f"periodic reconciliation last success: {p.get('periodic_reconcile_last_success_at') or 'never'}",
+            f"periodic reconciliation last recovered count: {p.get('periodic_reconcile_last_recovered_count') or '0'}",
+            f"periodic reconciliation last warning: {p.get('periodic_reconcile_last_warning') or 'none'}",
         ]
-    )
+    return "\n".join(lines)
 
 
 def run_status() -> None:
     settings = Settings()
     capture_service = CaptureService.open(settings)
     try:
-        print(format_status_report(settings, capture_service.status_snapshot()))
+        periodic_snapshot = capture_service.periodic_reconcile_snapshot()
+        print(format_status_report(settings, capture_service.status_snapshot(), periodic_snapshot))
     finally:
         capture_service.close()
 

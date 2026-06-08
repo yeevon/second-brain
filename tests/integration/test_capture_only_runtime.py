@@ -21,6 +21,8 @@ def make_settings(tmp_path):
         discord_capture_channel_id=200,
         discord_allowed_user_id=300,
         startup_reconcile_limit=10,
+        periodic_reconcile_limit=100,
+        periodic_reconcile_interval_seconds=60,
         ledger_path=tmp_path / "runtime" / "ledger.sqlite3",
         capture_service_internal_token="x" * 32,
         capture_api_host="127.0.0.1",

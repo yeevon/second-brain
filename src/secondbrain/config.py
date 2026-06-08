@@ -89,7 +89,9 @@ class Settings:
         self.discord_guild_id           = int(self.discord_guild_id)
         self.discord_capture_channel_id = int(self.discord_capture_channel_id)
         self.discord_allowed_user_id    = int(self.discord_allowed_user_id)
-        self.startup_reconcile_limit    = int(self.startup_reconcile_limit)
+        self.startup_reconcile_limit          = int(self.startup_reconcile_limit)
+        self.periodic_reconcile_interval_seconds = _parse_int_env("PERIODIC_RECONCILE_INTERVAL_SECONDS", "60")
+        self.periodic_reconcile_limit            = _parse_int_env("PERIODIC_RECONCILE_LIMIT", "100")
         self.capture_api_port           = int(self.capture_api_port)
 
         self.ledger_path = Path(self.ledger_path)
@@ -116,6 +118,11 @@ class Settings:
 
         if not (1 <= self.capture_api_port <= 65535):
             raise RuntimeError("Capture API port must be between 1 and 65535")
+
+        if self.periodic_reconcile_interval_seconds < 1:
+            raise RuntimeError("PERIODIC_RECONCILE_INTERVAL_SECONDS must be >= 1")
+        if self.periodic_reconcile_limit < 1:
+            raise RuntimeError("PERIODIC_RECONCILE_LIMIT must be >= 1")
 
         if self.sqlite_busy_timeout_ms < 0:
             raise RuntimeError("SQLITE_BUSY_TIMEOUT_MS must be >= 0")

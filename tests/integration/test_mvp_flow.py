@@ -30,6 +30,7 @@ def make_settings(**overrides):
         "discord_capture_channel_id": 200,
         "discord_allowed_user_id": 300,
         "startup_reconcile_limit": 10,
+        "periodic_reconcile_limit": 10,
         "classifier_queue_maxsize": 10,
         "gemini_api_key": "fake",
         "gemini_model": "gemini-test",
@@ -156,7 +157,7 @@ async def test_crash_before_sqlite_commit_is_recovered_by_next_catchup(tmp_path)
     channel = FakeDiscordChannel([make_message(1001, content="Recover me after crash.")])
     client = FakeDiscordClient(channel)
 
-    async def crashing_handler(message, *, notify_downstream, advance_reconcile_marker=False):
+    async def crashing_handler(message, *, notify_downstream):
         raise RuntimeError("crashed before commit")
 
     service = CaptureService(settings=settings, ledger=ledger)
@@ -385,6 +386,51 @@ class FakeHistory:
 class FakeGeminiClient:
     def __init__(self, *, parsed):
         self.aio = SimpleNamespace(models=FakeGeminiModels(parsed=parsed))
+
+
+@pytest.mark.asyncio
+async def test_skipped_gateway_event_is_recovered_by_periodic_reconciliation(tmp_path):
+    """A message missed by the live gateway is recovered during the next periodic scan."""
+    from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID, _run_one_periodic_pass
+
+    settings = make_settings()
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    queue = CaptureQueue()
+    channel = FakeDiscordChannel(
+        [
+            make_message(1001, content="Live message."),
+            make_message(1002, content="Missed message."),
+        ]
+    )
+    client = FakeDiscordClient(channel)
+    service = CaptureService(
+        settings=settings,
+        ledger=ledger,
+        notify_capture=queue.enqueue,
+        receipt_client=client,
+    )
+
+    # Only message 1001 is delivered via the live gateway (1002 was skipped)
+    await service.handle_gateway_message(make_message(1001, channel=channel, content="Live message."))
+    await queue.get()
+
+    # Live gateway never touches the marker
+    assert ledger.get_system_state(LAST_RECONCILED_MESSAGE_ID) is None
+    assert ledger.total_captures() == 1
+
+    # Periodic scan picks up both messages; 1001 is a duplicate, 1002 is recovered
+    await _run_one_periodic_pass(
+        client=client,
+        settings=settings,
+        ledger=ledger,
+        handle_capture=service.make_capture_handler(notify_downstream=True),
+    )
+
+    assert ledger.total_captures() == 2
+    assert ledger.get_system_state(LAST_RECONCILED_MESSAGE_ID) == "1002"
+    assert ledger.get_system_state("periodic_reconcile_recovered_total") == "1"
+    assert ledger.get_system_state("periodic_reconcile_duplicates_total") == "1"
+    assert queue.qsize() == 1  # only the recovered capture was re-enqueued
 
 
 class FakeGeminiModels:

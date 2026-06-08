@@ -210,6 +210,30 @@ class Ledger:
             lambda conn: self._advance_system_state_snowflake(conn, key, candidate),
         )
 
+    def increment_system_counter(self, key: str, amount: int = 1) -> int:
+        return self._write(
+            "increment_system_counter",
+            lambda conn: self._increment_system_counter(conn, key, amount),
+        )
+
+    def periodic_reconcile_snapshot(self) -> dict:
+        keys = [
+            "periodic_reconcile_runs_total",
+            "periodic_reconcile_recovered_total",
+            "periodic_reconcile_duplicates_total",
+            "periodic_reconcile_ignored_total",
+            "periodic_reconcile_failures_total",
+            "periodic_reconcile_limit_exceeded_total",
+            "periodic_reconcile_last_run_at",
+            "periodic_reconcile_last_success_at",
+            "periodic_reconcile_last_recovered_count",
+            "periodic_reconcile_last_warning",
+        ]
+        return self._read(
+            "periodic_reconcile_snapshot",
+            lambda conn: {key: self._get_system_state(conn, key) for key in keys},
+        )
+
     # ------------------------------------------------------------------
     # Reads
     # ------------------------------------------------------------------
@@ -510,6 +534,26 @@ class Ledger:
             """,
             (key, value, _iso(_now())),
         )
+
+    def _increment_system_counter(
+        self, conn: sqlite3.Connection, key: str, amount: int
+    ) -> int:
+        row = conn.execute(
+            "SELECT value FROM system_state WHERE key = ?", (key,)
+        ).fetchone()
+        current = int(row["value"]) if row is not None else 0
+        new_value = current + amount
+        conn.execute(
+            """
+            INSERT INTO system_state (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, str(new_value), _iso(_now())),
+        )
+        return new_value
 
     def _advance_system_state_snowflake(
         self, conn: sqlite3.Connection, key: str, candidate: str

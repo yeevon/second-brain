@@ -309,7 +309,8 @@ async def test_service_startup_reconcile_recovers_missed_message_once(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_live_gateway_capture_advances_marker_after_durable_commit(tmp_path):
+async def test_capture_row_is_committed_before_receipt_is_sent(tmp_path):
+    """The capture row must be durable (committed) before the receipt is delivered."""
     settings = make_settings(tmp_path)
     ledger = Ledger(settings.ledger_path)
     channel = CommitCheckingChannel()
@@ -322,17 +323,20 @@ async def test_live_gateway_capture_advances_marker_after_durable_commit(tmp_pat
     )
 
     assert channel.commit_observed is True
-    assert service.last_reconciled_message_id() == "1001"
+    assert service.last_reconciled_message_id() is None
 
 
 @pytest.mark.asyncio
-async def test_live_marker_prevents_old_messages_from_starving_offline_recovery(tmp_path):
-    settings = make_settings(tmp_path, startup_reconcile_limit=2)
+async def test_gateway_captured_messages_appear_as_duplicates_in_startup_scan(tmp_path):
+    """Gateway captures don't advance the marker; startup sees them as duplicates from history."""
+    settings = make_settings(tmp_path)
     ledger = Ledger(settings.ledger_path)
     service = CaptureService(settings=settings, ledger=ledger)
 
     await service.handle_gateway_message(FakeDiscordMessage(message_id=1001, content="Live one."))
     await service.handle_gateway_message(FakeDiscordMessage(message_id=1002, content="Live two."))
+
+    assert service.last_reconciled_message_id() is None
 
     channel = FakeDiscordChannel(
         [
@@ -343,9 +347,9 @@ async def test_live_marker_prevents_old_messages_from_starving_offline_recovery(
     )
     result = await service.startup_reconcile(FakeDiscordClient(channel))
 
-    assert result.seen == 1
-    assert result.handled == 1
-    assert result.ignored == 0
+    assert result.seen == 3
+    assert result.duplicates == 2
+    assert result.recovered == 1
     assert service.total_captures() == 3
     assert service.last_reconciled_message_id() == "1003"
 
@@ -368,14 +372,17 @@ async def test_startup_reconcile_counts_existing_duplicate_as_ignored(tmp_path):
 
     result = await service.startup_reconcile(FakeDiscordClient(channel))
 
-    assert result.handled == 0
-    assert result.ignored == 1
+    assert result.handled == 1
+    assert result.duplicates == 1
+    assert result.recovered == 0
+    assert result.ignored == 0
     assert service.total_captures() == 1
     assert channel.sent_receipts == []
 
 
 @pytest.mark.asyncio
-async def test_live_marker_advances_even_when_downstream_notification_fails_after_commit(tmp_path):
+async def test_capture_row_is_durable_even_when_downstream_notification_fails(tmp_path):
+    """Row is committed before downstream notify; gateway never advances the reconcile marker."""
     async def fail_notify(capture_id):
         raise RuntimeError("downstream unavailable")
 
@@ -389,7 +396,7 @@ async def test_live_marker_advances_even_when_downstream_notification_fails_afte
         )
 
     assert service.total_captures() == 1
-    assert service.last_reconciled_message_id() == "1001"
+    assert service.last_reconciled_message_id() is None
 
 
 def test_reconcile_marker_never_moves_backward(tmp_path):
@@ -397,8 +404,9 @@ def test_reconcile_marker_never_moves_backward(tmp_path):
     ledger = Ledger(settings.ledger_path)
     service = CaptureService(settings=settings, ledger=ledger)
 
-    service._advance_reconcile_marker("1002")
-    service._advance_reconcile_marker("1001")
+    from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID
+    ledger.advance_system_state_snowflake(LAST_RECONCILED_MESSAGE_ID, "1002")
+    ledger.advance_system_state_snowflake(LAST_RECONCILED_MESSAGE_ID, "1001")
 
     assert service.last_reconciled_message_id() == "1002"
 
