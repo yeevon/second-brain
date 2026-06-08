@@ -615,6 +615,40 @@ async def test_runtime_record_stop_called_exactly_once_and_close_is_last():
     assert events[-1] == "capture_service.close"
 
 
+@pytest.mark.asyncio
+async def test_startup_recovery_does_not_deadlock_when_backlog_exceeds_queue_size(tmp_path):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    first = insert_attachment_only_capture(ledger, discord_message_id="1001")
+    second = insert_attachment_only_capture(ledger, discord_message_id="1002")
+    queue = CaptureQueue(maxsize=1)
+    service = CaptureService(
+        settings=settings,
+        ledger=ledger,
+        notify_capture=queue.enqueue,
+    )
+
+    worker_task, capture_ids = await asyncio.wait_for(
+        start_local_worker_and_enqueue_recovered(
+            settings=settings,
+            capture_service=service,
+            queue=queue,
+            vault_writer=VaultWriter(settings.vault_path),
+        ),
+        timeout=1,
+    )
+
+    try:
+        await asyncio.wait_for(queue.join(), timeout=1)
+    finally:
+        worker_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker_task
+
+    assert capture_ids == [first.capture_id, second.capture_id]
+    assert ledger.status_counts() == {INBOX: 2}
+
+
 class FakeChannel:
     def __init__(self):
         self.id = 200
