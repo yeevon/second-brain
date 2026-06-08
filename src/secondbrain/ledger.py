@@ -8,35 +8,22 @@ import sqlite3
 from threading import Lock
 from typing import Any
 
+from secondbrain.capture_models import (
+    ALL_STATUSES,
+    CLASSIFYING,
+    FAILED,
+    FILED,
+    FORWARDED,
+    INBOX,
+    RECEIVED,
+    REJECTED_SENSITIVE,
+    TERMINAL_STATUSES,
+    CaptureRecord,
+    TransitionResult,
+)
 
-RECEIVED = "RECEIVED"
-CLASSIFYING = "CLASSIFYING"
-FILED = "FILED"
-INBOX = "INBOX"
-REJECTED_SENSITIVE = "REJECTED_SENSITIVE"
-FAILED = "FAILED"
 
-ALL_STATUSES = {RECEIVED, CLASSIFYING, FILED, INBOX, REJECTED_SENSITIVE, FAILED}
-TERMINAL_STATUSES = {FILED, INBOX, REJECTED_SENSITIVE, FAILED}
-
-
-@dataclass(frozen=True)
-class CaptureRecord:
-    capture_id: str
-    discord_message_id: str
-    discord_channel_id: str
-    discord_guild_id: str
-    discord_author_id: str
-    status: str
-    raw_text: str | None
-    redacted_text: str | None
-    is_sensitive: bool
-    has_attachments: bool
-    attachment_metadata: list[dict[str, Any]]
-    received_at: datetime
-    receipt_message_id: str | None
-    derived_note_path: str | None
-    last_error: str | None
+UNSET = object()
 
 
 @dataclass(frozen=True)
@@ -335,10 +322,80 @@ class Ledger:
             if event_type is not None:
                 self._append_event(capture_id, event_type, event_payload or {})
 
+    def transition_capture(
+        self,
+        capture_id: str,
+        *,
+        from_statuses: set[str],
+        to_status: str,
+        classification_json: dict[str, Any] | None | object = UNSET,
+        derived_note_path: str | None | object = UNSET,
+        last_error: str | None | object = UNSET,
+        event_type: str,
+        event_payload: dict[str, Any] | None = None,
+    ) -> TransitionResult | None:
+        _validate_status(to_status)
+        for status in from_statuses:
+            _validate_status(status)
+
+        with self._lock, self._connection:
+            current_row = self._get_by_capture_id(capture_id)
+            previous_status = current_row["status"]
+            if previous_status not in from_statuses:
+                return None
+
+            updates = ["status = ?"]
+            values: list[Any] = [to_status]
+            if classification_json is not UNSET:
+                updates.append("classification_json = ?")
+                values.append(None if classification_json is None else _json_dumps(classification_json))
+            if derived_note_path is not UNSET:
+                updates.append("derived_note_path = ?")
+                values.append(derived_note_path)
+            if last_error is not UNSET:
+                updates.append("last_error = ?")
+                values.append(last_error)
+
+            updates.append("updated_at = ?")
+            values.append(_iso(_now()))
+            values.append(capture_id)
+            values.extend(sorted(from_statuses))
+
+            placeholders = ", ".join("?" for _ in from_statuses)
+            cursor = self._connection.execute(
+                f"""
+                UPDATE captures
+                SET {', '.join(updates)}
+                WHERE capture_id = ?
+                  AND status IN ({placeholders})
+                """,
+                values,
+            )
+            if cursor.rowcount == 0:
+                return None
+            self._append_event(capture_id, event_type, event_payload or {})
+            return TransitionResult(
+                capture_id=capture_id,
+                previous_status=previous_status,
+                status=to_status,
+                changed=True,
+            )
+
+    def capture_classification_json(self, capture_id: str) -> dict[str, Any] | None:
+        row = self._connection.execute(
+            "SELECT classification_json FROM captures WHERE capture_id = ?",
+            (capture_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"capture not found: {capture_id}")
+        if row["classification_json"] is None:
+            return None
+        return json.loads(row["classification_json"])
+
     def enqueueable_capture_ids(self) -> list[str]:
         rows = self._connection.execute(
-            "SELECT capture_id FROM captures WHERE status IN (?, ?) ORDER BY id",
-            (RECEIVED, CLASSIFYING),
+            "SELECT capture_id FROM captures WHERE status IN (?, ?, ?) ORDER BY id",
+            (RECEIVED, FORWARDED, CLASSIFYING),
         ).fetchall()
         return [row["capture_id"] for row in rows]
 
@@ -358,6 +415,9 @@ class Ledger:
     def total_captures(self) -> int:
         row = self._connection.execute("SELECT COUNT(*) AS count FROM captures").fetchone()
         return int(row["count"])
+
+    def ping(self) -> None:
+        self._connection.execute("SELECT 1").fetchone()
 
     def last_successful_vault_write(self) -> str | None:
         row = self._connection.execute(
@@ -383,6 +443,26 @@ class Ledger:
                     updated_at = excluded.updated_at
                 """,
                 (key, value, _iso(_now())),
+            )
+
+    def advance_system_state_snowflake(self, key: str, candidate: str) -> None:
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT value FROM system_state WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is not None and int(candidate) <= int(row["value"]):
+                return
+
+            self._connection.execute(
+                """
+                INSERT INTO system_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (key, candidate, _iso(_now())),
             )
 
     def get_system_state(self, key: str) -> str | None:

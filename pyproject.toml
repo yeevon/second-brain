@@ -1,15 +1,20 @@
 [project]
 name = "second-brain"
-version = "1.0.0"
+version = "1.0.1"
 description = "A Discord bot that captures messages and automatically files them into an Obsidian vault using Gemini AI classification."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "discord-py>=2.7.1",
+    "fastapi>=0.136.3",
     "google-genai>=2.8.0",
     "pydantic>=2.13.4",
     "python-dotenv>=1.2.2",
+    "uvicorn>=0.49.0",
 ]
+
+[project.scripts]
+secondbrain = "secondbrain.app:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -17,8 +22,10 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
+    "pyyaml>=6.0.3",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -2,11 +2,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from secondbrain.app import create_capture_handler
+from secondbrain.capture_service import CaptureService
 from secondbrain.ledger import FILED, RECEIVED, Ledger
-from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID, reconcile_discord_history
+from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID
 from secondbrain.vault_writer import VaultWriter
-from secondbrain.worker import CaptureQueue, enqueue_capture_ids, process_capture_once, unfinished_capture_ids
+from secondbrain.worker import CaptureQueue, process_capture_once
 
 
 VALID_CLASSIFICATION = {
@@ -47,10 +47,10 @@ async def test_happy_path_capture_to_vault_edits_original_receipt(tmp_path):
     channel = FakeDiscordChannel()
     client = FakeDiscordClient(channel)
     classifier_client = FakeGeminiClient(parsed=VALID_CLASSIFICATION)
-    handler = create_capture_handler(settings, ledger, queue)
+    service = CaptureService(settings=settings, ledger=ledger, notify_capture=queue.enqueue, receipt_client=client)
     message = make_message(1001, channel=channel, content="Review reconnect handling.")
 
-    await handler(message)
+    await service.handle_gateway_message(message)
 
     capture_id = await queue.get()
     capture = ledger.get_capture(capture_id)
@@ -65,10 +65,9 @@ async def test_happy_path_capture_to_vault_edits_original_receipt(tmp_path):
     await process_capture_once(
         capture_id=capture_id,
         settings=settings,
-        ledger=ledger,
+        capture_service=service,
         vault_writer=vault_writer,
         classifier_client=classifier_client,
-        receipt_client=client,
     )
 
     filed = ledger.get_capture(capture_id)
@@ -101,9 +100,9 @@ async def test_saved_receipt_is_sent_only_after_sqlite_commit(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     queue = CaptureQueue()
     channel = CommitCheckingDiscordChannel(ledger)
-    handler = create_capture_handler(settings, ledger, queue)
+    service = CaptureService(settings=settings, ledger=ledger, notify_capture=queue.enqueue)
 
-    await handler(make_message(1001, channel=channel, content="Review reconnect handling."))
+    await service.handle_gateway_message(make_message(1001, channel=channel, content="Review reconnect handling."))
 
     capture_id = await queue.get()
     assert channel.commit_observed is True
@@ -119,38 +118,27 @@ async def test_startup_catchup_recovers_missed_message_once(tmp_path):
         [make_message(1001, content="Missed while app was stopped.")]
     )
     client = FakeDiscordClient(channel)
-    handler = create_capture_handler(settings, ledger, queue, enqueue_captures=False)
+    service = CaptureService(settings=settings, ledger=ledger, notify_capture=queue.enqueue, receipt_client=client)
 
-    result = await reconcile_discord_history(
-        client=client,
-        settings=settings,
-        ledger=ledger,
-        handle_capture=handler,
-    )
+    result = await service.startup_reconcile(client)
 
     assert result.handled == 1
     assert queue.qsize() == 0
     assert ledger.status_counts() == {RECEIVED: 1}
     assert ledger.get_system_state(LAST_RECONCILED_MESSAGE_ID) == "1001"
 
-    queued = await enqueue_capture_ids(unfinished_capture_ids(ledger), queue)
+    queued = await service.enqueue_unfinished_captures()
     assert len(queued) == 1
     capture_id = await queue.get()
     await process_capture_once(
         capture_id=capture_id,
         settings=settings,
-        ledger=ledger,
+        capture_service=service,
         vault_writer=VaultWriter(tmp_path / "vault"),
         classifier_client=FakeGeminiClient(parsed=VALID_CLASSIFICATION),
-        receipt_client=client,
     )
 
-    second_result = await reconcile_discord_history(
-        client=client,
-        settings=settings,
-        ledger=ledger,
-        handle_capture=handler,
-    )
+    second_result = await service.startup_reconcile(client)
 
     notes = [path for path in (tmp_path / "vault").rglob("*.md") if "99_log" not in path.parts]
     assert second_result.seen == 0
@@ -165,28 +153,22 @@ async def test_crash_before_sqlite_commit_is_recovered_by_next_catchup(tmp_path)
     channel = FakeDiscordChannel([make_message(1001, content="Recover me after crash.")])
     client = FakeDiscordClient(channel)
 
-    async def crashing_handler(message):
+    async def crashing_handler(message, *, notify_downstream, advance_reconcile_marker=False):
         raise RuntimeError("crashed before commit")
 
+    service = CaptureService(settings=settings, ledger=ledger)
+    original_capture = service._capture_if_allowed
+    service._capture_if_allowed = crashing_handler
     with pytest.raises(RuntimeError, match="crashed before commit"):
-        await reconcile_discord_history(
-            client=client,
-            settings=settings,
-            ledger=ledger,
-            handle_capture=crashing_handler,
-        )
+        await service.startup_reconcile(client)
+    service._capture_if_allowed = original_capture
 
     assert ledger.status_counts() == {}
     assert ledger.get_system_state(LAST_RECONCILED_MESSAGE_ID) is None
 
     queue = CaptureQueue()
-    handler = create_capture_handler(settings, ledger, queue, enqueue_captures=False)
-    result = await reconcile_discord_history(
-        client=client,
-        settings=settings,
-        ledger=ledger,
-        handle_capture=handler,
-    )
+    service = CaptureService(settings=settings, ledger=ledger, notify_capture=queue.enqueue)
+    result = await service.startup_reconcile(client)
 
     assert result.handled == 1
     assert ledger.status_counts() == {RECEIVED: 1}
@@ -208,14 +190,9 @@ async def test_old_bot_receipts_are_ignored_during_catchup(tmp_path):
         ]
     )
     client = FakeDiscordClient(channel)
-    handler = create_capture_handler(settings, ledger, queue, enqueue_captures=False)
+    service = CaptureService(settings=settings, ledger=ledger, notify_capture=queue.enqueue)
 
-    result = await reconcile_discord_history(
-        client=client,
-        settings=settings,
-        ledger=ledger,
-        handle_capture=handler,
-    )
+    result = await service.startup_reconcile(client)
 
     assert result.ignored == 1
     assert ledger.status_counts() == {}
@@ -231,10 +208,10 @@ async def test_two_rapid_messages_produce_two_rows_and_two_notes(tmp_path):
     vault_writer = VaultWriter(tmp_path / "vault")
     channel = FakeDiscordChannel()
     client = FakeDiscordClient(channel)
-    handler = create_capture_handler(settings, ledger, queue)
+    service = CaptureService(settings=settings, ledger=ledger, notify_capture=queue.enqueue, receipt_client=client)
 
-    await handler(make_message(1001, channel=channel, content="First rapid note."))
-    await handler(make_message(1002, channel=channel, content="Second rapid note."))
+    await service.handle_gateway_message(make_message(1001, channel=channel, content="First rapid note."))
+    await service.handle_gateway_message(make_message(1002, channel=channel, content="Second rapid note."))
 
     first_capture_id = await queue.get()
     second_capture_id = await queue.get()
@@ -242,10 +219,9 @@ async def test_two_rapid_messages_produce_two_rows_and_two_notes(tmp_path):
         await process_capture_once(
             capture_id=capture_id,
             settings=settings,
-            ledger=ledger,
+            capture_service=service,
             vault_writer=vault_writer,
             classifier_client=FakeGeminiClient(parsed=VALID_CLASSIFICATION),
-            receipt_client=client,
         )
 
     notes = [path for path in (tmp_path / "vault").rglob("*.md") if "99_log" not in path.parts]

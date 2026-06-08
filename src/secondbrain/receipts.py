@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
-from secondbrain.ledger import CaptureRecord
+from secondbrain.capture_models import CaptureRecord
 from secondbrain.models import Classification
 from secondbrain.observability import log_metadata
 
@@ -11,8 +12,27 @@ from secondbrain.observability import log_metadata
 ATTACHMENT_WARNING = "⚠️ Attachment detected but not archived in the MVP."
 
 
-async def send_saved_receipt(message, capture: CaptureRecord, *, has_attachments: bool) -> str:
-    receipt = await message.channel.send(format_saved_receipt(capture, has_attachments=has_attachments))
+@dataclass(frozen=True)
+class ReceiptDeliveryResult:
+    delivered: bool
+    replaced: bool
+    receipt_message_id: str | None
+
+
+async def send_saved_receipt(
+    message,
+    capture: CaptureRecord,
+    *,
+    has_attachments: bool,
+    downstream_processing_enabled: bool = True,
+) -> str:
+    receipt = await message.channel.send(
+        format_saved_receipt(
+            capture,
+            has_attachments=has_attachments,
+            downstream_processing_enabled=downstream_processing_enabled,
+        )
+    )
     return str(receipt.id)
 
 
@@ -39,11 +59,19 @@ async def send_replacement_final_receipt(client, capture: CaptureRecord, content
     return str(receipt.id)
 
 
-async def deliver_final_receipt(client: Any, ledger: Any, capture: CaptureRecord, content: str) -> None:
+async def deliver_final_receipt(
+    client: Any,
+    capture: CaptureRecord,
+    content: str,
+) -> ReceiptDeliveryResult:
     if capture.receipt_message_id:
         try:
             await edit_final_receipt(client, capture, content)
-            return
+            return ReceiptDeliveryResult(
+                delivered=True,
+                replaced=False,
+                receipt_message_id=capture.receipt_message_id,
+            )
         except Exception as exc:
             log_metadata(
                 "receipt_edit_failed",
@@ -61,21 +89,29 @@ async def deliver_final_receipt(client: Any, ledger: Any, capture: CaptureRecord
             discord_message_id=capture.discord_message_id,
             error_type=type(exc).__name__,
         )
-        return
+        return ReceiptDeliveryResult(delivered=False, replaced=False, receipt_message_id=None)
 
-    ledger.update_capture(
-        capture.capture_id,
+    return ReceiptDeliveryResult(
+        delivered=True,
+        replaced=True,
         receipt_message_id=replacement_receipt_message_id,
-        event_type="RECEIPT_REPLACED",
-        event_payload={
-            "old_receipt_message_id": capture.receipt_message_id,
-            "new_receipt_message_id": replacement_receipt_message_id,
-        },
     )
 
 
-def format_saved_receipt(capture: CaptureRecord, *, has_attachments: bool) -> str:
-    content = f"⏳ {capture.capture_id} received.\nYour note is saved. Processing…"
+def format_saved_receipt(
+    capture: CaptureRecord,
+    *,
+    has_attachments: bool,
+    downstream_processing_enabled: bool = True,
+) -> str:
+    if downstream_processing_enabled:
+        content = f"⏳ {capture.capture_id} received.\nYour note is saved. Processing…"
+    else:
+        content = (
+            f"⏳ {capture.capture_id} received.\n"
+            "Your note is safely captured.\n"
+            "Downstream filing is not enabled yet."
+        )
     if has_attachments:
         content += f"\n{ATTACHMENT_WARNING}"
     return content

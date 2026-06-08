@@ -2,16 +2,9 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
+from secondbrain.capture_models import FAILED, FILED, INBOX
 from secondbrain.classifier import classify_capture
-from secondbrain.ledger import FAILED, FILED, INBOX, Ledger
 from secondbrain.models import Classification
-from secondbrain.observability import log_metadata
-from secondbrain.receipts import (
-    deliver_final_receipt,
-    format_filed_receipt,
-    format_inbox_receipt,
-    format_vault_failure_receipt,
-)
 from secondbrain.vault_writer import VaultWriter
 
 
@@ -27,6 +20,9 @@ class CaptureQueue:
 
     def task_done(self) -> None:
         self._queue.task_done()
+
+    async def join(self) -> None:
+        await self._queue.join()
 
     def qsize(self) -> int:
         return self._queue.qsize()
@@ -44,21 +40,14 @@ async def process_capture_once(
     *,
     capture_id: str,
     settings: Any,
-    ledger: Ledger,
+    capture_service: Any,
     vault_writer: VaultWriter,
     classifier_client: Any | None = None,
-    receipt_client: Any | None = None,
 ) -> ProcessingResult | None:
-    if not ledger.mark_classifying(capture_id):
+    capture = capture_service.claim_for_processing(capture_id)
+    if capture is None:
         return None
 
-    capture = ledger.get_capture(capture_id)
-    log_metadata(
-        "capture_classifying",
-        capture_id=capture.capture_id,
-        discord_message_id=capture.discord_message_id,
-        status_transition="RECEIVED->CLASSIFYING",
-    )
     if capture.raw_text is None:
         raise ValueError(f"capture has no raw text: {capture_id}")
 
@@ -82,32 +71,11 @@ async def process_capture_once(
         )
     except Exception as exc:
         failure_reason = f"vault write failed: {type(exc).__name__}: {exc}"
-        ledger.update_capture(
-            capture.capture_id,
-            status=FAILED,
-            classification_json=outcome.classification.model_dump(mode="json"),
-            last_error=failure_reason,
-            event_type="CAPTURE_FAILED",
-            event_payload={"reason": failure_reason},
-        )
-        log_metadata(
-            "capture_failed",
+        await capture_service.complete_failed(
             capture_id=capture.capture_id,
-            discord_message_id=capture.discord_message_id,
-            status_transition=f"CLASSIFYING->{FAILED}",
-            classification_confidence=outcome.classification.confidence,
-            error_type=type(exc).__name__,
+            reason=failure_reason,
+            classification=outcome.classification,
         )
-        if receipt_client is not None:
-            await try_deliver_final_receipt(
-                receipt_client,
-                ledger,
-                ledger.get_capture(capture.capture_id),
-                format_vault_failure_receipt(
-                    capture.capture_id,
-                    has_attachments=capture.has_attachments,
-                ),
-            )
         return ProcessingResult(
             capture_id=capture.capture_id,
             status=FAILED,
@@ -116,60 +84,18 @@ async def process_capture_once(
         )
 
     status = INBOX if outcome.route == "inbox" else FILED
-    event_type = "CAPTURE_INBOX" if status == INBOX else "CAPTURE_FILED"
-    event_payload = {"path": write_result.note_path}
-    if outcome.inbox_reason is not None:
-        event_payload["reason"] = outcome.inbox_reason
-
-    ledger.update_capture(
-        capture.capture_id,
-        status=status,
-        classification_json=outcome.classification.model_dump(mode="json"),
-        derived_note_path=write_result.note_path,
-        last_error=outcome.inbox_reason,
-        event_type=event_type,
-        event_payload=event_payload,
-    )
-
     if status == INBOX:
-        log_metadata(
-            "capture_inbox",
+        await capture_service.complete_inbox(
             capture_id=capture.capture_id,
-            discord_message_id=capture.discord_message_id,
-            status_transition=f"CLASSIFYING->{INBOX}",
-            classification_confidence=outcome.classification.confidence,
-            derived_note_path=write_result.note_path,
-            inbox_reason_type=_safe_inbox_reason_type(outcome.inbox_reason),
-            error_type=_safe_inbox_error_type(outcome.inbox_reason),
-        )
-        receipt_content = format_inbox_receipt(
-            capture_id=capture.capture_id,
+            classification=outcome.classification,
             note_path=write_result.note_path,
             reason=outcome.inbox_reason,
-            has_attachments=capture.has_attachments,
         )
     else:
-        log_metadata(
-            "capture_filed",
+        await capture_service.complete_filed(
             capture_id=capture.capture_id,
-            discord_message_id=capture.discord_message_id,
-            status_transition=f"CLASSIFYING->{FILED}",
-            classification_confidence=outcome.classification.confidence,
-            derived_note_path=write_result.note_path,
-        )
-        receipt_content = format_filed_receipt(
-            capture_id=capture.capture_id,
-            note_path=write_result.note_path,
             classification=outcome.classification,
-            has_attachments=capture.has_attachments,
-        )
-
-    if receipt_client is not None:
-        await try_deliver_final_receipt(
-            receipt_client,
-            ledger,
-            ledger.get_capture(capture.capture_id),
-            receipt_content,
+            note_path=write_result.note_path,
         )
 
     return ProcessingResult(
@@ -180,25 +106,13 @@ async def process_capture_once(
     )
 
 
-def unfinished_capture_ids(ledger: Ledger) -> list[str]:
-    ledger.reset_classifying_to_received()
-    return ledger.enqueueable_capture_ids()
-
-
-async def enqueue_capture_ids(capture_ids: list[str], queue: CaptureQueue) -> list[str]:
-    for capture_id in capture_ids:
-        await queue.enqueue(capture_id)
-    return capture_ids
-
-
 async def run_capture_worker(
     *,
     settings: Any,
-    ledger: Ledger,
+    capture_service: Any,
     queue: CaptureQueue,
     vault_writer: VaultWriter,
     classifier_client: Any | None = None,
-    receipt_client: Any | None = None,
 ) -> None:
     while True:
         capture_id = await queue.get()
@@ -206,38 +120,27 @@ async def run_capture_worker(
             await process_capture_once(
                 capture_id=capture_id,
                 settings=settings,
-                ledger=ledger,
+                capture_service=capture_service,
                 vault_writer=vault_writer,
                 classifier_client=classifier_client,
-                receipt_client=receipt_client,
             )
         except Exception as exc:
             failure_reason = f"worker error: {type(exc).__name__}: {exc}"
             try:
-                ledger.update_capture(
-                    capture_id,
-                    status=FAILED,
-                    last_error=failure_reason,
-                    event_type="CAPTURE_FAILED",
-                    event_payload={"reason": failure_reason},
+                await capture_service.complete_failed(
+                    capture_id=capture_id,
+                    reason=failure_reason,
                 )
-                if receipt_client is not None:
-                    failed_capture = ledger.get_capture(capture_id)
-                    await try_deliver_final_receipt(
-                        receipt_client,
-                        ledger,
-                        failed_capture,
-                        format_vault_failure_receipt(
-                            capture_id,
-                            has_attachments=failed_capture.has_attachments,
-                        ),
-                    )
             except Exception as update_exc:
+                from secondbrain.observability import log_metadata
+
                 log_metadata(
                     "capture_worker_error_update_failed",
                     capture_id=capture_id,
                     error_type=type(update_exc).__name__,
                 )
+            from secondbrain.observability import log_metadata
+
             log_metadata(
                 "capture_worker_error",
                 capture_id=capture_id,
@@ -273,40 +176,3 @@ def attachment_only_inbox_outcome() -> ClassificationOutcomeLike:
         route="inbox",
         inbox_reason=reason,
     )
-
-
-async def try_deliver_final_receipt(receipt_client: Any, ledger: Ledger, capture, content: str) -> None:
-    try:
-        await deliver_final_receipt(receipt_client, ledger, capture, content)
-    except Exception as exc:
-        log_metadata(
-            "final_receipt_failed",
-            capture_id=capture.capture_id,
-            discord_message_id=capture.discord_message_id,
-            error_type=type(exc).__name__,
-        )
-
-
-def _safe_inbox_reason_type(reason: str | None) -> str:
-    if not reason:
-        return "unspecified"
-    if reason.startswith("classifier failed:"):
-        return "classifier_failure"
-    if reason == "classification confidence below threshold":
-        return "low_confidence"
-    if reason == "classification needs clarification":
-        return "needs_clarification"
-    if reason == "classifier selected inbox":
-        return "classifier_selected_inbox"
-    if reason.startswith("attachment-only capture"):
-        return "attachment_only"
-    return "other"
-
-
-def _safe_inbox_error_type(reason: str | None) -> str | None:
-    if not reason or not reason.startswith("classifier failed:"):
-        return None
-    parts = reason.split(":", maxsplit=2)
-    if len(parts) < 2:
-        return "ClassifierError"
-    return parts[1].strip() or "ClassifierError"
