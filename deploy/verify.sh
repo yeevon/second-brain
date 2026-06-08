@@ -35,6 +35,13 @@ if ! mountpoint -q "$DATA_DIR"; then
   exit 1
 fi
 
+MARKER="$DATA_DIR/.second-brain-ebs-volume"
+
+if [[ ! -f "$MARKER" ]]; then
+  echo "persistent EBS marker missing: $MARKER" >&2
+  exit 1
+fi
+
 mount_source="$(
   docker inspect \
     --format '{{range .Mounts}}{{if eq .Destination "/var/lib/second-brain"}}{{.Source}}{{end}}{{end}}' \

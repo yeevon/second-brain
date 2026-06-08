@@ -22,6 +22,10 @@ RUN uv sync --frozen --no-dev \
     && mkdir -p /var/lib/second-brain \
     && chown -R secondbrain:secondbrain /var/lib/second-brain /app
 
+COPY deploy/container-entrypoint.sh /usr/local/bin/secondbrain-entrypoint
+RUN chmod 755 /usr/local/bin/secondbrain-entrypoint
+
 USER secondbrain
 
+ENTRYPOINT ["/usr/local/bin/secondbrain-entrypoint"]
 CMD ["/app/.venv/bin/python", "-m", "secondbrain", "run"]
