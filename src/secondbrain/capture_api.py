@@ -3,119 +3,29 @@ from __future__ import annotations
 from secrets import compare_digest
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Header
+from fastapi import Depends, FastAPI, Header, HTTPException
 
 from secondbrain.api_models import (
-    AcknowledgeClassifyingRequest,
-    AcknowledgeDeliveryFailedRequest,
-    AcknowledgeFiledRequest,
-    AcknowledgeForwardedRequest,
-    AcknowledgeInboxRequest,
     CaptureResponse,
-    ClarificationRequest,
-    ClarificationResponse,
-    ClassificationValidationRequest,
-    ClassificationValidationResponse,
-    CorrectionRequest,
-    CorrectionResponse,
-    DailyBriefResponse,
-    DailyDigestResponse,
-    DeliveryTransitionResponse,
-    DownstreamCaptureResponse,
     EditReceiptRequest,
     HealthResponse,
+    MarkFailedRequest,
+    MarkFiledRequest,
+    MarkInboxRequest,
     ReceiptDeliveryResponse,
-    RenewLeaseRequest,
-    ReportWorkflowErrorRequest,
-    ScheduleRetryRequest,
-    SecurityScreenRequest,
-    SecurityScreenResponse,
-    WeeklyBriefResponse,
-    WeeklyDigestResponse,
-    WorkflowErrorResponse,
+    TransitionResponse,
 )
 from secondbrain.capture_service import (
     CaptureNotFoundError,
     CaptureService,
+    ConflictingReplayError,
+    InvalidCaptureTransitionError,
     ReceiptDeliveryError,
 )
-from secondbrain.capture_models import CaptureRecord, DeliveryMutationResult
+from secondbrain.capture_models import CaptureRecord, TransitionResult
 
 
 INTERNAL_TOKEN_HEADER = "X-Second-Brain-Internal-Token"
-
-
-def _fetch_open_task_count(capture_service: CaptureService) -> int | None:
-    """Return open task count from writer-service or direct vault scan.
-
-    Priority order:
-    1. Call writer-service GET /internal/vault/stats/open-tasks if writer_service_url is set.
-    2. Fall back to direct vault scan if vault_path is set (local-full mode).
-    3. Return None if neither is available (capture-only mode with no vault access).
-    """
-    import urllib.request
-    from secondbrain.digest import scan_open_tasks
-
-    writer_url = getattr(capture_service.settings, "writer_service_url", None)
-    writer_token = getattr(capture_service.settings, "writer_service_token", None)
-    if writer_url and writer_token:
-        try:
-            req = urllib.request.Request(
-                f"{writer_url}/internal/vault/stats/open-tasks",
-                headers={"X-Second-Brain-Writer-Token": writer_token},
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                import json
-                data = json.loads(resp.read())
-                return data.get("open_tasks_count")
-        except Exception:
-            pass  # fall through to direct scan
-
-    vault_path = getattr(capture_service.settings, "vault_path", None)
-    if vault_path is not None:
-        try:
-            return scan_open_tasks(vault_path)
-        except Exception:
-            pass
-    return None
-
-
-def _fetch_open_tasks_by_project(capture_service: CaptureService) -> dict[str, int] | None:
-    """Return open task counts grouped by project.
-
-    Priority order:
-    1. Call writer-service GET /internal/vault/stats/open-tasks (returns both count + by_project)
-       if writer_service_url and writer_service_token are configured.
-    2. Fall back to direct vault scan if vault_path is set (local-full mode).
-    3. Return None if neither is available (capture-only mode with no vault access).
-    """
-    import urllib.request
-    from secondbrain.digest import scan_open_tasks_by_project
-
-    writer_url = getattr(capture_service.settings, "writer_service_url", None)
-    writer_token = getattr(capture_service.settings, "writer_service_token", None)
-    if writer_url and writer_token:
-        try:
-            req = urllib.request.Request(
-                f"{writer_url}/internal/vault/stats/open-tasks",
-                headers={"X-Second-Brain-Writer-Token": writer_token},
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                import json
-                data = json.loads(resp.read())
-                by_project = data.get("open_tasks_by_project")
-                if isinstance(by_project, dict):
-                    return by_project
-        except Exception:
-            pass  # fall through to direct scan
-
-    vault_path = getattr(capture_service.settings, "vault_path", None)
-    if vault_path is not None:
-        try:
-            return scan_open_tasks_by_project(vault_path)
-        except Exception:
-            pass
-    return None
 
 
 def build_require_internal_token(expected_token: str):
@@ -153,241 +63,77 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
     async def get_capture(capture_id: str):
         return _capture_response(_get_capture(capture_service, capture_id))
 
-    # ------------------------------------------------------------------
-    # Minimal downstream capture envelope (n8n fetch)
-    # Returns only the 7 fields n8n needs — never exposes audit fields.
-    # ------------------------------------------------------------------
-
-    @app.get(
-        "/internal/downstream/captures/{capture_id}",
-        response_model=DownstreamCaptureResponse,
+    @app.post(
+        "/internal/captures/{capture_id}/mark-forwarded",
+        response_model=TransitionResponse,
         dependencies=[Depends(require_internal_token)],
     )
-    async def get_downstream_capture(capture_id: str):
-        capture = _get_capture(capture_service, capture_id)
-        return DownstreamCaptureResponse(
-            capture_id=capture.capture_id,
-            raw_text=None if capture.is_sensitive else capture.raw_text,
-            is_sensitive=capture.is_sensitive,
-            has_attachments=capture.has_attachments,
-            delivery_attempt=capture.delivery_attempts,
-            status=capture.status,
-            delivery_status=capture.delivery_status,
-            source_message_id=capture.discord_message_id,
-            created_at=capture.received_at,
-        )
-
-    # ------------------------------------------------------------------
-    # Security screen (defence-in-depth re-screen by n8n before filing)
-    # ------------------------------------------------------------------
+    async def mark_forwarded(capture_id: str):
+        return _transition_response(_transition(lambda: capture_service.mark_forwarded(capture_id)))
 
     @app.post(
-        "/internal/security/screen",
-        response_model=SecurityScreenResponse,
+        "/internal/captures/{capture_id}/mark-classifying",
+        response_model=TransitionResponse,
         dependencies=[Depends(require_internal_token)],
     )
-    async def security_screen(request: SecurityScreenRequest):
-        from secondbrain.secret_screen import screen_text
-        result = screen_text(request.text)
-        return SecurityScreenResponse(
-            is_sensitive=result.is_sensitive,
-            safe_category_list=list(result.flags),
-        )
-
-    # ------------------------------------------------------------------
-    # Classification contract validation
-    # Validates Gemini output against our schema and applies the
-    # confidence threshold to return an authoritative routing decision.
-    # ------------------------------------------------------------------
+    async def mark_classifying(capture_id: str):
+        return _transition_response(_transition(lambda: capture_service.mark_classifying(capture_id)))
 
     @app.post(
-        "/internal/contracts/classification/validate",
-        response_model=ClassificationValidationResponse,
+        "/internal/captures/{capture_id}/mark-filed",
+        response_model=TransitionResponse,
         dependencies=[Depends(require_internal_token)],
     )
-    async def validate_classification(request: ClassificationValidationRequest):
-        from secondbrain.models import Classification
-        from pydantic import ValidationError
-
-        errors: list[str] = []
-        route: str | None = None
-        inbox_reason: str | None = None
-        valid = False
-        confidence_met = False
-
-        try:
-            classification = Classification.model_validate(request.classification)
-            valid = True
-            threshold = capture_service.settings.classification_confidence_threshold
-            if threshold is None:
-                threshold = 0.75
-            confidence_met = classification.confidence >= threshold
-            if classification.folder == "inbox":
-                route = "inbox"
-                inbox_reason = "classifier_selected_inbox"
-            elif classification.needs_clarification:
-                route = "inbox"
-                inbox_reason = "needs_clarification"
-            elif not confidence_met:
-                route = "inbox"
-                inbox_reason = "low_confidence"
-            else:
-                route = "file"
-        except ValidationError as exc:
-            for err in exc.errors():
-                loc = " -> ".join(str(p) for p in err["loc"])
-                errors.append(f"{loc}: {err['msg']}")
-
-        return ClassificationValidationResponse(
-            valid=valid,
-            route=route,
-            confidence_met=confidence_met,
-            inbox_reason=inbox_reason,
-            errors=errors,
-        )
-
-    # ------------------------------------------------------------------
-    # Attempt-aware downstream delivery callback routes
-    # ------------------------------------------------------------------
-
-    @app.post(
-        "/internal/captures/{capture_id}/delivery/acknowledge-forwarded",
-        response_model=DeliveryTransitionResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def acknowledge_delivery_forwarded(capture_id: str, request: AcknowledgeForwardedRequest):
-        _get_capture(capture_service, capture_id)
-        result = capture_service.acknowledge_delivery_forwarded(
-            capture_id=capture_id,
-            delivery_attempt=request.delivery_attempt,
-        )
-        # Atomic winner gate: HTTP 200 for all 4 outcomes
-        return _acknowledge_forwarded_response(capture_service, capture_id, result)
-
-    @app.post(
-        "/internal/captures/{capture_id}/delivery/acknowledge-classifying",
-        response_model=DeliveryTransitionResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def acknowledge_delivery_classifying(capture_id: str, request: AcknowledgeClassifyingRequest):
-        _get_capture(capture_service, capture_id)
-        result = capture_service.acknowledge_delivery_classifying(
-            capture_id=capture_id,
-            delivery_attempt=request.delivery_attempt,
-        )
-        return _non_terminal_delivery_response(capture_service, capture_id, result)
-
-    @app.post(
-        "/internal/captures/{capture_id}/delivery/renew-lease",
-        response_model=DeliveryTransitionResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def renew_delivery_lease(capture_id: str, request: RenewLeaseRequest):
-        _get_capture(capture_service, capture_id)
-        result = capture_service.renew_delivery_lease(
-            capture_id=capture_id,
-            delivery_attempt=request.delivery_attempt,
-        )
-        return _non_terminal_delivery_response(capture_service, capture_id, result)
-
-    @app.post(
-        "/internal/captures/{capture_id}/delivery/acknowledge-filed",
-        response_model=DeliveryTransitionResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def acknowledge_delivery_filed(capture_id: str, request: AcknowledgeFiledRequest):
-        _get_capture(capture_service, capture_id)
-        result = await capture_service.acknowledge_delivery_filed(
-            capture_id=capture_id,
-            delivery_attempt=request.delivery_attempt,
-            derived_note_path=request.note_path,
-            git_commit_hash=request.git_commit_hash,
-            classification_json=request.classification,
-        )
-        return _delivery_mutation_response(capture_service, capture_id, result)
-
-    @app.post(
-        "/internal/captures/{capture_id}/delivery/acknowledge-inbox",
-        response_model=DeliveryTransitionResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def acknowledge_delivery_inbox(capture_id: str, request: AcknowledgeInboxRequest):
-        _get_capture(capture_service, capture_id)
-        result = await capture_service.acknowledge_delivery_inbox(
-            capture_id=capture_id,
-            delivery_attempt=request.delivery_attempt,
-            derived_note_path=request.note_path,
-            git_commit_hash=request.git_commit_hash,
-            reason_type=request.reason_type,
-            classification_json=request.classification,
-        )
-        return _delivery_mutation_response(capture_service, capture_id, result)
-
-    @app.post(
-        "/internal/captures/{capture_id}/delivery/schedule-retry",
-        response_model=DeliveryTransitionResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def schedule_delivery_retry(capture_id: str, request: ScheduleRetryRequest):
-        _get_capture(capture_service, capture_id)
-        disposition = await capture_service.schedule_delivery_retry(
-            capture_id=capture_id,
-            delivery_attempt=request.delivery_attempt,
-            error_type=request.error_type,
-            reason_type=request.reason_type,
-        )
-        capture = _get_capture(capture_service, capture_id)
-        outcome = disposition.outcome or (
-            "retry_scheduled" if disposition.retry_scheduled else "terminal_failure"
-        )
-        return DeliveryTransitionResponse(
-            capture_id=capture_id,
-            delivery_status=capture.delivery_status,
-            delivery_attempts=capture.delivery_attempts,
-            retry_attempts=capture.retry_attempts,
-            changed=not outcome.startswith("ignored_"),
-            outcome=outcome,
+    async def mark_filed(capture_id: str, request: MarkFiledRequest):
+        return _transition_response(
+            _transition(
+                lambda: capture_service.mark_filed(
+                    capture_id=capture_id,
+                    note_path=request.note_path,
+                    classification=request.classification,
+                )
+            )
         )
 
     @app.post(
-        "/internal/captures/{capture_id}/delivery/acknowledge-failed",
-        response_model=DeliveryTransitionResponse,
+        "/internal/captures/{capture_id}/mark-inbox",
+        response_model=TransitionResponse,
         dependencies=[Depends(require_internal_token)],
     )
-    async def acknowledge_delivery_failed(capture_id: str, request: AcknowledgeDeliveryFailedRequest):
-        _get_capture(capture_service, capture_id)
-        result = await capture_service.acknowledge_delivery_failed(
-            capture_id=capture_id,
-            delivery_attempt=request.delivery_attempt,
-            reason_type=request.reason_type,
+    async def mark_inbox(capture_id: str, request: MarkInboxRequest):
+        return _transition_response(
+            _transition(
+                lambda: capture_service.mark_inbox(
+                    capture_id=capture_id,
+                    note_path=request.note_path,
+                    classification=request.classification,
+                    reason=request.reason,
+                )
+            )
         )
-        return _acknowledge_failed_response(capture_service, capture_id, result)
 
     @app.post(
-        "/internal/captures/{capture_id}/delivery/report-workflow-error",
-        response_model=WorkflowErrorResponse,
+        "/internal/captures/{capture_id}/mark-failed",
+        response_model=TransitionResponse,
         dependencies=[Depends(require_internal_token)],
     )
-    async def report_workflow_error(capture_id: str, request: ReportWorkflowErrorRequest):
-        _get_capture(capture_service, capture_id)
-        outcome = await capture_service.report_workflow_error(
-            capture_id=capture_id,
-            delivery_attempt=request.delivery_attempt,
-            disposition=request.disposition,
-            error_type=request.error_type,
-            reason_type=request.reason_type,
-            workflow_id=request.workflow_id,
-            workflow_name=request.workflow_name,
-            execution_id=request.execution_id,
-            stage=request.stage,
+    async def mark_failed(capture_id: str, request: MarkFailedRequest):
+        return _transition_response(
+            _transition(
+                lambda: capture_service.mark_failed(
+                    capture_id=capture_id,
+                    reason=request.reason,
+                )
+            )
         )
-        return WorkflowErrorResponse(
-            capture_id=outcome.capture_id,
-            delivery_attempt=outcome.delivery_attempt,
-            delivery_status=outcome.delivery_status,
-            retry_attempts=outcome.retry_attempts,
-            outcome=outcome.outcome,
-        )
+
+    @app.post(
+        "/internal/captures/{capture_id}/retry",
+        response_model=TransitionResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def retry(capture_id: str):
+        return _transition_response(_transition(lambda: capture_service.retry(capture_id)))
 
     @app.post(
         "/internal/receipts/{capture_id}/edit",
@@ -411,206 +157,7 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             receipt_message_id=delivery.receipt_message_id,
         )
 
-    # ------------------------------------------------------------------
-    # SB-117: Clarification handling
-    # ------------------------------------------------------------------
-
-    @app.post(
-        "/internal/clarifications/{capture_id}",
-        response_model=ClarificationResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def record_clarification(capture_id: str, request: ClarificationRequest):
-        _get_capture(capture_service, capture_id)
-        recorded = await capture_service.record_clarification(
-            capture_id=capture_id,
-            question=request.question,
-        )
-        if not recorded:
-            raise HTTPException(
-                status_code=409,
-                detail="capture is not in INBOX status; clarification cannot be recorded",
-            )
-        capture = _get_capture(capture_service, capture_id)
-        return ClarificationResponse(
-            capture_id=capture_id,
-            clarification_status=capture.clarification_status or "NEEDS_CLARIFICATION",
-            question_sent=True,
-        )
-
-    # ------------------------------------------------------------------
-    # SB-118: Correction handling
-    # ------------------------------------------------------------------
-
-    @app.post(
-        "/internal/captures/{capture_id}/corrections",
-        response_model=CorrectionResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def apply_correction(capture_id: str, request: CorrectionRequest):
-        capture = _get_capture(capture_service, capture_id)
-        result = await capture_service.apply_correction(
-            capture_id=capture_id,
-            new_folder=request.new_folder,
-            correction_reason=request.correction_reason,
-        )
-        if result is None:
-            raise HTTPException(
-                status_code=409,
-                detail="correction could not be applied; capture may not have a filed note",
-            )
-        return CorrectionResponse(
-            capture_id=capture_id,
-            correction_id=result["correction_id"],
-            old_note_path=result["old_note_path"],
-            new_note_path=result["new_note_path"],
-            git_commit_hash=result.get("git_commit_hash"),
-        )
-
-    # ------------------------------------------------------------------
-    # SB-120 / SB-121: Digest endpoints
-    # ------------------------------------------------------------------
-
-    @app.get(
-        "/internal/digest/daily",
-        response_model=DailyDigestResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def get_daily_digest():
-        from datetime import UTC, datetime, timedelta
-
-        now = datetime.now(UTC)
-        since = now - timedelta(hours=24)
-        snapshot = capture_service.daily_digest_snapshot(since=since, now=now)
-
-        return DailyDigestResponse(
-            generated_at=now,
-            window_hours=24,
-            open_tasks_count=_fetch_open_task_count(capture_service),
-            open_tasks_by_project=_fetch_open_tasks_by_project(capture_service),
-            **snapshot,
-        )
-
-    @app.get(
-        "/internal/digest/weekly",
-        response_model=WeeklyDigestResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def get_weekly_digest():
-        from datetime import UTC, datetime, timedelta
-
-        now = datetime.now(UTC)
-        since = now - timedelta(days=7)
-        snapshot = capture_service.weekly_digest_snapshot(since=since, now=now)
-
-        return WeeklyDigestResponse(
-            generated_at=now,
-            since=since,
-            window_days=7,
-            outstanding_tasks_count=_fetch_open_task_count(capture_service),
-            **snapshot,
-        )
-
-    # ------------------------------------------------------------------
-    # SB-120 / SB-121: Actionable brief endpoints
-    # Replace count-based digest with vault-scanned brief data.
-    # ------------------------------------------------------------------
-
-    @app.get(
-        "/internal/brief/daily",
-        response_model=DailyBriefResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def get_daily_brief():
-        from datetime import UTC, datetime
-
-        now = datetime.now(UTC)
-        data = _fetch_brief(capture_service, "daily")
-        return DailyBriefResponse(
-            generated_at=now,
-            today=data.get("today", now.date().isoformat()),
-            focus_items=data.get("focus_items", []),
-            due_today=data.get("due_today", []),
-            coming_up=data.get("coming_up", []),
-            birthdays=data.get("birthdays", []),
-            pending_tasks=data.get("pending_tasks", []),
-            stale_tasks=data.get("stale_tasks", []),
-        )
-
-    @app.get(
-        "/internal/brief/weekly",
-        response_model=WeeklyBriefResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def get_weekly_brief():
-        from datetime import UTC, datetime, timedelta
-
-        now = datetime.now(UTC)
-        today = now.date()
-        data = _fetch_brief(capture_service, "weekly")
-        return WeeklyBriefResponse(
-            generated_at=now,
-            week_start=data.get("week_start", (today - timedelta(days=7)).isoformat()),
-            week_end=data.get("week_end", today.isoformat()),
-            accomplished=data.get("accomplished", []),
-            completed_tasks=data.get("completed_tasks", []),
-            decisions=data.get("decisions", []),
-            still_open=data.get("still_open", []),
-            study_progress=data.get("study_progress", []),
-        )
-
     return app
-
-
-def _resolve_vault_path(capture_service: CaptureService):
-    """Return a Path to the vault, or None if not accessible from this service instance."""
-    from pathlib import Path
-    vault_path_setting = getattr(capture_service.settings, "vault_path", None)
-    if vault_path_setting is not None:
-        return Path(vault_path_setting)
-    return None
-
-
-def _fetch_brief(capture_service: CaptureService, period: str) -> dict:
-    """Return brief data for period ('daily' or 'weekly').
-
-    Priority order:
-    1. Call writer-service GET /internal/vault/brief/{period} if configured.
-    2. Fall back to direct vault scan if vault_path is set (local-full mode).
-    3. Return empty structure if neither is available (capture-only mode).
-    """
-    import json
-    import urllib.request
-    from secondbrain.digest import scan_daily_brief, scan_weekly_brief
-    from datetime import date, timedelta
-
-    writer_url = getattr(capture_service.settings, "writer_service_url", None)
-    writer_token = getattr(capture_service.settings, "writer_service_token", None)
-    if writer_url and writer_token:
-        try:
-            req = urllib.request.Request(
-                f"{writer_url}/internal/vault/brief/{period}",
-                headers={"X-Second-Brain-Writer-Token": writer_token},
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                return json.loads(resp.read())
-        except Exception:
-            pass
-
-    vault_path = _resolve_vault_path(capture_service)
-    if vault_path is not None:
-        try:
-            if period == "daily":
-                return scan_daily_brief(vault_path)
-            today = date.today()
-            return scan_weekly_brief(vault_path, week_start=today - timedelta(days=7), week_end=today)
-        except Exception:
-            pass
-
-    today = date.today()
-    if period == "daily":
-        return {"today": today.isoformat(), "focus_items": [], "due_today": [], "coming_up": [], "birthdays": [], "pending_tasks": [], "stale_tasks": []}
-    return {"week_start": (today - timedelta(days=7)).isoformat(), "week_end": today.isoformat(), "accomplished": [], "completed_tasks": [], "decisions": [], "still_open": [], "study_progress": []}
 
 
 def _get_capture(capture_service: CaptureService, capture_id: str) -> CaptureRecord:
@@ -618,6 +165,15 @@ def _get_capture(capture_service: CaptureService, capture_id: str) -> CaptureRec
         return capture_service.get_capture(capture_id)
     except CaptureNotFoundError as exc:
         raise HTTPException(status_code=404, detail="capture not found") from exc
+
+
+def _transition(operation) -> TransitionResult:
+    try:
+        return operation()
+    except CaptureNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="capture not found") from exc
+    except (InvalidCaptureTransitionError, ConflictingReplayError) as exc:
+        raise HTTPException(status_code=409, detail="capture transition conflict") from exc
 
 
 def _capture_response(capture: CaptureRecord) -> CaptureResponse:
@@ -628,11 +184,6 @@ def _capture_response(capture: CaptureRecord) -> CaptureResponse:
         discord_guild_id=capture.discord_guild_id,
         discord_author_id=capture.discord_author_id,
         status=capture.status,
-        delivery_status=capture.delivery_status,
-        delivery_attempts=capture.delivery_attempts,
-        retry_attempts=capture.retry_attempts,
-        processing_lease_until=capture.processing_lease_until,
-        next_attempt_at=capture.next_attempt_at,
         raw_text=capture.raw_text,
         redacted_text=capture.redacted_text,
         is_sensitive=capture.is_sensitive,
@@ -645,79 +196,10 @@ def _capture_response(capture: CaptureRecord) -> CaptureResponse:
     )
 
 
-def _acknowledge_forwarded_response(
-    capture_service: CaptureService,
-    capture_id: str,
-    result: DeliveryMutationResult,
-) -> DeliveryTransitionResponse:
-    """Atomic winner gate: HTTP 200 for all 4 outcomes."""
-    capture = _get_capture(capture_service, capture_id)
-    return DeliveryTransitionResponse(
-        capture_id=capture_id,
-        delivery_status=capture.delivery_status,
-        delivery_attempts=capture.delivery_attempts,
-        retry_attempts=capture.retry_attempts,
-        changed=result.changed,
-        outcome=result.outcome,
-        ignored_reason=result.outcome if result.outcome != "changed" else None,
-    )
-
-
-def _non_terminal_delivery_response(
-    capture_service: CaptureService,
-    capture_id: str,
-    result: DeliveryMutationResult,
-) -> DeliveryTransitionResponse:
-    if result.outcome == "invalid_state":
-        raise HTTPException(status_code=409, detail="capture not in valid state for this callback")
-    capture = _get_capture(capture_service, capture_id)
-    return DeliveryTransitionResponse(
-        capture_id=capture_id,
-        delivery_status=capture.delivery_status,
-        delivery_attempts=capture.delivery_attempts,
-        retry_attempts=capture.retry_attempts,
-        changed=result.changed,
-        outcome=result.outcome,
-        ignored_reason="stale_attempt" if result.outcome == "stale_attempt" else None,
-    )
-
-
-def _delivery_mutation_response(
-    capture_service: CaptureService,
-    capture_id: str,
-    result: DeliveryMutationResult,
-) -> DeliveryTransitionResponse:
-    if result.outcome == "conflicting_replay":
-        raise HTTPException(status_code=409, detail="conflicting terminal callback")
-    if result.outcome == "invalid_state":
-        raise HTTPException(status_code=409, detail="capture not in valid state for terminal callback")
-    capture = _get_capture(capture_service, capture_id)
-    return DeliveryTransitionResponse(
-        capture_id=capture_id,
-        delivery_status=capture.delivery_status,
-        delivery_attempts=capture.delivery_attempts,
-        retry_attempts=capture.retry_attempts,
-        changed=result.changed,
-        outcome=result.outcome,
-        ignored_reason="stale_attempt" if result.outcome == "stale_attempt" else None,
-    )
-
-
-def _acknowledge_failed_response(
-    capture_service: CaptureService,
-    capture_id: str,
-    result: DeliveryMutationResult,
-) -> DeliveryTransitionResponse:
-    """HTTP 409 only for conflicting_replay; HTTP 200 for everything else."""
-    if result.outcome == "conflicting_replay":
-        raise HTTPException(status_code=409, detail="conflicting terminal failure reason")
-    capture = _get_capture(capture_service, capture_id)
-    return DeliveryTransitionResponse(
-        capture_id=capture_id,
-        delivery_status=capture.delivery_status,
-        delivery_attempts=capture.delivery_attempts,
-        retry_attempts=capture.retry_attempts,
-        changed=result.changed,
-        outcome=result.outcome,
-        ignored_reason=result.outcome if result.outcome != "changed" else None,
+def _transition_response(transition: TransitionResult) -> TransitionResponse:
+    return TransitionResponse(
+        capture_id=transition.capture_id,
+        previous_status=transition.previous_status,
+        status=transition.status,
+        changed=transition.changed,
     )

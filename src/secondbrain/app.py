@@ -5,7 +5,9 @@ import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
 
+from secondbrain.api_server import InternalApiServer
 from secondbrain.capture_models import CaptureStatusSnapshot
+from secondbrain.capture_api import create_capture_api
 from secondbrain.capture_service import CaptureService
 from secondbrain.config import Settings
 from secondbrain.discord_capture import create_discord_client
@@ -81,7 +83,7 @@ class LocalWorkerStartup:
             )
 
 
-def run_discord_listener() -> None:
+async def run_service() -> None:
     settings = Settings()
     queue = CaptureQueue(maxsize=settings.classifier_queue_maxsize)
     vault_writer = VaultWriter(settings.vault_path)
@@ -94,6 +96,15 @@ def run_discord_listener() -> None:
         capture_service=capture_service,
         queue=queue,
         vault_writer=vault_writer,
+    )
+    api = create_capture_api(
+        capture_service=capture_service,
+        internal_token=settings.capture_service_internal_token,
+    )
+    api_server = InternalApiServer(
+        api,
+        host=settings.capture_api_host,
+        port=settings.capture_api_port,
     )
 
     async def start_background_worker_once() -> None:
@@ -122,7 +133,22 @@ def run_discord_listener() -> None:
     print(f"  allowed_user_id: {settings.discord_allowed_user_id}")
     print(f"  ledger_path: {settings.ledger_path}")
     print(f"  vault_path: {settings.vault_path}")
-    client.run(settings.discord_bot_token)
+    print(f"  internal API host: {settings.capture_api_host}")
+    print(f"  internal API port: {settings.capture_api_port}")
+    print("  internal API authentication: configured")
+
+    api_task = asyncio.create_task(api_server.serve())
+    discord_task = asyncio.create_task(client.start(settings.discord_bot_token))
+    try:
+        await asyncio.gather(api_task, discord_task)
+    finally:
+        await api_server.stop()
+        await client.close()
+        capture_service.close()
+
+
+def run_discord_listener() -> None:
+    asyncio.run(run_service())
 
 
 def format_status_report(settings: Settings, snapshot: CaptureStatusSnapshot) -> str:

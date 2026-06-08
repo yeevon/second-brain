@@ -7,16 +7,19 @@ from secondbrain.capture_models import (
     CLASSIFYING,
     FAILED,
     FILED,
+    FORWARDED,
     INBOX,
     RECEIVED,
     REJECTED_SENSITIVE,
     CaptureRecord,
     CaptureStatusSnapshot,
+    TransitionResult,
 )
 from secondbrain.discord_capture import extract_attachment_metadata, should_capture_message
 from secondbrain.ledger import Ledger
 from secondbrain.observability import log_metadata
 from secondbrain.receipts import (
+    ReceiptDeliveryResult,
     deliver_final_receipt,
     format_filed_receipt,
     format_inbox_receipt,
@@ -29,6 +32,22 @@ from secondbrain.secret_screen import screen_text
 
 
 NotifyCapture = Callable[[str], Awaitable[None]]
+
+
+class CaptureNotFoundError(Exception):
+    pass
+
+
+class InvalidCaptureTransitionError(Exception):
+    pass
+
+
+class ConflictingReplayError(Exception):
+    pass
+
+
+class ReceiptDeliveryError(Exception):
+    pass
 
 
 class CaptureService:
@@ -110,7 +129,11 @@ class CaptureService:
         return self._ledger.enqueueable_capture_ids()
 
     def claim_for_processing(self, capture_id: str) -> CaptureRecord | None:
-        if not self._ledger.mark_classifying(capture_id):
+        try:
+            transition = self.mark_classifying(capture_id)
+        except (CaptureNotFoundError, InvalidCaptureTransitionError, ConflictingReplayError):
+            return None
+        if not transition.changed:
             return None
 
         capture = self._ledger.get_capture(capture_id)
@@ -130,32 +153,33 @@ class CaptureService:
         note_path: str,
     ) -> None:
         capture = self._ledger.get_capture(capture_id)
-        self._ledger.update_capture(
-            capture_id,
-            status=FILED,
-            classification_json=classification.model_dump(mode="json"),
-            derived_note_path=note_path,
-            event_type="CAPTURE_FILED",
-            event_payload={"path": note_path},
+        transition = self.mark_filed(
+            capture_id=capture_id,
+            note_path=note_path,
+            classification=classification,
         )
         updated = self._ledger.get_capture(capture_id)
-        log_metadata(
-            "capture_filed",
-            capture_id=updated.capture_id,
-            discord_message_id=updated.discord_message_id,
-            status_transition=f"{CLASSIFYING}->{FILED}",
-            classification_confidence=classification.confidence,
-            derived_note_path=note_path,
-        )
-        await self._deliver_final_receipt(
-            updated,
-            format_filed_receipt(
+        if transition.changed:
+            log_metadata(
+                "capture_filed",
                 capture_id=updated.capture_id,
-                note_path=note_path,
-                classification=classification,
-                has_attachments=capture.has_attachments,
-            ),
-        )
+                discord_message_id=updated.discord_message_id,
+                status_transition=f"{CLASSIFYING}->{FILED}",
+                classification_confidence=classification.confidence,
+                derived_note_path=note_path,
+            )
+            try:
+                await self.edit_receipt(
+                    capture_id=updated.capture_id,
+                    content=format_filed_receipt(
+                        capture_id=updated.capture_id,
+                        note_path=note_path,
+                        classification=classification,
+                        has_attachments=capture.has_attachments,
+                    ),
+                )
+            except ReceiptDeliveryError:
+                pass
 
     async def complete_inbox(
         self,
@@ -166,38 +190,36 @@ class CaptureService:
         reason: str | None,
     ) -> None:
         capture = self._ledger.get_capture(capture_id)
-        event_payload = {"path": note_path}
-        if reason is not None:
-            event_payload["reason"] = reason
-        self._ledger.update_capture(
-            capture_id,
-            status=INBOX,
-            classification_json=classification.model_dump(mode="json"),
-            derived_note_path=note_path,
-            last_error=reason,
-            event_type="CAPTURE_INBOX",
-            event_payload=event_payload,
+        transition = self.mark_inbox(
+            capture_id=capture_id,
+            note_path=note_path,
+            classification=classification,
+            reason=reason,
         )
         updated = self._ledger.get_capture(capture_id)
-        log_metadata(
-            "capture_inbox",
-            capture_id=updated.capture_id,
-            discord_message_id=updated.discord_message_id,
-            status_transition=f"{CLASSIFYING}->{INBOX}",
-            classification_confidence=classification.confidence,
-            derived_note_path=note_path,
-            inbox_reason_type=_safe_inbox_reason_type(reason),
-            error_type=_safe_inbox_error_type(reason),
-        )
-        await self._deliver_final_receipt(
-            updated,
-            format_inbox_receipt(
+        if transition.changed:
+            log_metadata(
+                "capture_inbox",
                 capture_id=updated.capture_id,
-                note_path=note_path,
-                reason=reason,
-                has_attachments=capture.has_attachments,
-            ),
-        )
+                discord_message_id=updated.discord_message_id,
+                status_transition=f"{CLASSIFYING}->{INBOX}",
+                classification_confidence=classification.confidence,
+                derived_note_path=note_path,
+                inbox_reason_type=_safe_inbox_reason_type(reason),
+                error_type=_safe_inbox_error_type(reason),
+            )
+            try:
+                await self.edit_receipt(
+                    capture_id=updated.capture_id,
+                    content=format_inbox_receipt(
+                        capture_id=updated.capture_id,
+                        note_path=note_path,
+                        reason=reason,
+                        has_attachments=capture.has_attachments,
+                    ),
+                )
+            except ReceiptDeliveryError:
+                pass
 
     async def complete_failed(
         self,
@@ -207,36 +229,137 @@ class CaptureService:
         classification=None,
     ) -> None:
         capture = self._ledger.get_capture(capture_id)
+        transition = self.mark_failed(
+            capture_id=capture_id,
+            reason=reason,
+            classification=classification,
+        )
+        updated = self._ledger.get_capture(capture_id)
+        if transition.changed:
+            log_metadata(
+                "capture_failed",
+                capture_id=updated.capture_id,
+                discord_message_id=updated.discord_message_id,
+                status_transition=f"{capture.status}->{FAILED}",
+                classification_confidence=getattr(classification, "confidence", None),
+                error_type=_safe_failure_error_type(reason),
+            )
+            try:
+                await self.edit_receipt(
+                    capture_id=updated.capture_id,
+                    content=format_vault_failure_receipt(
+                        capture_id,
+                        has_attachments=capture.has_attachments,
+                    ),
+                )
+            except ReceiptDeliveryError:
+                pass
+
+    def get_capture(self, capture_id: str) -> CaptureRecord:
+        try:
+            return self._ledger.get_capture(capture_id)
+        except KeyError as exc:
+            raise CaptureNotFoundError("capture not found") from exc
+
+    def assert_healthy(self) -> None:
+        self._ledger.ping()
+
+    def mark_forwarded(self, capture_id: str) -> TransitionResult:
+        return self._transition_capture(
+            capture_id,
+            from_statuses={RECEIVED},
+            to_status=FORWARDED,
+            event_type="CAPTURE_FORWARDED",
+            event_payload={"status": FORWARDED},
+        )
+
+    def mark_classifying(self, capture_id: str) -> TransitionResult:
+        return self._transition_capture(
+            capture_id,
+            from_statuses={RECEIVED, FORWARDED},
+            to_status=CLASSIFYING,
+            event_type="CAPTURE_CLASSIFYING",
+            event_payload={"status": CLASSIFYING},
+        )
+
+    def mark_filed(self, *, capture_id: str, note_path: str, classification) -> TransitionResult:
+        classification_json = classification.model_dump(mode="json")
+        return self._transition_capture(
+            capture_id,
+            from_statuses={CLASSIFYING},
+            to_status=FILED,
+            classification_json=classification_json,
+            derived_note_path=note_path,
+            event_type="CAPTURE_FILED",
+            event_payload={"path": note_path},
+            replay_payload={"classification_json": classification_json, "derived_note_path": note_path},
+        )
+
+    def mark_inbox(
+        self,
+        *,
+        capture_id: str,
+        note_path: str,
+        classification,
+        reason: str | None,
+    ) -> TransitionResult:
+        classification_json = classification.model_dump(mode="json")
+        event_payload = {"path": note_path}
+        if reason is not None:
+            event_payload["reason"] = reason
+        return self._transition_capture(
+            capture_id,
+            from_statuses={CLASSIFYING},
+            to_status=INBOX,
+            classification_json=classification_json,
+            derived_note_path=note_path,
+            last_error=reason,
+            event_type="CAPTURE_INBOX",
+            event_payload=event_payload,
+            replay_payload={
+                "classification_json": classification_json,
+                "derived_note_path": note_path,
+                "last_error": reason,
+            },
+        )
+
+    def mark_failed(self, *, capture_id: str, reason: str, classification=None) -> TransitionResult:
         classification_json = None
         if classification is not None:
             classification_json = classification.model_dump(mode="json")
-        self._ledger.update_capture(
+        return self._transition_capture(
             capture_id,
-            status=FAILED,
+            from_statuses={RECEIVED, FORWARDED, CLASSIFYING},
+            to_status=FAILED,
             classification_json=classification_json,
             last_error=reason,
             event_type="CAPTURE_FAILED",
             event_payload={"reason": reason},
-        )
-        updated = self._ledger.get_capture(capture_id)
-        log_metadata(
-            "capture_failed",
-            capture_id=updated.capture_id,
-            discord_message_id=updated.discord_message_id,
-            status_transition=f"{CLASSIFYING}->{FAILED}",
-            classification_confidence=getattr(classification, "confidence", None),
-            error_type=_safe_failure_error_type(reason),
-        )
-        await self._deliver_final_receipt(
-            updated,
-            format_vault_failure_receipt(
-                capture_id,
-                has_attachments=capture.has_attachments,
-            ),
+            replay_payload={
+                "classification_json": classification_json,
+                "last_error": reason,
+            },
         )
 
-    def get_capture(self, capture_id: str) -> CaptureRecord:
-        return self._ledger.get_capture(capture_id)
+    def retry(self, capture_id: str) -> TransitionResult:
+        return self._transition_capture(
+            capture_id,
+            from_statuses={FAILED},
+            to_status=RECEIVED,
+            event_type="CAPTURE_RETRIED",
+            event_payload={"status": RECEIVED},
+        )
+
+    async def edit_receipt(self, *, capture_id: str, content: str) -> ReceiptDeliveryResult:
+        capture = self.get_capture(capture_id)
+        delivery = await self._deliver_final_receipt(capture, content)
+        if not delivery.delivered:
+            raise ReceiptDeliveryError("receipt delivery failed")
+        return ReceiptDeliveryResult(
+            delivered=delivery.delivered,
+            replaced=delivery.replaced,
+            receipt_message_id=delivery.receipt_message_id,
+        )
 
     def captures_by_status(self, status: str) -> list[CaptureRecord]:
         return self._ledger.captures_by_status(status)
@@ -402,7 +525,7 @@ class CaptureService:
 
     async def _deliver_final_receipt(self, capture: CaptureRecord, content: str) -> None:
         if self._receipt_client is None:
-            return
+            return ReceiptDeliveryResult(delivered=False, replaced=False, receipt_message_id=None)
         try:
             delivery = await deliver_final_receipt(self._receipt_client, capture, content)
         except Exception as exc:
@@ -412,7 +535,7 @@ class CaptureService:
                 discord_message_id=capture.discord_message_id,
                 error_type=type(exc).__name__,
             )
-            return
+            return ReceiptDeliveryResult(delivered=False, replaced=False, receipt_message_id=None)
 
         if delivery.replaced and delivery.receipt_message_id is not None:
             self._ledger.update_capture(
@@ -424,6 +547,58 @@ class CaptureService:
                     "new_receipt_message_id": delivery.receipt_message_id,
                 },
             )
+        return delivery
+
+    def _transition_capture(
+        self,
+        capture_id: str,
+        *,
+        from_statuses: set[str],
+        to_status: str,
+        event_type: str,
+        event_payload: dict | None = None,
+        classification_json: dict | None = None,
+        derived_note_path: str | None = None,
+        last_error: str | None = None,
+        replay_payload: dict | None = None,
+    ) -> TransitionResult:
+        capture = self.get_capture(capture_id)
+        if capture.status == to_status:
+            if replay_payload is not None and not self._replay_payload_matches(capture, replay_payload):
+                raise ConflictingReplayError("conflicting replay payload")
+            return TransitionResult(
+                capture_id=capture.capture_id,
+                previous_status=capture.status,
+                status=capture.status,
+                changed=False,
+            )
+
+        if capture.status not in from_statuses:
+            raise InvalidCaptureTransitionError("invalid capture transition")
+
+        result = self._ledger.transition_capture(
+            capture_id,
+            from_statuses=from_statuses,
+            to_status=to_status,
+            classification_json=classification_json,
+            derived_note_path=derived_note_path,
+            last_error=last_error,
+            event_type=event_type,
+            event_payload=event_payload,
+        )
+        if result is None:
+            raise InvalidCaptureTransitionError("invalid capture transition")
+        return result
+
+    def _replay_payload_matches(self, capture: CaptureRecord, replay_payload: dict) -> bool:
+        if "classification_json" in replay_payload:
+            if self._ledger.capture_classification_json(capture.capture_id) != replay_payload["classification_json"]:
+                return False
+        if "derived_note_path" in replay_payload and capture.derived_note_path != replay_payload["derived_note_path"]:
+            return False
+        if "last_error" in replay_payload and capture.last_error != replay_payload["last_error"]:
+            return False
+        return True
 
     def _advance_reconcile_marker(self, message_id: str) -> None:
         self._ledger.advance_system_state_snowflake(LAST_RECONCILED_MESSAGE_ID, message_id)
