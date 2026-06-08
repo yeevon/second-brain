@@ -618,8 +618,12 @@ async def wait_for_status(ledger: Ledger, capture_id: str, status: str) -> None:
 
 
 def event_types(ledger: Ledger, capture_id: str) -> list[str]:
-    rows = ledger._connection.execute(
-        "SELECT event_type FROM capture_events WHERE capture_id = ? ORDER BY id",
-        (capture_id,),
-    ).fetchall()
-    return [row["event_type"] for row in rows]
+    return ledger._runtime.read(
+        lambda conn: [
+            row["event_type"]
+            for row in conn.execute(
+                "SELECT event_type FROM capture_events WHERE capture_id = ? ORDER BY id",
+                (capture_id,),
+            ).fetchall()
+        ]
+    )

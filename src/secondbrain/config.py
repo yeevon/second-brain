@@ -46,6 +46,12 @@ class Settings:
         # Runtime
         self.capture_processing_mode = os.getenv("CAPTURE_PROCESSING_MODE")
 
+        # SQLite runtime
+        self.sqlite_busy_timeout_ms       = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS",       "1000"))
+        self.sqlite_busy_retry_attempts   = int(os.getenv("SQLITE_BUSY_RETRY_ATTEMPTS",   "5"))
+        self.sqlite_busy_retry_base_delay_ms = int(os.getenv("SQLITE_BUSY_RETRY_BASE_DELAY_MS", "25"))
+        self.sqlite_job_queue_maxsize     = int(os.getenv("SQLITE_JOB_QUEUE_MAXSIZE",     "10000"))
+
         # Prompt version
         # self.prompt_version = os.getenv("PROMPT_VERSION")
 
@@ -110,3 +116,12 @@ class Settings:
 
         if not (1 <= self.capture_api_port <= 65535):
             raise RuntimeError("Capture API port must be between 1 and 65535")
+
+        if self.sqlite_busy_timeout_ms < 0:
+            raise RuntimeError("SQLITE_BUSY_TIMEOUT_MS must be >= 0")
+        if self.sqlite_busy_retry_attempts < 1:
+            raise RuntimeError("SQLITE_BUSY_RETRY_ATTEMPTS must be >= 1")
+        if self.sqlite_busy_retry_base_delay_ms < 0:
+            raise RuntimeError("SQLITE_BUSY_RETRY_BASE_DELAY_MS must be >= 0")
+        if self.sqlite_job_queue_maxsize < 1:
+            raise RuntimeError("SQLITE_JOB_QUEUE_MAXSIZE must be >= 1")

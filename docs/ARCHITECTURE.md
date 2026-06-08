@@ -644,6 +644,58 @@ Python:
     no network I/O inside the worker transaction
 ```
 
+#### Python implementation — `SQLiteRuntime`
+
+`capture-service` implements this through a dedicated `SQLiteRuntime` worker:
+
+```text
+Discord handler / classifier worker / status command
+    ↓
+Ledger repository method
+    ↓
+SQLiteRuntime.write(operation) or SQLiteRuntime.read(operation)
+    ↓
+bounded job queue (Queue(maxsize=SQLITE_JOB_QUEUE_MAXSIZE))
+    ↓
+single SQLite worker thread
+    ↓
+single worker-owned SQLite connection (WAL, foreign_keys=ON, busy_timeout configured)
+```
+
+**Invariant:** A saved receipt is sent only after the insert transaction commits and the row is externally visible from a separate SQLite connection.
+
+**Invariant:** No Discord call, Gemini call, or network request of any kind is made while a database write transaction is open.
+
+If an operation encounters `SQLITE_BUSY` or `SQLITE_LOCKED`, it retries with bounded exponential backoff (configurable via `SQLITE_BUSY_RETRY_ATTEMPTS` and `SQLITE_BUSY_RETRY_BASE_DELAY_MS`). After the retry budget is exhausted, `SQLiteBusyError` is raised — the service does not claim the note was saved.
+
+Startup sequence:
+```text
+SQLiteRuntime starts worker thread
+    ↓
+worker thread creates connection with WAL + foreign_keys + busy_timeout
+    ↓
+worker thread verifies PRAGMAs
+    ↓
+worker thread runs versioned migrations
+    ↓
+runtime signals ready
+    ↓
+Discord listener starts accepting messages
+```
+
+Migration sequence:
+```text
+create schema_migrations table (IF NOT EXISTS)
+    ↓
+read applied version numbers
+    ↓
+apply missing migrations in ascending order
+    ↓
+record each completed version
+    ↓
+accept normal jobs
+```
+
 For every database connection:
 
 ```sql

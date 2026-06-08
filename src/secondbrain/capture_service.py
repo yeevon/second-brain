@@ -74,7 +74,7 @@ class CaptureService:
     ) -> "CaptureService":
         return cls(
             settings=settings,
-            ledger=Ledger(settings.ledger_path),
+            ledger=Ledger(settings.ledger_path, settings),
             notify_capture=notify_capture,
             receipt_client=receipt_client,
         )

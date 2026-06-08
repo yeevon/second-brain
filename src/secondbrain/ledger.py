@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 import json
 from pathlib import Path
 import sqlite3
-from threading import Lock
 from typing import Any
 
 from secondbrain.capture_models import (
@@ -21,6 +20,7 @@ from secondbrain.capture_models import (
     CaptureRecord,
     TransitionResult,
 )
+from secondbrain.sqlite_runtime import SQLiteRuntime
 
 
 UNSET = object()
@@ -33,77 +33,29 @@ class InsertResult:
 
 
 class Ledger:
-    def __init__(self, path: Path | str) -> None:
+    def __init__(self, path: Path | str, settings: Any = None) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = Lock()
-        self._connection = sqlite3.connect(self.path)
-        self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA foreign_keys = ON")
-        self.migrate()
+
+        busy_timeout_ms      = getattr(settings, "sqlite_busy_timeout_ms",       1000)  if settings else 1000
+        retry_attempts       = getattr(settings, "sqlite_busy_retry_attempts",      5)  if settings else 5
+        retry_base_delay_ms  = getattr(settings, "sqlite_busy_retry_base_delay_ms", 25) if settings else 25
+        job_queue_maxsize    = getattr(settings, "sqlite_job_queue_maxsize",     10000) if settings else 10000
+
+        self._runtime = SQLiteRuntime(
+            self.path,
+            busy_timeout_ms=busy_timeout_ms,
+            retry_attempts=retry_attempts,
+            retry_base_delay_ms=retry_base_delay_ms,
+            job_queue_maxsize=job_queue_maxsize,
+        )
 
     def close(self) -> None:
-        self._connection.close()
+        self._runtime.close()
 
-    def migrate(self) -> None:
-        with self._lock, self._connection:
-            self._connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS captures (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    capture_id TEXT NOT NULL UNIQUE,
-                    discord_message_id TEXT NOT NULL UNIQUE,
-                    discord_channel_id TEXT NOT NULL,
-                    discord_guild_id TEXT NOT NULL,
-                    discord_author_id TEXT NOT NULL,
-
-                    raw_text TEXT,
-                    redacted_text TEXT,
-                    is_sensitive INTEGER NOT NULL DEFAULT 0,
-                    sensitivity_flags TEXT,
-
-                    has_attachments INTEGER NOT NULL DEFAULT 0,
-                    attachment_metadata_json TEXT,
-
-                    received_at TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    classification_json TEXT,
-                    derived_note_path TEXT,
-                    receipt_message_id TEXT,
-                    last_error TEXT,
-                    updated_at TEXT NOT NULL,
-
-                    CHECK (
-                        (
-                            is_sensitive = 0
-                            AND raw_text IS NOT NULL
-                            AND (raw_text != '' OR has_attachments = 1)
-                        )
-                        OR
-                        (is_sensitive = 1 AND raw_text IS NULL AND redacted_text IS NOT NULL)
-                    )
-                );
-
-                CREATE TABLE IF NOT EXISTS capture_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    capture_id TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    event_payload_json TEXT,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY (capture_id) REFERENCES captures(capture_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS system_state (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_captures_status ON captures(status);
-                CREATE INDEX IF NOT EXISTS idx_capture_events_capture_id
-                    ON capture_events(capture_id);
-                """
-            )
+    # ------------------------------------------------------------------
+    # Writes
+    # ------------------------------------------------------------------
 
     def insert_accepted_capture(
         self,
@@ -118,47 +70,19 @@ class Ledger:
         received_at: datetime | None = None,
     ) -> InsertResult:
         received_at = received_at or _now()
-        with self._lock, self._connection:
-            existing = self._get_by_discord_message_id(discord_message_id)
-            if existing is not None:
-                return InsertResult(capture=_record_from_row(existing), created=False)
-
-            capture_id = self._next_capture_id(received_at)
-            now = _iso(_now())
-            self._connection.execute(
-                """
-                INSERT INTO captures (
-                    capture_id,
-                    discord_message_id,
-                    discord_channel_id,
-                    discord_guild_id,
-                    discord_author_id,
-                    raw_text,
-                    is_sensitive,
-                    has_attachments,
-                    attachment_metadata_json,
-                    received_at,
-                    status,
-                    updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
-                """,
-                (
-                    capture_id,
-                    discord_message_id,
-                    discord_channel_id,
-                    discord_guild_id,
-                    discord_author_id,
-                    raw_text,
-                    int(has_attachments),
-                    _json_dumps(attachment_metadata or []),
-                    _iso(received_at),
-                    RECEIVED,
-                    now,
-                ),
+        return self._runtime.write(
+            lambda conn: self._insert_accepted_capture(
+                conn,
+                discord_message_id=discord_message_id,
+                discord_channel_id=discord_channel_id,
+                discord_guild_id=discord_guild_id,
+                discord_author_id=discord_author_id,
+                raw_text=raw_text,
+                has_attachments=has_attachments,
+                attachment_metadata=attachment_metadata,
+                received_at=received_at,
             )
-            self._append_event(capture_id, "CAPTURE_RECEIVED", {"status": RECEIVED})
-            return InsertResult(capture=_record_from_row(self._get_by_capture_id(capture_id)), created=True)
+        )
 
     def insert_sensitive_rejection(
         self,
@@ -172,59 +96,19 @@ class Ledger:
         received_at: datetime | None = None,
     ) -> InsertResult:
         received_at = received_at or _now()
-        with self._lock, self._connection:
-            existing = self._get_by_discord_message_id(discord_message_id)
-            if existing is not None:
-                return InsertResult(capture=_record_from_row(existing), created=False)
-
-            capture_id = self._next_capture_id(received_at)
-            now = _iso(_now())
-            self._connection.execute(
-                """
-                INSERT INTO captures (
-                    capture_id,
-                    discord_message_id,
-                    discord_channel_id,
-                    discord_guild_id,
-                    discord_author_id,
-                    redacted_text,
-                    is_sensitive,
-                    sensitivity_flags,
-                    has_attachments,
-                    received_at,
-                    status,
-                    updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, 1, ?, 0, ?, ?, ?)
-                """,
-                (
-                    capture_id,
-                    discord_message_id,
-                    discord_channel_id,
-                    discord_guild_id,
-                    discord_author_id,
-                    redacted_text,
-                    _json_dumps(list(sensitivity_flags)),
-                    _iso(received_at),
-                    REJECTED_SENSITIVE,
-                    now,
-                ),
+        flags = list(sensitivity_flags)
+        return self._runtime.write(
+            lambda conn: self._insert_sensitive_rejection(
+                conn,
+                discord_message_id=discord_message_id,
+                discord_channel_id=discord_channel_id,
+                discord_guild_id=discord_guild_id,
+                discord_author_id=discord_author_id,
+                redacted_text=redacted_text,
+                sensitivity_flags=flags,
+                received_at=received_at,
             )
-            self._append_event(
-                capture_id,
-                "CAPTURE_REJECTED_SENSITIVE",
-                {"flags": list(sensitivity_flags)},
-            )
-            return InsertResult(capture=_record_from_row(self._get_by_capture_id(capture_id)), created=True)
-
-    def get_capture(self, capture_id: str) -> CaptureRecord:
-        row = self._connection.execute(
-            "SELECT * FROM captures WHERE capture_id = ?",
-            (capture_id,),
-        ).fetchone()
-        if row is None:
-            raise KeyError(f"capture not found: {capture_id}")
-        return _record_from_row(row)
+        )
 
     def set_receipt_message_id(self, capture_id: str, receipt_message_id: str) -> None:
         self.update_capture(
@@ -235,46 +119,12 @@ class Ledger:
         )
 
     def mark_classifying(self, capture_id: str) -> bool:
-        with self._lock, self._connection:
-            now = _iso(_now())
-            cursor = self._connection.execute(
-                """
-                UPDATE captures
-                SET status = ?, updated_at = ?
-                WHERE capture_id = ? AND status = ?
-                """,
-                (CLASSIFYING, now, capture_id, RECEIVED),
-            )
-            if cursor.rowcount == 0:
-                return False
-            self._append_event(capture_id, "CAPTURE_CLASSIFYING", {"status": CLASSIFYING})
-            return True
+        return self._runtime.write(
+            lambda conn: self._mark_classifying(conn, capture_id)
+        )
 
     def reset_classifying_to_received(self) -> int:
-        with self._lock, self._connection:
-            rows = self._connection.execute(
-                "SELECT capture_id FROM captures WHERE status = ? ORDER BY id",
-                (CLASSIFYING,),
-            ).fetchall()
-            if not rows:
-                return 0
-
-            now = _iso(_now())
-            self._connection.execute(
-                """
-                UPDATE captures
-                SET status = ?, updated_at = ?
-                WHERE status = ?
-                """,
-                (RECEIVED, now, CLASSIFYING),
-            )
-            for row in rows:
-                self._append_event(
-                    row["capture_id"],
-                    "CAPTURE_REQUEUED",
-                    {"from_status": CLASSIFYING, "status": RECEIVED},
-                )
-            return len(rows)
+        return self._runtime.write(self._reset_classifying_to_received)
 
     def update_capture(
         self,
@@ -288,10 +138,269 @@ class Ledger:
         event_type: str | None = None,
         event_payload: dict[str, Any] | None = None,
     ) -> None:
+        if status is None and classification_json is None and derived_note_path is None \
+                and receipt_message_id is None and last_error is None and event_type is None:
+            return
+        if status is not None:
+            _validate_status(status)
+        self._runtime.write(
+            lambda conn: self._update_capture(
+                conn,
+                capture_id,
+                status=status,
+                classification_json=classification_json,
+                derived_note_path=derived_note_path,
+                receipt_message_id=receipt_message_id,
+                last_error=last_error,
+                event_type=event_type,
+                event_payload=event_payload,
+            )
+        )
+
+    def transition_capture(
+        self,
+        capture_id: str,
+        *,
+        from_statuses: set[str],
+        to_status: str,
+        classification_json: dict[str, Any] | None | object = UNSET,
+        derived_note_path: str | None | object = UNSET,
+        last_error: str | None | object = UNSET,
+        event_type: str,
+        event_payload: dict[str, Any] | None = None,
+    ) -> TransitionResult | None:
+        _validate_status(to_status)
+        for s in from_statuses:
+            _validate_status(s)
+        return self._runtime.write(
+            lambda conn: self._transition_capture(
+                conn,
+                capture_id,
+                from_statuses=from_statuses,
+                to_status=to_status,
+                classification_json=classification_json,
+                derived_note_path=derived_note_path,
+                last_error=last_error,
+                event_type=event_type,
+                event_payload=event_payload,
+            )
+        )
+
+    def set_system_state(self, key: str, value: str) -> None:
+        self._runtime.write(lambda conn: self._set_system_state(conn, key, value))
+
+    def advance_system_state_snowflake(self, key: str, candidate: str) -> None:
+        self._runtime.write(
+            lambda conn: self._advance_system_state_snowflake(conn, key, candidate)
+        )
+
+    # ------------------------------------------------------------------
+    # Reads
+    # ------------------------------------------------------------------
+
+    def get_capture(self, capture_id: str) -> CaptureRecord:
+        return self._runtime.read(lambda conn: self._get_capture(conn, capture_id))
+
+    def capture_classification_json(self, capture_id: str) -> dict[str, Any] | None:
+        return self._runtime.read(
+            lambda conn: self._capture_classification_json(conn, capture_id)
+        )
+
+    def enqueueable_capture_ids(self) -> list[str]:
+        return self._runtime.read(self._enqueueable_capture_ids)
+
+    def captures_by_status(self, status: str) -> list[CaptureRecord]:
+        return self._runtime.read(lambda conn: self._captures_by_status(conn, status))
+
+    def status_counts(self) -> dict[str, int]:
+        return self._runtime.read(self._status_counts)
+
+    def total_captures(self) -> int:
+        return self._runtime.read(self._total_captures)
+
+    def ping(self) -> None:
+        self._runtime.read(lambda conn: conn.execute("SELECT 1").fetchone())
+
+    def last_successful_vault_write(self) -> str | None:
+        return self._runtime.read(self._last_successful_vault_write)
+
+    def get_system_state(self, key: str) -> str | None:
+        return self._runtime.read(lambda conn: self._get_system_state(conn, key))
+
+    # ------------------------------------------------------------------
+    # Private write implementations (run inside worker-owned connection)
+    # ------------------------------------------------------------------
+
+    def _insert_accepted_capture(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        discord_message_id: str,
+        discord_channel_id: str,
+        discord_guild_id: str,
+        discord_author_id: str,
+        raw_text: str,
+        has_attachments: bool,
+        attachment_metadata: list[dict[str, Any]] | None,
+        received_at: datetime,
+    ) -> InsertResult:
+        existing = self._get_by_discord_message_id(conn, discord_message_id)
+        if existing is not None:
+            return InsertResult(capture=_record_from_row(existing), created=False)
+
+        capture_id = self._next_capture_id(conn, received_at)
+        now = _iso(_now())
+        conn.execute(
+            """
+            INSERT INTO captures (
+                capture_id,
+                discord_message_id,
+                discord_channel_id,
+                discord_guild_id,
+                discord_author_id,
+                raw_text,
+                is_sensitive,
+                has_attachments,
+                attachment_metadata_json,
+                received_at,
+                status,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+            """,
+            (
+                capture_id,
+                discord_message_id,
+                discord_channel_id,
+                discord_guild_id,
+                discord_author_id,
+                raw_text,
+                int(has_attachments),
+                _json_dumps(attachment_metadata or []),
+                _iso(received_at),
+                RECEIVED,
+                now,
+            ),
+        )
+        self._append_event(conn, capture_id, "CAPTURE_RECEIVED", {"status": RECEIVED})
+        return InsertResult(
+            capture=_record_from_row(self._get_by_capture_id(conn, capture_id)),
+            created=True,
+        )
+
+    def _insert_sensitive_rejection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        discord_message_id: str,
+        discord_channel_id: str,
+        discord_guild_id: str,
+        discord_author_id: str,
+        redacted_text: str,
+        sensitivity_flags: list[str],
+        received_at: datetime,
+    ) -> InsertResult:
+        existing = self._get_by_discord_message_id(conn, discord_message_id)
+        if existing is not None:
+            return InsertResult(capture=_record_from_row(existing), created=False)
+
+        capture_id = self._next_capture_id(conn, received_at)
+        now = _iso(_now())
+        conn.execute(
+            """
+            INSERT INTO captures (
+                capture_id,
+                discord_message_id,
+                discord_channel_id,
+                discord_guild_id,
+                discord_author_id,
+                redacted_text,
+                is_sensitive,
+                sensitivity_flags,
+                has_attachments,
+                received_at,
+                status,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, 0, ?, ?, ?)
+            """,
+            (
+                capture_id,
+                discord_message_id,
+                discord_channel_id,
+                discord_guild_id,
+                discord_author_id,
+                redacted_text,
+                _json_dumps(sensitivity_flags),
+                _iso(received_at),
+                REJECTED_SENSITIVE,
+                now,
+            ),
+        )
+        self._append_event(
+            conn,
+            capture_id,
+            "CAPTURE_REJECTED_SENSITIVE",
+            {"flags": sensitivity_flags},
+        )
+        return InsertResult(
+            capture=_record_from_row(self._get_by_capture_id(conn, capture_id)),
+            created=True,
+        )
+
+    def _mark_classifying(self, conn: sqlite3.Connection, capture_id: str) -> bool:
+        now = _iso(_now())
+        cursor = conn.execute(
+            """
+            UPDATE captures
+            SET status = ?, updated_at = ?
+            WHERE capture_id = ? AND status = ?
+            """,
+            (CLASSIFYING, now, capture_id, RECEIVED),
+        )
+        if cursor.rowcount == 0:
+            return False
+        self._append_event(conn, capture_id, "CAPTURE_CLASSIFYING", {"status": CLASSIFYING})
+        return True
+
+    def _reset_classifying_to_received(self, conn: sqlite3.Connection) -> int:
+        rows = conn.execute(
+            "SELECT capture_id FROM captures WHERE status = ? ORDER BY id",
+            (CLASSIFYING,),
+        ).fetchall()
+        if not rows:
+            return 0
+
+        now = _iso(_now())
+        conn.execute(
+            "UPDATE captures SET status = ?, updated_at = ? WHERE status = ?",
+            (RECEIVED, now, CLASSIFYING),
+        )
+        for row in rows:
+            self._append_event(
+                conn,
+                row["capture_id"],
+                "CAPTURE_REQUEUED",
+                {"from_status": CLASSIFYING, "status": RECEIVED},
+            )
+        return len(rows)
+
+    def _update_capture(
+        self,
+        conn: sqlite3.Connection,
+        capture_id: str,
+        *,
+        status: str | None,
+        classification_json: dict[str, Any] | None,
+        derived_note_path: str | None,
+        receipt_message_id: str | None,
+        last_error: str | None,
+        event_type: str | None,
+        event_payload: dict[str, Any] | None,
+    ) -> None:
         updates: list[str] = []
         values: list[Any] = []
         if status is not None:
-            _validate_status(status)
             updates.append("status = ?")
             values.append(status)
         if classification_json is not None:
@@ -307,82 +416,119 @@ class Ledger:
             updates.append("last_error = ?")
             values.append(last_error)
 
-        if not updates and event_type is None:
-            return
+        if updates:
+            updates.append("updated_at = ?")
+            values.append(_iso(_now()))
+            values.append(capture_id)
+            conn.execute(
+                f"UPDATE captures SET {', '.join(updates)} WHERE capture_id = ?",
+                values,
+            )
+        if event_type is not None:
+            self._append_event(conn, capture_id, event_type, event_payload or {})
 
-        with self._lock, self._connection:
-            if updates:
-                updates.append("updated_at = ?")
-                values.append(_iso(_now()))
-                values.append(capture_id)
-                self._connection.execute(
-                    f"UPDATE captures SET {', '.join(updates)} WHERE capture_id = ?",
-                    values,
-                )
-            if event_type is not None:
-                self._append_event(capture_id, event_type, event_payload or {})
-
-    def transition_capture(
+    def _transition_capture(
         self,
+        conn: sqlite3.Connection,
         capture_id: str,
         *,
         from_statuses: set[str],
         to_status: str,
-        classification_json: dict[str, Any] | None | object = UNSET,
-        derived_note_path: str | None | object = UNSET,
-        last_error: str | None | object = UNSET,
+        classification_json: dict[str, Any] | None | object,
+        derived_note_path: str | None | object,
+        last_error: str | None | object,
         event_type: str,
-        event_payload: dict[str, Any] | None = None,
+        event_payload: dict[str, Any] | None,
     ) -> TransitionResult | None:
-        _validate_status(to_status)
-        for status in from_statuses:
-            _validate_status(status)
+        current_row = self._get_by_capture_id(conn, capture_id)
+        previous_status = current_row["status"]
+        if previous_status not in from_statuses:
+            return None
 
-        with self._lock, self._connection:
-            current_row = self._get_by_capture_id(capture_id)
-            previous_status = current_row["status"]
-            if previous_status not in from_statuses:
-                return None
+        updates = ["status = ?"]
+        values: list[Any] = [to_status]
+        if classification_json is not UNSET:
+            updates.append("classification_json = ?")
+            values.append(None if classification_json is None else _json_dumps(classification_json))
+        if derived_note_path is not UNSET:
+            updates.append("derived_note_path = ?")
+            values.append(derived_note_path)
+        if last_error is not UNSET:
+            updates.append("last_error = ?")
+            values.append(last_error)
 
-            updates = ["status = ?"]
-            values: list[Any] = [to_status]
-            if classification_json is not UNSET:
-                updates.append("classification_json = ?")
-                values.append(None if classification_json is None else _json_dumps(classification_json))
-            if derived_note_path is not UNSET:
-                updates.append("derived_note_path = ?")
-                values.append(derived_note_path)
-            if last_error is not UNSET:
-                updates.append("last_error = ?")
-                values.append(last_error)
+        updates.append("updated_at = ?")
+        values.append(_iso(_now()))
+        values.append(capture_id)
+        values.extend(sorted(from_statuses))
 
-            updates.append("updated_at = ?")
-            values.append(_iso(_now()))
-            values.append(capture_id)
-            values.extend(sorted(from_statuses))
+        placeholders = ", ".join("?" for _ in from_statuses)
+        cursor = conn.execute(
+            f"""
+            UPDATE captures
+            SET {', '.join(updates)}
+            WHERE capture_id = ?
+              AND status IN ({placeholders})
+            """,
+            values,
+        )
+        if cursor.rowcount == 0:
+            return None
+        self._append_event(conn, capture_id, event_type, event_payload or {})
+        return TransitionResult(
+            capture_id=capture_id,
+            previous_status=previous_status,
+            status=to_status,
+            changed=True,
+        )
 
-            placeholders = ", ".join("?" for _ in from_statuses)
-            cursor = self._connection.execute(
-                f"""
-                UPDATE captures
-                SET {', '.join(updates)}
-                WHERE capture_id = ?
-                  AND status IN ({placeholders})
-                """,
-                values,
-            )
-            if cursor.rowcount == 0:
-                return None
-            self._append_event(capture_id, event_type, event_payload or {})
-            return TransitionResult(
-                capture_id=capture_id,
-                previous_status=previous_status,
-                status=to_status,
-                changed=True,
-            )
+    def _set_system_state(self, conn: sqlite3.Connection, key: str, value: str) -> None:
+        conn.execute(
+            """
+            INSERT INTO system_state (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, value, _iso(_now())),
+        )
 
-    def capture_classification_json(self, capture_id: str) -> dict[str, Any] | None:
-        row = self._connection.execute(
+    def _advance_system_state_snowflake(
+        self, conn: sqlite3.Connection, key: str, candidate: str
+    ) -> None:
+        row = conn.execute(
+            "SELECT value FROM system_state WHERE key = ?", (key,)
+        ).fetchone()
+        if row is not None and int(candidate) <= int(row["value"]):
+            return
+        conn.execute(
+            """
+            INSERT INTO system_state (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, candidate, _iso(_now())),
+        )
+
+    # ------------------------------------------------------------------
+    # Private read implementations
+    # ------------------------------------------------------------------
+
+    def _get_capture(self, conn: sqlite3.Connection, capture_id: str) -> CaptureRecord:
+        row = conn.execute(
+            "SELECT * FROM captures WHERE capture_id = ?", (capture_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"capture not found: {capture_id}")
+        return _record_from_row(row)
+
+    def _capture_classification_json(
+        self, conn: sqlite3.Connection, capture_id: str
+    ) -> dict[str, Any] | None:
+        row = conn.execute(
             "SELECT classification_json FROM captures WHERE capture_id = ?",
             (capture_id,),
         ).fetchone()
@@ -392,35 +538,33 @@ class Ledger:
             return None
         return json.loads(row["classification_json"])
 
-    def enqueueable_capture_ids(self) -> list[str]:
-        rows = self._connection.execute(
+    def _enqueueable_capture_ids(self, conn: sqlite3.Connection) -> list[str]:
+        rows = conn.execute(
             "SELECT capture_id FROM captures WHERE status IN (?, ?, ?) ORDER BY id",
             (RECEIVED, FORWARDED, CLASSIFYING),
         ).fetchall()
         return [row["capture_id"] for row in rows]
 
-    def captures_by_status(self, status: str) -> list[CaptureRecord]:
-        rows = self._connection.execute(
-            "SELECT * FROM captures WHERE status = ? ORDER BY id",
-            (status,),
+    def _captures_by_status(
+        self, conn: sqlite3.Connection, status: str
+    ) -> list[CaptureRecord]:
+        rows = conn.execute(
+            "SELECT * FROM captures WHERE status = ? ORDER BY id", (status,)
         ).fetchall()
         return [_record_from_row(row) for row in rows]
 
-    def status_counts(self) -> dict[str, int]:
-        rows = self._connection.execute(
+    def _status_counts(self, conn: sqlite3.Connection) -> dict[str, int]:
+        rows = conn.execute(
             "SELECT status, COUNT(*) AS count FROM captures GROUP BY status"
         ).fetchall()
         return {row["status"]: row["count"] for row in rows}
 
-    def total_captures(self) -> int:
-        row = self._connection.execute("SELECT COUNT(*) AS count FROM captures").fetchone()
+    def _total_captures(self, conn: sqlite3.Connection) -> int:
+        row = conn.execute("SELECT COUNT(*) AS count FROM captures").fetchone()
         return int(row["count"])
 
-    def ping(self) -> None:
-        self._connection.execute("SELECT 1").fetchone()
-
-    def last_successful_vault_write(self) -> str | None:
-        row = self._connection.execute(
+    def _last_successful_vault_write(self, conn: sqlite3.Connection) -> str | None:
+        row = conn.execute(
             """
             SELECT derived_note_path
             FROM captures
@@ -432,64 +576,37 @@ class Ledger:
         ).fetchone()
         return None if row is None else row["derived_note_path"]
 
-    def set_system_state(self, key: str, value: str) -> None:
-        with self._lock, self._connection:
-            self._connection.execute(
-                """
-                INSERT INTO system_state (key, value, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value = excluded.value,
-                    updated_at = excluded.updated_at
-                """,
-                (key, value, _iso(_now())),
-            )
-
-    def advance_system_state_snowflake(self, key: str, candidate: str) -> None:
-        with self._lock, self._connection:
-            row = self._connection.execute(
-                "SELECT value FROM system_state WHERE key = ?",
-                (key,),
-            ).fetchone()
-            if row is not None and int(candidate) <= int(row["value"]):
-                return
-
-            self._connection.execute(
-                """
-                INSERT INTO system_state (key, value, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value = excluded.value,
-                    updated_at = excluded.updated_at
-                """,
-                (key, candidate, _iso(_now())),
-            )
-
-    def get_system_state(self, key: str) -> str | None:
-        row = self._connection.execute(
-            "SELECT value FROM system_state WHERE key = ?",
-            (key,),
+    def _get_system_state(self, conn: sqlite3.Connection, key: str) -> str | None:
+        row = conn.execute(
+            "SELECT value FROM system_state WHERE key = ?", (key,)
         ).fetchone()
         return None if row is None else row["value"]
 
-    def _get_by_discord_message_id(self, discord_message_id: str) -> sqlite3.Row | None:
-        return self._connection.execute(
+    # ------------------------------------------------------------------
+    # Shared helpers (called from both read and write contexts)
+    # ------------------------------------------------------------------
+
+    def _get_by_discord_message_id(
+        self, conn: sqlite3.Connection, discord_message_id: str
+    ) -> sqlite3.Row | None:
+        return conn.execute(
             "SELECT * FROM captures WHERE discord_message_id = ?",
             (discord_message_id,),
         ).fetchone()
 
-    def _get_by_capture_id(self, capture_id: str) -> sqlite3.Row:
-        row = self._connection.execute(
-            "SELECT * FROM captures WHERE capture_id = ?",
-            (capture_id,),
+    def _get_by_capture_id(
+        self, conn: sqlite3.Connection, capture_id: str
+    ) -> sqlite3.Row:
+        row = conn.execute(
+            "SELECT * FROM captures WHERE capture_id = ?", (capture_id,)
         ).fetchone()
         if row is None:
             raise KeyError(f"capture not found: {capture_id}")
         return row
 
-    def _next_capture_id(self, received_at: datetime) -> str:
+    def _next_capture_id(self, conn: sqlite3.Connection, received_at: datetime) -> str:
         prefix = f"SB-{received_at.strftime('%Y%m%d')}-"
-        row = self._connection.execute(
+        row = conn.execute(
             "SELECT capture_id FROM captures WHERE capture_id LIKE ? ORDER BY capture_id DESC LIMIT 1",
             (f"{prefix}%",),
         ).fetchone()
@@ -500,12 +617,12 @@ class Ledger:
 
     def _append_event(
         self,
+        conn: sqlite3.Connection,
         capture_id: str,
         event_type: str,
         event_payload: dict[str, Any] | None = None,
     ) -> None:
-        self._assert_mutation_lock_held()
-        self._connection.execute(
+        conn.execute(
             """
             INSERT INTO capture_events (
                 capture_id,
@@ -522,10 +639,6 @@ class Ledger:
                 _iso(_now()),
             ),
         )
-
-    def _assert_mutation_lock_held(self) -> None:
-        if not self._lock.locked():
-            raise RuntimeError("ledger mutation lock must be held for SQLite writes")
 
 
 def _record_from_row(row: sqlite3.Row) -> CaptureRecord:

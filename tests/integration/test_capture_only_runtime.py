@@ -95,7 +95,7 @@ async def test_capture_only_mode_rejects_sensitive_message_before_plaintext_pers
     )
 
     rejected = context.service.captures_by_status(REJECTED_SENSITIVE)[0]
-    dump = "\n".join(context.ledger._connection.iterdump())
+    dump = context.ledger._runtime.read(lambda conn: "\n".join(conn.iterdump()))
     assert rejected.raw_text is None
     assert rejected.redacted_text == "api_key=[REDACTED]"
     assert secret not in dump

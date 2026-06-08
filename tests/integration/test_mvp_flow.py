@@ -1,3 +1,4 @@
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -97,9 +98,10 @@ async def test_happy_path_capture_to_vault_edits_original_receipt(tmp_path):
 @pytest.mark.asyncio
 async def test_saved_receipt_is_sent_only_after_sqlite_commit(tmp_path):
     settings = make_settings()
-    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    ledger_path = tmp_path / "ledger.sqlite3"
+    ledger = Ledger(ledger_path)
     queue = CaptureQueue()
-    channel = CommitCheckingDiscordChannel(ledger)
+    channel = CommitCheckingDiscordChannel(ledger_path)
     service = CaptureService(settings=settings, ledger=ledger, notify_capture=queue.enqueue)
 
     await service.handle_gateway_message(make_message(1001, channel=channel, content="Review reconnect handling."))
@@ -107,6 +109,7 @@ async def test_saved_receipt_is_sent_only_after_sqlite_commit(tmp_path):
     capture_id = await queue.get()
     assert channel.commit_observed is True
     assert ledger.get_capture(capture_id).status == RECEIVED
+    ledger.close()
 
 
 @pytest.mark.asyncio
@@ -228,6 +231,44 @@ async def test_two_rapid_messages_produce_two_rows_and_two_notes(tmp_path):
     assert first_capture_id != second_capture_id
     assert ledger.status_counts() == {FILED: 2}
     assert len(notes) == 2
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_rapid_capture_flow_all_messages_receive_durable_rows(tmp_path):
+    """50 rapid Discord captures — every message must get a row; no duplicates; all can queue."""
+    settings = make_settings()
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    queue = CaptureQueue(maxsize=100)
+    channel = FakeDiscordChannel()
+    client = FakeDiscordClient(channel)
+    service = CaptureService(
+        settings=settings,
+        ledger=ledger,
+        notify_capture=queue.enqueue,
+        receipt_client=client,
+    )
+
+    n = 50
+    for i in range(n):
+        await service.handle_gateway_message(
+            make_message(2000 + i, channel=channel, content=f"Rapid note {i}")
+        )
+
+    queued_ids = [await queue.get() for _ in range(n)]
+
+    assert len(set(queued_ids)) == n
+    assert ledger.total_captures() == n
+    assert ledger.status_counts().get(RECEIVED, 0) == n
+
+    # All queued IDs should be fetchable and not duplicated
+    seen_capture_ids = set()
+    for capture_id in queued_ids:
+        capture = ledger.get_capture(capture_id)
+        assert capture.capture_id not in seen_capture_ids
+        seen_capture_ids.add(capture.capture_id)
+
+    ledger.close()
 
 
 def make_message(
@@ -292,15 +333,27 @@ class FakeDiscordChannel:
 
 
 class CommitCheckingDiscordChannel(FakeDiscordChannel):
-    def __init__(self, ledger):
+    """Verifies the capture row is externally visible (via a separate connection) before receipt."""
+
+    def __init__(self, ledger_path):
         super().__init__()
-        self.ledger = ledger
+        self.ledger_path = ledger_path
         self.commit_observed = False
 
     async def send(self, content):
-        captures = self.ledger.captures_by_status(RECEIVED)
-        assert len(captures) == 1
-        assert captures[0].receipt_message_id is None
+        # Use a completely separate SQLite connection to prove the row is committed
+        verification_conn = sqlite3.connect(str(self.ledger_path))
+        verification_conn.row_factory = sqlite3.Row
+        try:
+            rows = verification_conn.execute(
+                "SELECT * FROM captures WHERE status = 'RECEIVED'"
+            ).fetchall()
+            assert len(rows) == 1, (
+                "capture row must be externally visible from a separate connection before receipt is sent"
+            )
+            assert rows[0]["receipt_message_id"] is None
+        finally:
+            verification_conn.close()
         self.commit_observed = True
         return await super().send(content)
 
