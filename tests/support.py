@@ -2,24 +2,21 @@ import asyncio
 import json
 from types import SimpleNamespace
 
-from secondbrain.discord_capture import should_capture_message
 from secondbrain.worker import run_capture_worker
 
 
 async def ingest_if_allowed(message, settings, handler):
-    if should_capture_message(message, settings):
-        await handler(message)
+    await handler(message)
 
 
 async def drain_worker(app, *, timeout=1.0):
     worker = asyncio.create_task(
         run_capture_worker(
             settings=app.settings,
-            ledger=app.ledger,
+            capture_service=app.capture_service,
             queue=app.queue,
             vault_writer=app.vault_writer,
             classifier_client=app.classifier,
-            receipt_client=app.discord,
         )
     )
     try:
@@ -33,9 +30,20 @@ async def drain_worker(app, *, timeout=1.0):
 
 
 def make_app(settings, ledger, queue, vault_writer, classifier, discord):
+    capture_service = getattr(ledger, "capture_service", None)
+    if capture_service is None:
+        from secondbrain.capture_service import CaptureService
+
+        capture_service = CaptureService(
+            settings=settings,
+            ledger=ledger,
+            notify_capture=queue.enqueue,
+            receipt_client=discord,
+        )
     return SimpleNamespace(
         settings=settings,
         ledger=ledger,
+        capture_service=capture_service,
         queue=queue,
         vault_writer=vault_writer,
         classifier=classifier,

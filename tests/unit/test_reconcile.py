@@ -2,10 +2,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from secondbrain.capture_service import CaptureService
 from secondbrain.ledger import Ledger
-from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID, reconcile_discord_history
+from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID
 from secondbrain.worker import CaptureQueue
-from secondbrain.app import create_capture_handler
 
 
 def make_settings(**overrides):
@@ -47,14 +47,9 @@ async def test_reconcile_fetches_history_and_uses_capture_handler(tmp_path):
     queue = CaptureQueue()
     settings = make_settings()
     client = FakeClient([make_message(1001, content="Recovered note.")])
-    handle_capture = create_capture_handler(settings, ledger, queue, enqueue_captures=False)
+    service = CaptureService(settings=settings, ledger=ledger, notify_capture=queue.enqueue)
 
-    result = await reconcile_discord_history(
-        client=client,
-        settings=settings,
-        ledger=ledger,
-        handle_capture=handle_capture,
-    )
+    result = await service.startup_reconcile(client)
 
     assert result.seen == 1
     assert result.handled == 1
@@ -72,14 +67,9 @@ async def test_reconcile_advances_high_water_for_ignored_messages(tmp_path):
     queue = CaptureQueue()
     settings = make_settings()
     client = FakeClient([make_message(1001, author_bot=True)])
-    handle_capture = create_capture_handler(settings, ledger, queue, enqueue_captures=False)
+    service = CaptureService(settings=settings, ledger=ledger, notify_capture=queue.enqueue)
 
-    result = await reconcile_discord_history(
-        client=client,
-        settings=settings,
-        ledger=ledger,
-        handle_capture=handle_capture,
-    )
+    result = await service.startup_reconcile(client)
 
     assert result.seen == 1
     assert result.handled == 0
@@ -101,14 +91,9 @@ async def test_reconcile_uses_last_reconciled_message_id_as_history_after(tmp_pa
             make_message(1002, content="New capture."),
         ]
     )
-    handle_capture = create_capture_handler(settings, ledger, queue, enqueue_captures=False)
+    service = CaptureService(settings=settings, ledger=ledger, notify_capture=queue.enqueue)
 
-    result = await reconcile_discord_history(
-        client=client,
-        settings=settings,
-        ledger=ledger,
-        handle_capture=handle_capture,
-    )
+    result = await service.startup_reconcile(client)
 
     assert result.seen == 1
     assert queue.qsize() == 0
@@ -128,14 +113,9 @@ async def test_reconcile_warns_when_limit_is_exceeded(tmp_path):
             make_message(1002, content="Second."),
         ]
     )
-    handle_capture = create_capture_handler(settings, ledger, queue, enqueue_captures=False)
+    service = CaptureService(settings=settings, ledger=ledger, notify_capture=queue.enqueue)
 
-    result = await reconcile_discord_history(
-        client=client,
-        settings=settings,
-        ledger=ledger,
-        handle_capture=handle_capture,
-    )
+    result = await service.startup_reconcile(client)
 
     assert result.warning is not None
     assert result.seen == 1

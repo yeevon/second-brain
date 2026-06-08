@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from secondbrain.capture_service import CaptureService
 from secondbrain.ledger import FAILED, FILED, INBOX, RECEIVED, Ledger
 from secondbrain.vault_writer import VaultWriter
 import secondbrain.worker as worker_module
@@ -35,6 +36,14 @@ def make_settings():
         gemini_api_key="fake",
         gemini_model="gemini-test",
         classification_confidence_threshold=0.75,
+    )
+
+
+def make_capture_service(ledger: Ledger, *, receipt_client=None):
+    return CaptureService(
+        settings=make_settings(),
+        ledger=ledger,
+        receipt_client=receipt_client,
     )
 
 
@@ -78,7 +87,7 @@ async def test_process_capture_routes_classifier_failure_to_inbox(tmp_path):
     result = await process_capture_once(
         capture_id=capture.capture_id,
         settings=make_settings(),
-        ledger=ledger,
+        capture_service=make_capture_service(ledger),
         vault_writer=writer,
         classifier_client=FakeClient(error=RuntimeError("timeout")),
     )
@@ -106,7 +115,7 @@ async def test_classifier_validation_failure_does_not_log_model_output(tmp_path,
     await process_capture_once(
         capture_id=capture.capture_id,
         settings=make_settings(),
-        ledger=ledger,
+        capture_service=make_capture_service(ledger),
         vault_writer=VaultWriter(tmp_path / "vault"),
         classifier_client=FakeClient(
             parsed={
@@ -135,7 +144,7 @@ async def test_process_capture_routes_low_confidence_to_inbox(tmp_path):
     result = await process_capture_once(
         capture_id=capture.capture_id,
         settings=make_settings(),
-        ledger=ledger,
+        capture_service=make_capture_service(ledger),
         vault_writer=writer,
         classifier_client=FakeClient(parsed=payload),
     )
@@ -157,7 +166,7 @@ async def test_process_capture_routes_attachment_only_capture_to_inbox_without_g
     result = await process_capture_once(
         capture_id=capture.capture_id,
         settings=make_settings(),
-        ledger=ledger,
+        capture_service=make_capture_service(ledger),
         vault_writer=writer,
         classifier_client=FakeClient(error=AssertionError("Gemini should not be called")),
     )
@@ -203,10 +212,9 @@ async def test_process_capture_preserves_attachment_warning_in_final_receipt(tmp
     await process_capture_once(
         capture_id=capture.capture_id,
         settings=make_settings(),
-        ledger=ledger,
+        capture_service=make_capture_service(ledger, receipt_client=receipt_client),
         vault_writer=VaultWriter(tmp_path / "vault"),
         classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
-        receipt_client=receipt_client,
     )
 
     assert "⚠️ Attachment detected but not archived in the MVP." in receipt_client.edited_content
@@ -222,10 +230,9 @@ async def test_process_capture_edits_successful_filing_receipt(tmp_path):
     await process_capture_once(
         capture_id=capture.capture_id,
         settings=make_settings(),
-        ledger=ledger,
+        capture_service=make_capture_service(ledger, receipt_client=receipt_client),
         vault_writer=VaultWriter(tmp_path / "vault"),
         classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
-        receipt_client=receipt_client,
     )
 
     assert receipt_client.edited_content == (
@@ -246,10 +253,9 @@ async def test_process_capture_edits_classifier_failure_inbox_receipt(tmp_path):
     await process_capture_once(
         capture_id=capture.capture_id,
         settings=make_settings(),
-        ledger=ledger,
+        capture_service=make_capture_service(ledger, receipt_client=receipt_client),
         vault_writer=VaultWriter(tmp_path / "vault"),
         classifier_client=FakeClient(error=RuntimeError("timeout")),
-        receipt_client=receipt_client,
     )
 
     assert receipt_client.edited_content == (
@@ -266,7 +272,7 @@ async def test_process_capture_marks_failed_when_vault_write_fails(tmp_path, cap
     result = await process_capture_once(
         capture_id=capture.capture_id,
         settings=make_settings(),
-        ledger=ledger,
+        capture_service=make_capture_service(ledger),
         vault_writer=FailingVaultWriter(),
         classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
     )
@@ -296,10 +302,9 @@ async def test_process_capture_edits_vault_failure_receipt(tmp_path):
     await process_capture_once(
         capture_id=capture.capture_id,
         settings=make_settings(),
-        ledger=ledger,
+        capture_service=make_capture_service(ledger, receipt_client=receipt_client),
         vault_writer=FailingVaultWriter(),
         classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
-        receipt_client=receipt_client,
     )
 
     assert receipt_client.edited_content == (
@@ -327,10 +332,9 @@ async def test_vault_failure_receipt_preserves_attachment_warning(tmp_path):
     await process_capture_once(
         capture_id=capture.capture_id,
         settings=make_settings(),
-        ledger=ledger,
+        capture_service=make_capture_service(ledger, receipt_client=receipt_client),
         vault_writer=FailingVaultWriter(),
         classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
-        receipt_client=receipt_client,
     )
 
     assert "⚠️ Attachment detected but not archived in the MVP." in receipt_client.edited_content
@@ -349,7 +353,7 @@ async def test_run_capture_worker_marks_unexpected_errors_failed(tmp_path, monke
     worker = asyncio.create_task(
         run_capture_worker(
             settings=make_settings(),
-            ledger=ledger,
+            capture_service=make_capture_service(ledger),
             queue=queue,
             vault_writer=VaultWriter(tmp_path / "vault"),
             classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
@@ -383,7 +387,7 @@ async def test_unfinished_capture_ids_resets_classifying_and_returns_work(tmp_pa
     )
     ledger.mark_classifying(second.capture_id)
 
-    queued = unfinished_capture_ids(ledger)
+    queued = unfinished_capture_ids(make_capture_service(ledger))
 
     assert queued == [first.capture_id, second.capture_id]
     assert ledger.get_capture(second.capture_id).status == RECEIVED
@@ -416,7 +420,7 @@ async def test_run_capture_worker_consumes_queue_and_files_capture(tmp_path):
     worker = asyncio.create_task(
         run_capture_worker(
             settings=make_settings(),
-            ledger=ledger,
+            capture_service=make_capture_service(ledger),
             queue=queue,
             vault_writer=writer,
             classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
@@ -447,10 +451,9 @@ async def test_process_capture_keeps_filed_status_when_receipt_edit_fails(tmp_pa
     result = await process_capture_once(
         capture_id=capture.capture_id,
         settings=make_settings(),
-        ledger=ledger,
+        capture_service=make_capture_service(ledger, receipt_client=FailingReceiptClient()),
         vault_writer=writer,
         classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
-        receipt_client=FailingReceiptClient(),
     )
 
     updated = ledger.get_capture(capture.capture_id)
@@ -470,10 +473,9 @@ async def test_process_capture_replaces_failed_receipt_edit_once(tmp_path):
     await process_capture_once(
         capture_id=capture.capture_id,
         settings=make_settings(),
-        ledger=ledger,
+        capture_service=make_capture_service(ledger, receipt_client=receipt_client),
         vault_writer=VaultWriter(tmp_path / "vault"),
         classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
-        receipt_client=receipt_client,
     )
 
     updated = ledger.get_capture(capture.capture_id)
@@ -498,10 +500,9 @@ async def test_process_capture_sends_replacement_when_initial_receipt_is_missing
     await process_capture_once(
         capture_id=capture.capture_id,
         settings=make_settings(),
-        ledger=ledger,
+        capture_service=make_capture_service(ledger, receipt_client=receipt_client),
         vault_writer=VaultWriter(tmp_path / "vault"),
         classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
-        receipt_client=receipt_client,
     )
 
     updated = ledger.get_capture(capture.capture_id)

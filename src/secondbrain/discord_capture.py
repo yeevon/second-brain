@@ -4,7 +4,7 @@ _intents = discord.Intents.default()
 _intents.message_content = True
 
 
-def create_discord_client(settings, handle_capture, on_ready_callback=None):
+def create_discord_client(handle_gateway_message, on_ready_callback=None):
     client = discord.Client(intents=_intents)
 
     @client.event
@@ -15,10 +15,7 @@ def create_discord_client(settings, handle_capture, on_ready_callback=None):
 
     @client.event
     async def on_message(message):
-        if not should_capture_message(message, settings):
-            return
-        
-        await handle_capture(message)
+        await handle_gateway_message(message)
     
     return client
         

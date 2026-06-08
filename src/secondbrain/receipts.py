@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 from typing import Any
 
-from secondbrain.ledger import CaptureRecord
+from secondbrain.capture_models import CaptureRecord
 from secondbrain.models import Classification
 from secondbrain.observability import log_metadata
 

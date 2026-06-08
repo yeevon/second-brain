@@ -2,14 +2,23 @@ from types import SimpleNamespace
 
 import pytest
 
-from secondbrain.app import create_capture_handler, format_status_report
+from secondbrain.app import format_status_report
+from secondbrain.capture_service import CaptureService
 from secondbrain.ledger import FAILED, FILED, INBOX, RECEIVED, REJECTED_SENSITIVE, Ledger
 from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID
 from secondbrain.worker import CaptureQueue
 
 
-def make_settings():
-    return SimpleNamespace(classifier_queue_maxsize=10)
+def make_settings(tmp_path):
+    return SimpleNamespace(
+        discord_guild_id=300,
+        discord_capture_channel_id=200,
+        discord_allowed_user_id=400,
+        classifier_queue_maxsize=10,
+        startup_reconcile_limit=10,
+        ledger_path=tmp_path / "ledger.sqlite3",
+        vault_path=tmp_path / "vault",
+    )
 
 
 def make_message(*, content="capture this", message_id=1001, attachments=None):
@@ -18,9 +27,19 @@ def make_message(*, content="capture this", message_id=1001, attachments=None):
         id=message_id,
         guild=SimpleNamespace(id=300),
         channel=channel,
-        author=SimpleNamespace(id=400),
+        author=SimpleNamespace(id=400, bot=False),
+        webhook_id=None,
         content=content,
         attachments=attachments or [],
+    )
+
+
+def make_service(settings, ledger, queue, receipt_client=None):
+    return CaptureService(
+        settings=settings,
+        ledger=ledger,
+        notify_capture=queue.enqueue,
+        receipt_client=receipt_client,
     )
 
 
@@ -28,10 +47,10 @@ def make_message(*, content="capture this", message_id=1001, attachments=None):
 async def test_capture_handler_persists_receipts_and_enqueues_capture(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     queue = CaptureQueue()
-    handler = create_capture_handler(make_settings(), ledger, queue)
     message = make_message(content="Review reconnect handling.")
+    service = make_service(make_settings(tmp_path), ledger, queue, receipt_client=FakeClient(message.channel))
 
-    await handler(message)
+    await service.handle_gateway_message(message)
 
     capture_id = await queue.get()
     capture = ledger.get_capture(capture_id)
@@ -49,9 +68,9 @@ async def test_capture_handler_persists_receipts_and_enqueues_capture(tmp_path):
 async def test_capture_handler_logs_metadata_without_raw_text(tmp_path, capsys):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     queue = CaptureQueue()
-    handler = create_capture_handler(make_settings(), ledger, queue)
+    service = make_service(make_settings(tmp_path), ledger, queue)
 
-    await handler(make_message(content="Review reconnect handling."))
+    await service.handle_gateway_message(make_message(content="Review reconnect handling."))
 
     output = capsys.readouterr().out
     assert "capture_received" in output
@@ -60,17 +79,13 @@ async def test_capture_handler_logs_metadata_without_raw_text(tmp_path, capsys):
 
 
 @pytest.mark.asyncio
-async def test_live_capture_advances_reconcile_marker_after_commit(tmp_path):
+async def test_startup_reconcile_advances_marker_after_commit(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     queue = CaptureQueue()
-    handler = create_capture_handler(
-        make_settings(),
-        ledger,
-        queue,
-        advance_reconcile_marker=True,
-    )
+    settings = make_settings(tmp_path)
+    service = make_service(settings, ledger, queue)
 
-    await handler(make_message(content="Review reconnect handling.", message_id=1002))
+    await service.startup_reconcile(FakeHistoryClient([make_message(content="Review reconnect handling.", message_id=1002)]))
 
     assert ledger.get_system_state(LAST_RECONCILED_MESSAGE_ID) == "1002"
 
@@ -79,13 +94,13 @@ async def test_live_capture_advances_reconcile_marker_after_commit(tmp_path):
 async def test_duplicate_capture_does_not_send_new_receipt_or_enqueue(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     queue = CaptureQueue()
-    handler = create_capture_handler(make_settings(), ledger, queue)
+    service = make_service(make_settings(tmp_path), ledger, queue)
     original = make_message(content="Review reconnect handling.", message_id=1001)
     duplicate = make_message(content="Review reconnect handling again.", message_id=1001)
 
-    await handler(original)
+    await service.handle_gateway_message(original)
     await queue.get()
-    await handler(duplicate)
+    await service.handle_gateway_message(duplicate)
 
     assert queue.qsize() == 0
     assert duplicate.channel.sent_contents == []
@@ -96,11 +111,11 @@ async def test_duplicate_capture_does_not_send_new_receipt_or_enqueue(tmp_path):
 async def test_saved_receipt_failure_does_not_block_enqueue(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     queue = CaptureQueue()
-    handler = create_capture_handler(make_settings(), ledger, queue)
     message = make_message(content="Review reconnect handling.")
     message.channel.fail_send = True
+    service = make_service(make_settings(tmp_path), ledger, queue, receipt_client=FakeClient(message.channel))
 
-    await handler(message)
+    await service.handle_gateway_message(message)
 
     capture_id = await queue.get()
     capture = ledger.get_capture(capture_id)
@@ -112,13 +127,13 @@ async def test_saved_receipt_failure_does_not_block_enqueue(tmp_path):
 async def test_saved_receipt_warns_when_attachment_is_not_archived(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     queue = CaptureQueue()
-    handler = create_capture_handler(make_settings(), ledger, queue)
     message = make_message(
         content="Review this attached sketch.",
         attachments=[SimpleNamespace(filename="sketch.png", content_type="image/png", size=100, url="url")],
     )
+    service = make_service(make_settings(tmp_path), ledger, queue, receipt_client=FakeClient(message.channel))
 
-    await handler(message)
+    await service.handle_gateway_message(message)
 
     assert "⚠️ Attachment detected but not archived in the MVP." in message.channel.last_content
 
@@ -127,11 +142,11 @@ async def test_saved_receipt_warns_when_attachment_is_not_archived(tmp_path):
 async def test_capture_handler_rejects_sensitive_message_without_enqueueing(tmp_path, capsys):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     queue = CaptureQueue()
-    handler = create_capture_handler(make_settings(), ledger, queue)
+    service = make_service(make_settings(tmp_path), ledger, queue)
 
     message = make_message(content="password=hunter2")
 
-    await handler(message)
+    await service.handle_gateway_message(message)
 
     assert queue.qsize() == 0
     assert ledger.status_counts() == {REJECTED_SENSITIVE: 1}
@@ -177,7 +192,8 @@ def test_format_status_report_includes_operational_counts(tmp_path):
         vault_path=tmp_path / "vault",
     )
 
-    report = format_status_report(settings, ledger)
+    service = CaptureService(settings=settings, ledger=ledger)
+    report = format_status_report(settings, service.status_snapshot())
 
     assert f"ledger path: {tmp_path / 'ledger.sqlite3'}" in report
     assert f"vault path: {tmp_path / 'vault'}" in report
@@ -203,6 +219,49 @@ class FakeChannel:
         self.sent_contents.append(content)
         self.last_content = content
         return SimpleNamespace(id=9001)
+
+
+class FakeClient:
+    def __init__(self, channel):
+        self.channel = channel
+
+    def get_channel(self, channel_id):
+        return self.channel
+
+
+class FakeHistoryClient:
+    def __init__(self, messages):
+        self.channel = FakeHistoryChannel(messages)
+
+    def get_channel(self, channel_id):
+        return self.channel
+
+
+class FakeHistoryChannel:
+    def __init__(self, messages):
+        self.messages = messages
+
+    def history(self, *, limit, after, oldest_first):
+        after_id = 0 if after is None else after.id
+        messages = [message for message in self.messages if message.id > after_id]
+        if oldest_first:
+            messages = sorted(messages, key=lambda message: message.id)
+        return FakeHistory(messages[:limit])
+
+
+class FakeHistory:
+    def __init__(self, messages):
+        self.messages = messages
+
+    def __aiter__(self):
+        self._iterator = iter(self.messages)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._iterator)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
 
 
 def insert_capture(ledger: Ledger, *, discord_message_id: str = "1001"):
