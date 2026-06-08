@@ -303,7 +303,7 @@ def test_update_capture_rejects_unknown_status(tmp_path):
     assert ledger.get_capture(capture.capture_id).status == RECEIVED
 
 
-def test_enqueueable_capture_ids_include_received_and_classifying(tmp_path):
+def test_enqueueable_capture_ids_include_received_forwarded_and_classifying(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     first = insert_accepted_capture(ledger,
         discord_message_id="1001",
@@ -319,9 +319,22 @@ def test_enqueueable_capture_ids_include_received_and_classifying(tmp_path):
         discord_author_id="400",
         raw_text="Two.",
     )
-    ledger.mark_classifying(second.capture_id)
+    third = insert_accepted_capture(ledger,
+        discord_message_id="1003",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="Three.",
+    )
+    ledger.transition_capture(
+        second.capture_id,
+        from_statuses={RECEIVED},
+        to_status=FORWARDED,
+        event_type="CAPTURE_FORWARDED",
+    )
+    ledger.mark_classifying(third.capture_id)
 
-    assert ledger.enqueueable_capture_ids() == [first.capture_id, second.capture_id]
+    assert ledger.enqueueable_capture_ids() == [first.capture_id, second.capture_id, third.capture_id]
 
 
 def test_reset_classifying_to_received_requeues_stale_work(tmp_path):

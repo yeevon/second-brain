@@ -81,6 +81,43 @@ async def test_get_capture_rejects_missing_or_incorrect_token(api_context):
     assert correct.status_code == 200
 
 
+@pytest.mark.asyncio
+async def test_unknown_capture_returns_404_without_internal_details(api_context):
+    response = await api_context.downstream.get_capture("SB-20260608-9999")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "capture not found"}
+    assert "not found:" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_unhealthy_ledger_returns_503_without_sql_error_details(api_context, monkeypatch):
+    def fail_health():
+        raise RuntimeError("sqlite database is locked")
+
+    monkeypatch.setattr(api_context.service, "assert_healthy", fail_health)
+
+    response = await api_context.test_client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "capture-service unavailable"}
+    assert "sqlite" not in response.text
+    assert "locked" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_invalid_request_payload_returns_422(api_context):
+    capture = await ingest_normal_capture(api_context)
+
+    response = await api_context.test_client.post(
+        f"/internal/captures/{capture.capture_id}/mark-filed",
+        headers={INTERNAL_TOKEN_HEADER: TOKEN},
+        json={"note_path": "20_projects/halo/file.md"},
+    )
+
+    assert response.status_code == 422
+
+
 @pytest.mark.parametrize(
     ("path", "payload"),
     [

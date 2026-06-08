@@ -23,6 +23,9 @@ from secondbrain.capture_models import (
 )
 
 
+UNSET = object()
+
+
 @dataclass(frozen=True)
 class InsertResult:
     capture: CaptureRecord
@@ -325,9 +328,9 @@ class Ledger:
         *,
         from_statuses: set[str],
         to_status: str,
-        classification_json: dict[str, Any] | None = None,
-        derived_note_path: str | None = None,
-        last_error: str | None = None,
+        classification_json: dict[str, Any] | None | object = UNSET,
+        derived_note_path: str | None | object = UNSET,
+        last_error: str | None | object = UNSET,
         event_type: str,
         event_payload: dict[str, Any] | None = None,
     ) -> TransitionResult | None:
@@ -343,13 +346,13 @@ class Ledger:
 
             updates = ["status = ?"]
             values: list[Any] = [to_status]
-            if classification_json is not None:
+            if classification_json is not UNSET:
                 updates.append("classification_json = ?")
-                values.append(_json_dumps(classification_json))
-            if derived_note_path is not None:
+                values.append(None if classification_json is None else _json_dumps(classification_json))
+            if derived_note_path is not UNSET:
                 updates.append("derived_note_path = ?")
                 values.append(derived_note_path)
-            if last_error is not None:
+            if last_error is not UNSET:
                 updates.append("last_error = ?")
                 values.append(last_error)
 
@@ -391,8 +394,8 @@ class Ledger:
 
     def enqueueable_capture_ids(self) -> list[str]:
         rows = self._connection.execute(
-            "SELECT capture_id FROM captures WHERE status IN (?, ?) ORDER BY id",
-            (RECEIVED, CLASSIFYING),
+            "SELECT capture_id FROM captures WHERE status IN (?, ?, ?) ORDER BY id",
+            (RECEIVED, FORWARDED, CLASSIFYING),
         ).fetchall()
         return [row["capture_id"] for row in rows]
 

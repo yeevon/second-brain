@@ -3,9 +3,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from secondbrain.app import LocalWorkerStartup, format_status_report, start_local_worker_and_enqueue_recovered
+from secondbrain.app import (
+    LocalWorkerStartup,
+    format_status_report,
+    run_service_runtime,
+    start_local_worker_and_enqueue_recovered,
+)
 from secondbrain.capture_service import CaptureService
-from secondbrain.ledger import FAILED, FILED, INBOX, RECEIVED, REJECTED_SENSITIVE, Ledger
+from secondbrain.ledger import FAILED, FILED, FORWARDED, INBOX, RECEIVED, REJECTED_SENSITIVE, Ledger
 from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID
 from secondbrain.worker import CaptureQueue
 from secondbrain.vault_writer import VaultWriter
@@ -279,6 +284,37 @@ async def test_reconciliation_failure_does_not_permanently_block_worker_startup(
 
 
 @pytest.mark.asyncio
+async def test_forwarded_capture_is_recovered_after_restart(tmp_path):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    capture = insert_attachment_only_capture(ledger, discord_message_id="1001")
+    queue = CaptureQueue(maxsize=1)
+    service = CaptureService(settings=settings, ledger=ledger, notify_capture=queue.enqueue)
+
+    transition = service.mark_forwarded(capture.capture_id)
+    assert transition.status == FORWARDED
+
+    worker_task, capture_ids = await start_local_worker_and_enqueue_recovered(
+        settings=settings,
+        capture_service=service,
+        queue=queue,
+        vault_writer=VaultWriter(settings.vault_path),
+    )
+
+    try:
+        await asyncio.wait_for(queue.join(), timeout=1)
+    finally:
+        worker_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker_task
+
+    updated = service.get_capture(capture.capture_id)
+    assert capture_ids == [capture.capture_id]
+    assert updated.status == INBOX
+    assert updated.derived_note_path is not None
+
+
+@pytest.mark.asyncio
 async def test_repeated_ready_callback_does_not_start_second_worker(tmp_path):
     settings = make_settings(tmp_path)
     ledger = Ledger(settings.ledger_path)
@@ -357,6 +393,96 @@ async def test_enqueue_failure_cancels_started_worker_and_allows_clean_retry(tmp
     assert cancelled == started
 
 
+@pytest.mark.asyncio
+async def test_runtime_stops_other_component_when_api_task_exits():
+    events = []
+    api_server = FakeRuntimeApiServer(events, exits_immediately=True)
+    client = FakeRuntimeDiscordClient(events)
+    startup = SimpleNamespace(worker_task=None)
+    capture_service = FakeRuntimeCaptureService(events)
+
+    await run_service_runtime(
+        api_task=asyncio.create_task(api_server.serve()),
+        discord_task=asyncio.create_task(client.start("token")),
+        api_server=api_server,
+        client=client,
+        startup=startup,
+        capture_service=capture_service,
+    )
+
+    assert "api.stop" in events
+    assert "discord.close" in events
+    assert "discord.cancelled" in events
+    assert events[-1] == "capture_service.close"
+
+
+@pytest.mark.asyncio
+async def test_runtime_stops_other_component_when_discord_task_exits():
+    events = []
+    api_server = FakeRuntimeApiServer(events)
+    client = FakeRuntimeDiscordClient(events, exits_immediately=True)
+    startup = SimpleNamespace(worker_task=None)
+    capture_service = FakeRuntimeCaptureService(events)
+
+    await run_service_runtime(
+        api_task=asyncio.create_task(api_server.serve()),
+        discord_task=asyncio.create_task(client.start("token")),
+        api_server=api_server,
+        client=client,
+        startup=startup,
+        capture_service=capture_service,
+    )
+
+    assert "api.stop" in events
+    assert "api.cancelled" in events
+    assert "discord.close" in events
+    assert events[-1] == "capture_service.close"
+
+
+@pytest.mark.asyncio
+async def test_runtime_cancels_worker_before_closing_capture_service():
+    events = []
+    api_server = FakeRuntimeApiServer(events, exits_immediately=True)
+    client = FakeRuntimeDiscordClient(events)
+    worker_task = asyncio.create_task(runtime_worker(events))
+    await asyncio.sleep(0)
+    startup = SimpleNamespace(worker_task=worker_task)
+    capture_service = FakeRuntimeCaptureService(events)
+
+    await run_service_runtime(
+        api_task=asyncio.create_task(api_server.serve()),
+        discord_task=asyncio.create_task(client.start("token")),
+        api_server=api_server,
+        client=client,
+        startup=startup,
+        capture_service=capture_service,
+    )
+
+    assert events.index("worker.cancelled") < events.index("capture_service.close")
+
+
+@pytest.mark.asyncio
+async def test_runtime_closes_capture_service_last():
+    events = []
+    api_server = FakeRuntimeApiServer(events, exits_immediately=True)
+    client = FakeRuntimeDiscordClient(events)
+    worker_task = asyncio.create_task(runtime_worker(events))
+    await asyncio.sleep(0)
+    startup = SimpleNamespace(worker_task=worker_task)
+    capture_service = FakeRuntimeCaptureService(events)
+
+    await run_service_runtime(
+        api_task=asyncio.create_task(api_server.serve()),
+        discord_task=asyncio.create_task(client.start("token")),
+        api_server=api_server,
+        client=client,
+        startup=startup,
+        capture_service=capture_service,
+    )
+
+    assert events[-1] == "capture_service.close"
+
+
 class FakeChannel:
     def __init__(self):
         self.id = 200
@@ -412,6 +538,63 @@ class FlakyEnqueueService:
             await asyncio.sleep(0)
             raise RuntimeError("simulated enqueue failure")
         return ["recovered-capture"]
+
+
+class FakeRuntimeApiServer:
+    def __init__(self, events, *, exits_immediately=False):
+        self.events = events
+        self.exits_immediately = exits_immediately
+
+    async def serve(self):
+        self.events.append("api.start")
+        if self.exits_immediately:
+            self.events.append("api.exit")
+            return
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.events.append("api.cancelled")
+            raise
+
+    async def stop(self):
+        self.events.append("api.stop")
+
+
+class FakeRuntimeDiscordClient:
+    def __init__(self, events, *, exits_immediately=False):
+        self.events = events
+        self.exits_immediately = exits_immediately
+
+    async def start(self, token):
+        self.events.append("discord.start")
+        if self.exits_immediately:
+            self.events.append("discord.exit")
+            return
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.events.append("discord.cancelled")
+            raise
+
+    async def close(self):
+        self.events.append("discord.close")
+
+
+class FakeRuntimeCaptureService:
+    def __init__(self, events):
+        self.events = events
+
+    def close(self):
+        self.events.append("capture_service.close")
+
+
+async def runtime_worker(events):
+    events.append("worker.start")
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        events.append("worker.cancelled")
+        raise
 
 
 class FakeHistoryChannel:

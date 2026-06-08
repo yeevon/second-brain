@@ -85,5 +85,8 @@ class Settings:
         if not self.capture_service_internal_token.strip():
             raise RuntimeError("Capture service internal token is required")
 
+        if len(self.capture_service_internal_token.strip()) < 32:
+            raise RuntimeError("Capture service internal token must be at least 32 characters")
+
         if not (1 <= self.capture_api_port <= 65535):
             raise RuntimeError("Capture API port must be between 1 and 65535")

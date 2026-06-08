@@ -16,7 +16,7 @@ from secondbrain.capture_models import (
     TransitionResult,
 )
 from secondbrain.discord_capture import extract_attachment_metadata, should_capture_message
-from secondbrain.ledger import Ledger
+from secondbrain.ledger import UNSET, Ledger
 from secondbrain.observability import log_metadata
 from secondbrain.receipts import (
     ReceiptDeliveryResult,
@@ -290,9 +290,14 @@ class CaptureService:
             to_status=FILED,
             classification_json=classification_json,
             derived_note_path=note_path,
+            last_error=None,
             event_type="CAPTURE_FILED",
             event_payload={"path": note_path},
-            replay_payload={"classification_json": classification_json, "derived_note_path": note_path},
+            replay_payload={
+                "classification_json": classification_json,
+                "derived_note_path": note_path,
+                "last_error": None,
+            },
         )
 
     def mark_inbox(
@@ -346,6 +351,9 @@ class CaptureService:
             capture_id,
             from_statuses={FAILED},
             to_status=RECEIVED,
+            classification_json=None,
+            derived_note_path=None,
+            last_error=None,
             event_type="CAPTURE_RETRIED",
             event_payload={"status": RECEIVED},
         )
@@ -523,7 +531,7 @@ class CaptureService:
             )
         return True
 
-    async def _deliver_final_receipt(self, capture: CaptureRecord, content: str) -> None:
+    async def _deliver_final_receipt(self, capture: CaptureRecord, content: str) -> ReceiptDeliveryResult:
         if self._receipt_client is None:
             return ReceiptDeliveryResult(delivered=False, replaced=False, receipt_message_id=None)
         try:
@@ -557,9 +565,9 @@ class CaptureService:
         to_status: str,
         event_type: str,
         event_payload: dict | None = None,
-        classification_json: dict | None = None,
-        derived_note_path: str | None = None,
-        last_error: str | None = None,
+        classification_json: dict | None | object = UNSET,
+        derived_note_path: str | None | object = UNSET,
+        last_error: str | None | object = UNSET,
         replay_payload: dict | None = None,
     ) -> TransitionResult:
         capture = self.get_capture(capture_id)
