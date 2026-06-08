@@ -4,79 +4,82 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from secondbrain.observability import log_metadata
+
 
 @dataclass(frozen=True)
 class Migration:
     version: int
     name: str
-    sql: str
+    statements: tuple[str, ...]
 
 
 _MIGRATIONS: list[Migration] = [
     Migration(
         version=1,
         name="initial_mvp_schema",
-        sql="""
-        CREATE TABLE IF NOT EXISTS captures (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            capture_id TEXT NOT NULL UNIQUE,
-            discord_message_id TEXT NOT NULL UNIQUE,
-            discord_channel_id TEXT NOT NULL,
-            discord_guild_id TEXT NOT NULL,
-            discord_author_id TEXT NOT NULL,
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS captures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                capture_id TEXT NOT NULL UNIQUE,
+                discord_message_id TEXT NOT NULL UNIQUE,
+                discord_channel_id TEXT NOT NULL,
+                discord_guild_id TEXT NOT NULL,
+                discord_author_id TEXT NOT NULL,
 
-            raw_text TEXT,
-            redacted_text TEXT,
-            is_sensitive INTEGER NOT NULL DEFAULT 0,
-            sensitivity_flags TEXT,
+                raw_text TEXT,
+                redacted_text TEXT,
+                is_sensitive INTEGER NOT NULL DEFAULT 0,
+                sensitivity_flags TEXT,
 
-            has_attachments INTEGER NOT NULL DEFAULT 0,
-            attachment_metadata_json TEXT,
+                has_attachments INTEGER NOT NULL DEFAULT 0,
+                attachment_metadata_json TEXT,
 
-            received_at TEXT NOT NULL,
-            status TEXT NOT NULL,
-            classification_json TEXT,
-            derived_note_path TEXT,
-            receipt_message_id TEXT,
-            last_error TEXT,
-            updated_at TEXT NOT NULL,
+                received_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                classification_json TEXT,
+                derived_note_path TEXT,
+                receipt_message_id TEXT,
+                last_error TEXT,
+                updated_at TEXT NOT NULL,
 
-            CHECK (
-                (
-                    is_sensitive = 0
-                    AND raw_text IS NOT NULL
-                    AND (raw_text != '' OR has_attachments = 1)
+                CHECK (
+                    (
+                        is_sensitive = 0
+                        AND raw_text IS NOT NULL
+                        AND (raw_text != '' OR has_attachments = 1)
+                    )
+                    OR
+                    (is_sensitive = 1 AND raw_text IS NULL AND redacted_text IS NOT NULL)
                 )
-                OR
-                (is_sensitive = 1 AND raw_text IS NULL AND redacted_text IS NOT NULL)
             )
-        );
-
-        CREATE TABLE IF NOT EXISTS capture_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            capture_id TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            event_payload_json TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (capture_id) REFERENCES captures(capture_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS system_state (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_captures_status ON captures(status);
-        CREATE INDEX IF NOT EXISTS idx_capture_events_capture_id
-            ON capture_events(capture_id);
-        """,
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS capture_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                capture_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                event_payload_json TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (capture_id) REFERENCES captures(capture_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS system_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_captures_status ON captures(status)",
+            "CREATE INDEX IF NOT EXISTS idx_capture_events_capture_id ON capture_events(capture_id)",
+        ),
     ),
 ]
 
 
 def run_migrations(connection: sqlite3.Connection) -> None:
-    # Create bookkeeping table outside a transaction (DDL auto-commits in Python sqlite3)
     connection.execute("""
         CREATE TABLE IF NOT EXISTS schema_migrations (
             version INTEGER PRIMARY KEY,
@@ -97,13 +100,30 @@ def run_migrations(connection: sqlite3.Connection) -> None:
 
 
 def _apply(connection: sqlite3.Connection, migration: Migration) -> None:
-    # executescript() issues an implicit COMMIT before running, which is fine here
-    # because all DDL uses IF NOT EXISTS (safe to re-run on partial failure)
-    connection.executescript(migration.sql)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration.version,),
+        ).fetchone()
+        if already_applied is not None:
+            connection.commit()
+            return
 
-    # Record the migration in a proper transaction so it's atomic with itself
-    with connection:
+        for statement in migration.statements:
+            connection.execute(statement)
+
         connection.execute(
             "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
             (migration.version, migration.name, datetime.now(UTC).isoformat()),
         )
+    except BaseException:
+        connection.rollback()
+        raise
+
+    connection.commit()
+    log_metadata(
+        "sqlite_migration_applied",
+        version=migration.version,
+        name=migration.name,
+    )

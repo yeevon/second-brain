@@ -47,10 +47,10 @@ class Settings:
         self.capture_processing_mode = os.getenv("CAPTURE_PROCESSING_MODE")
 
         # SQLite runtime
-        self.sqlite_busy_timeout_ms       = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS",       "1000"))
-        self.sqlite_busy_retry_attempts   = int(os.getenv("SQLITE_BUSY_RETRY_ATTEMPTS",   "5"))
-        self.sqlite_busy_retry_base_delay_ms = int(os.getenv("SQLITE_BUSY_RETRY_BASE_DELAY_MS", "25"))
-        self.sqlite_job_queue_maxsize     = int(os.getenv("SQLITE_JOB_QUEUE_MAXSIZE",     "10000"))
+        self.sqlite_busy_timeout_ms = _parse_int_env("SQLITE_BUSY_TIMEOUT_MS", "1000")
+        self.sqlite_busy_retry_attempts = _parse_int_env("SQLITE_BUSY_RETRY_ATTEMPTS", "5")
+        self.sqlite_busy_retry_base_delay_ms = _parse_int_env("SQLITE_BUSY_RETRY_BASE_DELAY_MS", "25")
+        self.sqlite_job_queue_maxsize = _parse_int_env("SQLITE_JOB_QUEUE_MAXSIZE", "10000")
 
         # Prompt version
         # self.prompt_version = os.getenv("PROMPT_VERSION")
@@ -125,3 +125,11 @@ class Settings:
             raise RuntimeError("SQLITE_BUSY_RETRY_BASE_DELAY_MS must be >= 0")
         if self.sqlite_job_queue_maxsize < 1:
             raise RuntimeError("SQLITE_JOB_QUEUE_MAXSIZE must be >= 1")
+
+
+def _parse_int_env(name: str, default: str) -> int:
+    raw = os.getenv(name, default)
+    try:
+        return int(raw)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError(f"{name} must be an integer, got: {raw!r}") from exc

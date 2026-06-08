@@ -611,6 +611,13 @@ def test_serialized_concurrent_inserts_do_not_drop_captures(tmp_path):
     counts = ledger.status_counts()
     assert counts.get(RECEIVED, 0) == n
 
+    event_count = ledger._runtime.read(
+        lambda conn: conn.execute(
+            "SELECT COUNT(*) AS c FROM capture_events WHERE event_type = 'CAPTURE_RECEIVED'"
+        ).fetchone()["c"]
+    )
+    assert event_count == n
+
     ledger.close()
 
 
@@ -686,6 +693,14 @@ def test_sqlite_busy_retry_eventually_succeeds(tmp_path):
     released.wait(timeout=2.0)
     assert result.created is True
     assert ledger.total_captures() == 1
+
+    event_count = ledger._runtime.read(
+        lambda conn: conn.execute(
+            "SELECT COUNT(*) AS c FROM capture_events WHERE event_type = 'CAPTURE_RECEIVED'"
+        ).fetchone()["c"]
+    )
+    assert event_count == 1
+
     ledger.close()
 
 
@@ -717,4 +732,57 @@ def test_sqlite_busy_exhausted_raises_and_leaves_no_partial_row(tmp_path):
         blocker.close()
 
     assert ledger.total_captures() == 0
+    ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# Service-level exhausted-lock test
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_service_level_busy_exhaustion_sends_no_receipt_and_leaves_no_row(tmp_path):
+    """SQLiteBusyError from the ledger must propagate through the service with no receipt sent."""
+    import pytest
+    from secondbrain.capture_service import CaptureService
+    from secondbrain.sqlite_runtime import SQLiteBusyError
+    from tests.fakes.discord import FakeDiscordChannel, FakeDiscordClient, FakeDiscordMessage
+
+    db_path = tmp_path / "ledger.sqlite3"
+    ledger = make_ledger(tmp_path,
+        sqlite_busy_timeout_ms=0,
+        sqlite_busy_retry_attempts=3,
+        sqlite_busy_retry_base_delay_ms=5,
+    )
+
+    channel = FakeDiscordChannel()
+    client = FakeDiscordClient(channel)
+    settings = SimpleNamespace(
+        discord_guild_id=100,
+        discord_capture_channel_id=200,
+        discord_allowed_user_id=300,
+    )
+    service = CaptureService(
+        settings=settings,
+        ledger=ledger,
+        notify_capture=None,
+        receipt_client=client,
+    )
+
+    blocker = sqlite3.connect(str(db_path), check_same_thread=False)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(SQLiteBusyError):
+            await service.handle_gateway_message(
+                FakeDiscordMessage(
+                    message_id=1001,
+                    channel=channel,
+                    content="Should not persist.",
+                )
+            )
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+
+    assert channel.sent_receipts == [], "no receipt must be sent when insert fails"
+    assert ledger.total_captures() == 0, "no capture row must be written when insert fails"
     ledger.close()

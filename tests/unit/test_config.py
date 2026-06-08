@@ -56,3 +56,79 @@ def test_project_exposes_secondbrain_console_script():
 def _set_required_env(monkeypatch):
     for key, value in REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
+
+
+# ---------------------------------------------------------------------------
+# SQLite runtime settings
+# ---------------------------------------------------------------------------
+
+def test_sqlite_runtime_settings_use_safe_defaults(monkeypatch):
+    _set_required_env(monkeypatch)
+    # Do not set any SQLITE_* vars so defaults apply
+    for key in (
+        "SQLITE_BUSY_TIMEOUT_MS",
+        "SQLITE_BUSY_RETRY_ATTEMPTS",
+        "SQLITE_BUSY_RETRY_BASE_DELAY_MS",
+        "SQLITE_JOB_QUEUE_MAXSIZE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    s = Settings()
+    assert s.sqlite_busy_timeout_ms == 1000
+    assert s.sqlite_busy_retry_attempts == 5
+    assert s.sqlite_busy_retry_base_delay_ms == 25
+    assert s.sqlite_job_queue_maxsize == 10000
+
+
+def test_sqlite_runtime_settings_accept_valid_overrides(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("SQLITE_BUSY_TIMEOUT_MS", "500")
+    monkeypatch.setenv("SQLITE_BUSY_RETRY_ATTEMPTS", "10")
+    monkeypatch.setenv("SQLITE_BUSY_RETRY_BASE_DELAY_MS", "50")
+    monkeypatch.setenv("SQLITE_JOB_QUEUE_MAXSIZE", "5000")
+
+    s = Settings()
+    assert s.sqlite_busy_timeout_ms == 500
+    assert s.sqlite_busy_retry_attempts == 10
+    assert s.sqlite_busy_retry_base_delay_ms == 50
+    assert s.sqlite_job_queue_maxsize == 5000
+
+
+def test_sqlite_busy_timeout_rejects_negative_value(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("SQLITE_BUSY_TIMEOUT_MS", "-1")
+
+    with pytest.raises(RuntimeError, match="SQLITE_BUSY_TIMEOUT_MS"):
+        Settings()
+
+
+def test_sqlite_retry_attempts_rejects_zero(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("SQLITE_BUSY_RETRY_ATTEMPTS", "0")
+
+    with pytest.raises(RuntimeError, match="SQLITE_BUSY_RETRY_ATTEMPTS"):
+        Settings()
+
+
+def test_sqlite_retry_delay_rejects_negative_value(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("SQLITE_BUSY_RETRY_BASE_DELAY_MS", "-5")
+
+    with pytest.raises(RuntimeError, match="SQLITE_BUSY_RETRY_BASE_DELAY_MS"):
+        Settings()
+
+
+def test_sqlite_queue_maxsize_rejects_zero(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("SQLITE_JOB_QUEUE_MAXSIZE", "0")
+
+    with pytest.raises(RuntimeError, match="SQLITE_JOB_QUEUE_MAXSIZE"):
+        Settings()
+
+
+def test_sqlite_runtime_settings_reject_non_numeric_values_cleanly(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("SQLITE_BUSY_TIMEOUT_MS", "not-a-number")
+
+    with pytest.raises(RuntimeError, match="SQLITE_BUSY_TIMEOUT_MS"):
+        Settings()
