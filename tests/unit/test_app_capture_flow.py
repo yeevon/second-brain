@@ -5,6 +5,7 @@ import pytest
 
 from secondbrain.app import (
     LocalWorkerStartup,
+    ensure_periodic_reconciliation_task,
     format_status_report,
     main,
     run_discord_listener,
@@ -25,6 +26,8 @@ def make_settings(tmp_path):
         discord_allowed_user_id=400,
         classifier_queue_maxsize=10,
         startup_reconcile_limit=10,
+        periodic_reconcile_limit=10,
+        periodic_reconcile_interval_seconds=60,
         gemini_api_key="fake",
         gemini_model="gemini-test",
         classification_confidence_threshold=0.75,
@@ -696,3 +699,106 @@ def insert_attachment_only_capture(ledger: Ledger, *, discord_message_id: str):
             }
         ],
     ).capture
+
+
+def test_service_periodic_reconcile_snapshot_forwards_ledger_metrics(tmp_path):
+    """CaptureService.periodic_reconcile_snapshot() returns the ledger metrics dict."""
+    settings = make_settings(tmp_path)
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    snapshot = service.periodic_reconcile_snapshot()
+
+    assert isinstance(snapshot, dict)
+    assert "periodic_reconcile_runs_total" in snapshot
+    assert "periodic_reconcile_last_warning" in snapshot
+    assert "periodic_reconcile_last_error_type" in snapshot
+
+
+def test_run_status_includes_periodic_reconciliation_metrics(tmp_path):
+    """format_status_report with a real snapshot includes all periodic fields."""
+    settings = make_settings(tmp_path)
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    report = format_status_report(settings, service.status_snapshot(), service.periodic_reconcile_snapshot())
+
+    assert "periodic reconciliation runs:" in report
+    assert "periodic reconciliation last warning:" in report
+    assert "periodic reconciliation last error type:" in report
+    assert "periodic reconciliation interval:" in report
+    assert "periodic reconciliation scan limit:" in report
+
+
+@pytest.mark.asyncio
+async def test_ensure_periodic_task_creates_task_when_none_exists(tmp_path, monkeypatch):
+    """ensure_periodic_reconciliation_task creates a task when startup.periodic_task is None."""
+    async def mock_loop(self, client):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(CaptureService, "run_periodic_reconciliation_loop", mock_loop)
+
+    settings = make_settings(tmp_path)
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    service = CaptureService(settings=settings, ledger=ledger)
+    startup = SimpleNamespace(periodic_task=None)
+
+    ensure_periodic_reconciliation_task(startup=startup, client=None, capture_service=service)
+    await asyncio.sleep(0)
+
+    assert startup.periodic_task is not None
+    assert not startup.periodic_task.done()
+
+    startup.periodic_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await startup.periodic_task
+
+
+@pytest.mark.asyncio
+async def test_ensure_periodic_task_restarts_dead_task(tmp_path, monkeypatch):
+    """ensure_periodic_reconciliation_task replaces a completed (dead) task."""
+    async def mock_loop(self, client):
+        return  # returns immediately — task will be done
+
+    monkeypatch.setattr(CaptureService, "run_periodic_reconciliation_loop", mock_loop)
+
+    settings = make_settings(tmp_path)
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    service = CaptureService(settings=settings, ledger=ledger)
+    startup = SimpleNamespace(periodic_task=None)
+
+    ensure_periodic_reconciliation_task(startup=startup, client=None, capture_service=service)
+    first_task = startup.periodic_task
+    await first_task  # let it finish
+
+    assert first_task.done()
+
+    ensure_periodic_reconciliation_task(startup=startup, client=None, capture_service=service)
+
+    assert startup.periodic_task is not first_task
+
+
+@pytest.mark.asyncio
+async def test_ensure_periodic_task_does_not_replace_running_task(tmp_path, monkeypatch):
+    """ensure_periodic_reconciliation_task is a no-op when a live task already exists."""
+    async def mock_loop(self, client):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(CaptureService, "run_periodic_reconciliation_loop", mock_loop)
+
+    settings = make_settings(tmp_path)
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    service = CaptureService(settings=settings, ledger=ledger)
+    startup = SimpleNamespace(periodic_task=None)
+
+    ensure_periodic_reconciliation_task(startup=startup, client=None, capture_service=service)
+    await asyncio.sleep(0)
+    first_task = startup.periodic_task
+
+    ensure_periodic_reconciliation_task(startup=startup, client=None, capture_service=service)
+
+    assert startup.periodic_task is first_task
+
+    first_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_task

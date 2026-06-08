@@ -228,6 +228,7 @@ class Ledger:
             "periodic_reconcile_last_success_at",
             "periodic_reconcile_last_recovered_count",
             "periodic_reconcile_last_warning",
+            "periodic_reconcile_last_error_type",
         ]
         return self._read(
             "periodic_reconcile_snapshot",

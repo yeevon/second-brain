@@ -105,9 +105,14 @@ class CaptureService:
             return await self._capture_if_allowed(message, notify_downstream=notify_downstream)
         return handle
 
-    @property
-    def ledger(self) -> "Ledger":
-        return self._ledger
+    async def run_periodic_reconciliation_loop(self, client) -> None:
+        from secondbrain.reconcile import run_periodic_reconciliation
+        await run_periodic_reconciliation(
+            client=client,
+            settings=self.settings,
+            ledger=self._ledger,
+            handle_capture=self.make_capture_handler(notify_downstream=True),
+        )
 
     async def enqueue_unfinished_captures(self) -> list[str]:
         capture_ids = self.unfinished_capture_ids()

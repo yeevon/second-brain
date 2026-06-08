@@ -390,7 +390,13 @@ class FakeGeminiClient:
 
 @pytest.mark.asyncio
 async def test_skipped_gateway_event_is_recovered_by_periodic_reconciliation(tmp_path):
-    """A message missed by the live gateway is recovered during the next periodic scan."""
+    """A message dropped by the live gateway is recovered during the next periodic scan.
+
+    Dangerous ordering: 1001 is the DROPPED event, 1002 is the DELIVERED event.
+    In the old live-marker design, capturing 1002 would have advanced the cursor past 1001,
+    permanently losing it. The current design never advances the cursor on live delivery,
+    so the periodic scan recovers 1001 correctly.
+    """
     from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID, _run_one_periodic_pass
 
     settings = make_settings()
@@ -398,8 +404,8 @@ async def test_skipped_gateway_event_is_recovered_by_periodic_reconciliation(tmp
     queue = CaptureQueue()
     channel = FakeDiscordChannel(
         [
-            make_message(1001, content="Live message."),
-            make_message(1002, content="Missed message."),
+            make_message(1001, content="Dropped message."),
+            make_message(1002, content="Live message."),
         ]
     )
     client = FakeDiscordClient(channel)
@@ -410,15 +416,15 @@ async def test_skipped_gateway_event_is_recovered_by_periodic_reconciliation(tmp
         receipt_client=client,
     )
 
-    # Only message 1001 is delivered via the live gateway (1002 was skipped)
-    await service.handle_gateway_message(make_message(1001, channel=channel, content="Live message."))
+    # Only message 1002 is delivered via the live gateway (1001 was dropped)
+    await service.handle_gateway_message(make_message(1002, channel=channel, content="Live message."))
     await queue.get()
 
     # Live gateway never touches the marker
     assert ledger.get_system_state(LAST_RECONCILED_MESSAGE_ID) is None
     assert ledger.total_captures() == 1
 
-    # Periodic scan picks up both messages; 1001 is a duplicate, 1002 is recovered
+    # Periodic scan picks up both messages; 1001 is recovered, 1002 is a duplicate
     await _run_one_periodic_pass(
         client=client,
         settings=settings,

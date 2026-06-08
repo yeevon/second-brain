@@ -132,12 +132,22 @@ async def run_periodic_reconciliation(
     while True:
         await asyncio.sleep(settings.periodic_reconcile_interval_seconds)
         async with scan_lock:
-            await _run_one_periodic_pass(
-                client=client,
-                settings=settings,
-                ledger=ledger,
-                handle_capture=handle_capture,
-            )
+            try:
+                await _run_one_periodic_pass(
+                    client=client,
+                    settings=settings,
+                    ledger=ledger,
+                    handle_capture=handle_capture,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log_metadata(
+                    "discord_reconcile_loop_error",
+                    mode="periodic",
+                    error_type=type(exc).__name__,
+                )
+                await _send_reconcile_warning(client, settings, _RECONCILE_FAILURE_WARNING)
 
 
 async def _run_one_periodic_pass(
@@ -167,6 +177,8 @@ async def _run_one_periodic_pass(
             error_type=type(exc).__name__,
         )
         ledger.increment_system_counter("periodic_reconcile_failures_total")
+        ledger.set_system_state("periodic_reconcile_last_warning", "scan_failed")
+        ledger.set_system_state("periodic_reconcile_last_error_type", type(exc).__name__)
         await _send_reconcile_warning(client, settings, _RECONCILE_FAILURE_WARNING)
         return
 

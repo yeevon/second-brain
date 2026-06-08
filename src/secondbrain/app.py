@@ -12,7 +12,7 @@ from secondbrain.capture_api import create_capture_api
 from secondbrain.capture_service import CaptureService
 from secondbrain.config import Settings
 from secondbrain.discord_capture import create_discord_client
-from secondbrain.reconcile import ReconcileResult, run_periodic_reconciliation
+from secondbrain.reconcile import ReconcileResult
 from secondbrain.vault_writer import VaultWriter
 from secondbrain.worker import CaptureQueue, run_capture_worker
 
@@ -102,6 +102,20 @@ class CaptureOnlyStartup:
             return result
 
 
+def ensure_periodic_reconciliation_task(
+    *,
+    startup,
+    client,
+    capture_service: CaptureService,
+) -> None:
+    task = startup.periodic_task
+    if task is not None and not task.done():
+        return
+    startup.periodic_task = asyncio.create_task(
+        capture_service.run_periodic_reconciliation_loop(client)
+    )
+
+
 async def run_service() -> None:
     settings = Settings()
     if settings.capture_processing_mode == "local-full":
@@ -138,27 +152,23 @@ async def run_local_full_runtime(settings: Settings) -> None:
 
     async def start_background_worker_once() -> None:
         startup_result = await startup.start_once(client)
-        if startup_result is None:
-            return
-        reconcile_result = startup_result.reconcile_result
-        capture_ids = startup_result.capture_ids
-        print("startup Discord history reconciliation complete")
-        print(f"  messages seen: {reconcile_result.seen}")
-        print(f"  captures handled: {reconcile_result.handled}")
-        print(f"  ignored messages: {reconcile_result.ignored}")
-        if reconcile_result.warning:
-            print(f"  warning: {reconcile_result.warning}")
-        print("background classifier worker started")
-        print(f"  recovered captures queued: {len(capture_ids)}")
-        if startup.periodic_task is None or startup.periodic_task.done():
-            startup.periodic_task = asyncio.create_task(
-                run_periodic_reconciliation(
-                    client=client,
-                    settings=settings,
-                    ledger=capture_service.ledger,
-                    handle_capture=capture_service.make_capture_handler(notify_downstream=True),
-                )
-            )
+        if startup_result is not None:
+            reconcile_result = startup_result.reconcile_result
+            capture_ids = startup_result.capture_ids
+            print("startup Discord history reconciliation complete")
+            print(f"  messages seen: {reconcile_result.seen}")
+            print(f"  captures handled: {reconcile_result.handled}")
+            print(f"  ignored messages: {reconcile_result.ignored}")
+            if reconcile_result.warning:
+                print(f"  warning: {reconcile_result.warning}")
+            print("background classifier worker started")
+            print(f"  recovered captures queued: {len(capture_ids)}")
+        ensure_periodic_reconciliation_task(
+            startup=startup,
+            client=client,
+            capture_service=capture_service,
+        )
+        if startup_result is not None:
             print(f"  periodic reconciliation started (interval: {settings.periodic_reconcile_interval_seconds}s)")
 
     client = create_discord_client(
@@ -206,24 +216,20 @@ async def run_capture_only_runtime(settings: Settings) -> None:
 
     async def reconcile_once() -> None:
         reconcile_result = await startup.start_once(client)
-        if reconcile_result is None:
-            return
-        print("startup Discord history reconciliation complete")
-        print(f"  messages seen: {reconcile_result.seen}")
-        print(f"  captures handled: {reconcile_result.handled}")
-        print(f"  ignored messages: {reconcile_result.ignored}")
-        if reconcile_result.warning:
-            print(f"  warning: {reconcile_result.warning}")
-        print("Discord listener ready")
-        if startup.periodic_task is None or startup.periodic_task.done():
-            startup.periodic_task = asyncio.create_task(
-                run_periodic_reconciliation(
-                    client=client,
-                    settings=settings,
-                    ledger=capture_service.ledger,
-                    handle_capture=capture_service.make_capture_handler(notify_downstream=True),
-                )
-            )
+        if reconcile_result is not None:
+            print("startup Discord history reconciliation complete")
+            print(f"  messages seen: {reconcile_result.seen}")
+            print(f"  captures handled: {reconcile_result.handled}")
+            print(f"  ignored messages: {reconcile_result.ignored}")
+            if reconcile_result.warning:
+                print(f"  warning: {reconcile_result.warning}")
+            print("Discord listener ready")
+        ensure_periodic_reconciliation_task(
+            startup=startup,
+            client=client,
+            capture_service=capture_service,
+        )
+        if reconcile_result is not None:
             print(f"  periodic reconciliation started (interval: {settings.periodic_reconcile_interval_seconds}s)")
 
     client = create_discord_client(
@@ -336,6 +342,7 @@ def format_status_report(
             f"periodic reconciliation last success: {p.get('periodic_reconcile_last_success_at') or 'never'}",
             f"periodic reconciliation last recovered count: {p.get('periodic_reconcile_last_recovered_count') or '0'}",
             f"periodic reconciliation last warning: {p.get('periodic_reconcile_last_warning') or 'none'}",
+        f"periodic reconciliation last error type: {p.get('periodic_reconcile_last_error_type') or 'none'}",
         ]
     return "\n".join(lines)
 

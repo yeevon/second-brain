@@ -132,3 +132,47 @@ def test_sqlite_runtime_settings_reject_non_numeric_values_cleanly(monkeypatch):
 
     with pytest.raises(RuntimeError, match="SQLITE_BUSY_TIMEOUT_MS"):
         Settings()
+
+
+def test_periodic_reconcile_settings_use_safe_defaults(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("PERIODIC_RECONCILE_INTERVAL_SECONDS", raising=False)
+    monkeypatch.delenv("PERIODIC_RECONCILE_LIMIT", raising=False)
+
+    s = Settings()
+    assert s.periodic_reconcile_interval_seconds == 60
+    assert s.periodic_reconcile_limit == 100
+
+
+def test_periodic_reconcile_settings_accept_valid_overrides(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("PERIODIC_RECONCILE_INTERVAL_SECONDS", "120")
+    monkeypatch.setenv("PERIODIC_RECONCILE_LIMIT", "50")
+
+    s = Settings()
+    assert s.periodic_reconcile_interval_seconds == 120
+    assert s.periodic_reconcile_limit == 50
+
+
+def test_periodic_reconcile_interval_rejects_zero(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("PERIODIC_RECONCILE_INTERVAL_SECONDS", "0")
+
+    with pytest.raises(RuntimeError, match="PERIODIC_RECONCILE_INTERVAL_SECONDS"):
+        Settings()
+
+
+def test_periodic_reconcile_limit_rejects_zero(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("PERIODIC_RECONCILE_LIMIT", "0")
+
+    with pytest.raises(RuntimeError, match="PERIODIC_RECONCILE_LIMIT"):
+        Settings()
+
+
+def test_periodic_reconcile_settings_reject_non_numeric_values_cleanly(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("PERIODIC_RECONCILE_INTERVAL_SECONDS", "not-a-number")
+
+    with pytest.raises(RuntimeError, match="PERIODIC_RECONCILE_INTERVAL_SECONDS"):
+        Settings()

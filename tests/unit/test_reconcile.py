@@ -551,21 +551,122 @@ async def test_periodic_reconcile_loop_does_not_run_concurrent_passes(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_periodic_failure_persists_safe_warning_state(tmp_path):
+    """A scan failure must set periodic_reconcile_last_warning to 'scan_failed'."""
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    settings = make_settings()
+    channel = FakeFullChannel([make_message(1001, content="Trouble.")])
+
+    async def always_failing(message):
+        raise RuntimeError("scan error")
+
+    await _run_one_periodic_pass(
+        client=FakeClientWithChannel(channel), settings=settings, ledger=ledger,
+        handle_capture=always_failing,
+    )
+
+    assert ledger.get_system_state("periodic_reconcile_last_warning") == "scan_failed"
+
+
+@pytest.mark.asyncio
+async def test_periodic_failure_persists_error_type_without_exception_message(tmp_path):
+    """Failure stores the exception class name only, not the exception message."""
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    settings = make_settings()
+    channel = FakeFullChannel([make_message(1001, content="Trouble.")])
+
+    async def value_error(message):
+        raise ValueError("secret internal details")
+
+    await _run_one_periodic_pass(
+        client=FakeClientWithChannel(channel), settings=settings, ledger=ledger,
+        handle_capture=value_error,
+    )
+
+    error_type = ledger.get_system_state("periodic_reconcile_last_error_type")
+    assert error_type == "ValueError"
+    assert "secret internal details" not in (error_type or "")
+
+
+@pytest.mark.asyncio
+async def test_periodic_loop_survives_metric_write_failure(tmp_path, monkeypatch):
+    """A metric write failure escaping _run_one_periodic_pass must not kill the loop."""
+    passes = []
+
+    async def failing_then_succeeding(**kwargs):
+        passes.append(1)
+        if len(passes) == 1:
+            raise RuntimeError("SQLite busy — metric write failed after scan")
+
+    monkeypatch.setattr("secondbrain.reconcile._run_one_periodic_pass", failing_then_succeeding)
+
+    settings = make_settings(periodic_reconcile_interval_seconds=0)
+    channel = FakeFullChannel([])
+    task = asyncio.create_task(
+        run_periodic_reconciliation(
+            client=FakeClientWithChannel(channel),
+            settings=settings,
+            ledger=Ledger(tmp_path / "ledger.sqlite3"),
+            handle_capture=lambda msg: None,
+        )
+    )
+
+    for _ in range(40):
+        await asyncio.sleep(0)
+        if len(passes) >= 2:
+            break
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(passes) >= 2
+
+
+@pytest.mark.asyncio
+async def test_periodic_loop_continues_after_unexpected_pass_failure(tmp_path, monkeypatch):
+    """Loop continues normally even when _run_one_periodic_pass raises unexpectedly."""
+    success = asyncio.Event()
+    passes = []
+
+    async def controlled(**kwargs):
+        passes.append(1)
+        if len(passes) == 1:
+            raise RuntimeError("unexpected first-pass failure")
+        success.set()
+
+    monkeypatch.setattr("secondbrain.reconcile._run_one_periodic_pass", controlled)
+
+    settings = make_settings(periodic_reconcile_interval_seconds=0)
+    task = asyncio.create_task(
+        run_periodic_reconciliation(
+            client=FakeClientWithChannel(FakeFullChannel([])),
+            settings=settings,
+            ledger=Ledger(tmp_path / "ledger.sqlite3"),
+            handle_capture=lambda msg: None,
+        )
+    )
+
+    await asyncio.wait_for(success.wait(), timeout=2.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(passes) >= 2
+
+
+@pytest.mark.asyncio
 async def test_on_ready_starts_only_one_periodic_reconcile_task(tmp_path, monkeypatch):
-    """The periodic_task guard prevents a second task being created when the first is running."""
+    """ensure_periodic_reconciliation_task does not replace a running task."""
     starts = []
 
-    async def mock_periodic(**kwargs):
+    async def mock_loop(self, client):
         starts.append(1)
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            raise
+        await asyncio.Event().wait()
 
-    monkeypatch.setattr("secondbrain.app.run_periodic_reconciliation", mock_periodic)
+    monkeypatch.setattr(CaptureService, "run_periodic_reconciliation_loop", mock_loop)
 
-    from secondbrain.app import LocalWorkerStartup, run_periodic_reconciliation as rpr
-    from secondbrain.vault_writer import VaultWriter
+    from secondbrain.app import ensure_periodic_reconciliation_task
 
     settings_ns = SimpleNamespace(
         discord_guild_id=100,
@@ -581,27 +682,16 @@ async def test_on_ready_starts_only_one_periodic_reconcile_task(tmp_path, monkey
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     queue = CaptureQueue()
     service = CaptureService(settings=settings_ns, ledger=ledger, notify_capture=queue.enqueue)
-    startup = LocalWorkerStartup(
-        settings=settings_ns,
-        capture_service=service,
-        queue=queue,
-        vault_writer=VaultWriter(tmp_path / "vault"),
-    )
-
-    async def simulate_on_ready(client):
-        result = await startup.start_once(client)
-        if result is None:
-            return
-        if startup.periodic_task is None or startup.periodic_task.done():
-            startup.periodic_task = asyncio.create_task(mock_periodic())
-
+    startup = SimpleNamespace(periodic_task=None)
     client = FakeClient([])
-    await simulate_on_ready(client)
+
+    ensure_periodic_reconciliation_task(startup=startup, client=client, capture_service=service)
     await asyncio.sleep(0)
     first_task = startup.periodic_task
     assert first_task is not None
+    assert len(starts) == 1
 
-    await simulate_on_ready(client)
+    ensure_periodic_reconciliation_task(startup=startup, client=client, capture_service=service)
 
     assert startup.periodic_task is first_task
     assert len(starts) == 1
@@ -609,6 +699,3 @@ async def test_on_ready_starts_only_one_periodic_reconcile_task(tmp_path, monkey
     first_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first_task
-    startup.worker_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await startup.worker_task
