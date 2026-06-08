@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass
 
 from secondbrain.capture_models import CaptureStatusSnapshot
 from secondbrain.capture_service import CaptureService
 from secondbrain.config import Settings
 from secondbrain.discord_capture import create_discord_client
+from secondbrain.reconcile import ReconcileResult
 from secondbrain.vault_writer import VaultWriter
 from secondbrain.worker import CaptureQueue, run_capture_worker
 
 
 @dataclass(frozen=True)
 class LocalWorkerStartupResult:
-    reconcile_result: object
+    reconcile_result: ReconcileResult
     worker_task: asyncio.Task
     capture_ids: list[str]
 
@@ -34,7 +36,13 @@ async def start_local_worker_and_enqueue_recovered(
             vault_writer=vault_writer,
         )
     )
-    capture_ids = await capture_service.enqueue_unfinished_captures()
+    try:
+        capture_ids = await capture_service.enqueue_unfinished_captures()
+    except BaseException:
+        worker_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await worker_task
+        raise
     return worker_task, capture_ids
 
 
