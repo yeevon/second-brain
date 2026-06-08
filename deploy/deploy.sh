@@ -9,6 +9,13 @@ if ! mountpoint -q "$DATA_DIR"; then
   exit 1
 fi
 
+MARKER="$DATA_DIR/.second-brain-ebs-volume"
+
+if [[ ! -f "$MARKER" ]]; then
+  echo "persistent EBS marker missing: $MARKER" >&2
+  exit 1
+fi
+
 cd "$APP_DIR"
 
 docker compose config >/dev/null

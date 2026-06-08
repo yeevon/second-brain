@@ -1,3 +1,5 @@
+import os
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -121,3 +123,50 @@ def test_verify_script_checks_persistent_ledger_file():
 
     assert "ledger.sqlite3" in verify
     assert "-f " in verify
+
+
+def test_container_entrypoint_refuses_missing_ebs_marker(tmp_path):
+    result = subprocess.run(
+        ["sh", str(ROOT / "deploy" / "container-entrypoint.sh"), "true"],
+        env={**os.environ, "SECOND_BRAIN_DATA_DIR": str(tmp_path)},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "persistent EBS volume marker missing" in result.stderr
+
+
+def test_container_entrypoint_runs_command_when_ebs_marker_exists(tmp_path):
+    (tmp_path / ".second-brain-ebs-volume").touch()
+
+    result = subprocess.run(
+        ["sh", str(ROOT / "deploy" / "container-entrypoint.sh"), "true"],
+        env={**os.environ, "SECOND_BRAIN_DATA_DIR": str(tmp_path)},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+
+
+def test_dockerfile_uses_persistent_volume_entrypoint():
+    dockerfile = (ROOT / "Dockerfile").read_text()
+
+    assert "secondbrain-entrypoint" in dockerfile
+    assert "ENTRYPOINT" in dockerfile
+    assert "container-entrypoint.sh" in dockerfile
+
+
+def test_deploy_script_checks_ebs_marker():
+    deploy = (ROOT / "deploy" / "deploy.sh").read_text()
+
+    assert ".second-brain-ebs-volume" in deploy
+    assert "MARKER" in deploy
+
+
+def test_verify_script_checks_ebs_marker():
+    verify = (ROOT / "deploy" / "verify.sh").read_text()
+
+    assert ".second-brain-ebs-volume" in verify
+    assert "MARKER" in verify

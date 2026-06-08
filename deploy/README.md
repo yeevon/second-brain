@@ -16,12 +16,13 @@ Use one Ubuntu LTS instance with:
 
 ### Verify EBS DeleteOnTermination
 
-After launch, confirm the data volume will survive instance termination:
+After launch, confirm the data volume will survive instance termination.
+Use the EC2 attachment name (e.g. `/dev/sdf`) — not the in-instance NVMe path (e.g. `/dev/nvme1n1`):
 
 ```bash
 aws ec2 describe-instances \
   --instance-ids <INSTANCE_ID> \
-  --query 'Reservations[].Instances[].BlockDeviceMappings[?DeviceName!=`/dev/sda1`].Ebs.DeleteOnTermination'
+  --query "Reservations[].Instances[].BlockDeviceMappings[?DeviceName=='<DATA_ATTACHMENT_DEVICE>'].Ebs.DeleteOnTermination"
 ```
 
 Expected: `false`. If not, update it:
@@ -29,7 +30,7 @@ Expected: `false`. If not, update it:
 ```bash
 aws ec2 modify-instance-attribute \
   --instance-id <INSTANCE_ID> \
-  --block-device-mappings '[{"DeviceName":"<DATA_DEVICE>","Ebs":{"DeleteOnTermination":false}}]'
+  --block-device-mappings '[{"DeviceName":"<DATA_ATTACHMENT_DEVICE>","Ebs":{"DeleteOnTermination":false}}]'
 ```
 
 This is separate from reboot persistence. `/etc/fstab` handles remounting after reboot. `DeleteOnTermination=false` protects the data volume if the EC2 instance itself is terminated and replaced.
@@ -105,7 +106,7 @@ Add the UUID to `/etc/fstab`:
 UUID=<DATA_VOLUME_UUID> /opt/second-brain/data ext4 defaults,nofail 0 2
 ```
 
-Verify and set container-user ownership:
+Verify the mount and set container-user ownership:
 
 ```bash
 sudo umount /opt/second-brain/data
@@ -113,6 +114,16 @@ sudo mount -a
 findmnt /opt/second-brain/data
 sudo chown -R 10001:10001 /opt/second-brain/data
 ```
+
+Only after `findmnt` confirms the EBS filesystem is mounted, create the sentinel file on the EBS volume:
+
+```bash
+sudo touch /opt/second-brain/data/.second-brain-ebs-volume
+sudo chown 10001:10001 /opt/second-brain/data/.second-brain-ebs-volume
+sudo chmod 600 /opt/second-brain/data/.second-brain-ebs-volume
+```
+
+The container entrypoint refuses to start if this file is absent. When the EBS mount is missing on reboot, the file is not present in the fallback root-volume directory, and the container exits immediately rather than writing to the wrong filesystem.
 
 ## Environment
 
