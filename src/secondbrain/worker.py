@@ -106,6 +106,16 @@ async def process_capture_once(
     )
 
 
+def unfinished_capture_ids(capture_service: Any) -> list[str]:
+    return capture_service.unfinished_capture_ids()
+
+
+async def enqueue_capture_ids(capture_ids: list[str], queue: CaptureQueue) -> list[str]:
+    for capture_id in capture_ids:
+        await queue.enqueue(capture_id)
+    return capture_ids
+
+
 async def run_capture_worker(
     *,
     settings: Any,
@@ -176,3 +186,28 @@ def attachment_only_inbox_outcome() -> ClassificationOutcomeLike:
         route="inbox",
         inbox_reason=reason,
     )
+
+
+def _safe_inbox_reason_type(reason: str | None) -> str:
+    if not reason:
+        return "unspecified"
+    if reason.startswith("classifier failed:"):
+        return "classifier_failure"
+    if reason == "classification confidence below threshold":
+        return "low_confidence"
+    if reason == "classification needs clarification":
+        return "needs_clarification"
+    if reason == "classifier selected inbox":
+        return "classifier_selected_inbox"
+    if reason.startswith("attachment-only capture"):
+        return "attachment_only"
+    return "other"
+
+
+def _safe_inbox_error_type(reason: str | None) -> str | None:
+    if not reason or not reason.startswith("classifier failed:"):
+        return None
+    parts = reason.split(":", maxsplit=2)
+    if len(parts) < 2:
+        return "ClassifierError"
+    return parts[1].strip() or "ClassifierError"
