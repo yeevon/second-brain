@@ -127,6 +127,55 @@ def test_service_claim_for_processing_transitions_received_to_classifying(tmp_pa
     assert service.get_capture(capture.capture_id).status == CLASSIFYING
 
 
+def test_retry_clears_stale_failure_metadata(tmp_path):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    capture = _insert_capture(ledger, "1001")
+    ledger.update_capture(
+        capture.capture_id,
+        status=FAILED,
+        classification_json=make_classification(title="stale").model_dump(mode="json"),
+        derived_note_path="20_projects/halo/stale.md",
+        last_error="temporary failure",
+    )
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    service.retry(capture.capture_id)
+
+    updated = service.get_capture(capture.capture_id)
+    assert updated.status == RECEIVED
+    assert updated.last_error is None
+    assert updated.derived_note_path is None
+    assert ledger.capture_classification_json(capture.capture_id) is None
+
+
+def test_successful_filing_after_retry_does_not_retain_old_error(tmp_path):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    capture = _insert_capture(ledger, "1001")
+    ledger.update_capture(
+        capture.capture_id,
+        status=FAILED,
+        classification_json=make_classification(title="stale").model_dump(mode="json"),
+        derived_note_path="20_projects/halo/stale.md",
+        last_error="temporary failure",
+    )
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    service.retry(capture.capture_id)
+    claimed = service.claim_for_processing(capture.capture_id)
+    service.mark_filed(
+        capture_id=capture.capture_id,
+        classification=make_classification(),
+        note_path="20_projects/halo/file.md",
+    )
+
+    updated = service.get_capture(capture.capture_id)
+    assert claimed is not None
+    assert updated.status == FILED
+    assert updated.last_error is None
+
+
 @pytest.mark.asyncio
 async def test_service_complete_filed_updates_state_before_editing_receipt(tmp_path):
     settings = make_settings(tmp_path)

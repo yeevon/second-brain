@@ -139,11 +139,46 @@ async def run_service() -> None:
 
     api_task = asyncio.create_task(api_server.serve())
     discord_task = asyncio.create_task(client.start(settings.discord_bot_token))
+    await run_service_runtime(
+        api_task=api_task,
+        discord_task=discord_task,
+        api_server=api_server,
+        client=client,
+        startup=startup,
+        capture_service=capture_service,
+    )
+
+
+async def run_service_runtime(
+    *,
+    api_task: asyncio.Task,
+    discord_task: asyncio.Task,
+    api_server,
+    client,
+    startup,
+    capture_service: CaptureService,
+) -> None:
+    tasks = (api_task, discord_task)
     try:
-        await asyncio.gather(api_task, discord_task)
+        done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
     finally:
         await api_server.stop()
         await client.close()
+
+        worker_task = getattr(startup, "worker_task", None)
+        if worker_task is not None and not worker_task.done():
+            worker_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker_task
+
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
         capture_service.close()
 
 
