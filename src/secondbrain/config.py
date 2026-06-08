@@ -41,29 +41,26 @@ class Settings:
         # Prompt version
         # self.prompt_version = os.getenv("PROMPT_VERSION")
 
-        if not (
-            self.discord_bot_token 
-            and self.discord_guild_id 
-            and self.discord_capture_channel_id 
-            and self.discord_allowed_user_id 
-            and self.gemini_api_key 
-            and self.gemini_model 
-            and self.classification_confidence_threshold 
-            and self.classifier_worker_count 
-            and self.classifier_queue_maxsize 
-            # and self.github_token 
-            # and self.github_vault_repo 
-            # and self.github_vault_branch 
-            # and self.n8n_webhook_url 
-            and self.vault_path 
-            and self.ledger_path 
-            and self.startup_reconcile_limit 
-            and self.capture_service_internal_token
-            and self.capture_api_host
-            and self.capture_api_port
-            # and self.prompt_version
-        ): 
-            raise RuntimeError("Missing required configuration")
+        required = {
+            "DISCORD_BOT_TOKEN": self.discord_bot_token,
+            "DISCORD_GUILD_ID": self.discord_guild_id,
+            "DISCORD_CAPTURE_CHANNEL_ID": self.discord_capture_channel_id,
+            "DISCORD_ALLOWED_USER_ID": self.discord_allowed_user_id,
+            "GEMINI_API_KEY": self.gemini_api_key,
+            "GEMINI_MODEL": self.gemini_model,
+            "CLASSIFICATION_CONFIDENCE_THRESHOLD": self.classification_confidence_threshold,
+            "CLASSIFIER_WORKER_COUNT": self.classifier_worker_count,
+            "CLASSIFIER_QUEUE_MAXSIZE": self.classifier_queue_maxsize,
+            "VAULT_PATH": self.vault_path,
+            "LEDGER_PATH": self.ledger_path,
+            "STARTUP_RECONCILE_LIMIT": self.startup_reconcile_limit,
+            "CAPTURE_SERVICE_INTERNAL_TOKEN": self.capture_service_internal_token,
+            "CAPTURE_API_HOST": self.capture_api_host,
+            "CAPTURE_API_PORT": self.capture_api_port,
+        }
+        missing = [name for name, value in required.items() if value is None or not value.strip()]
+        if missing:
+            raise RuntimeError(f"Missing required configuration: {', '.join(missing)}")
         
         
         self.discord_guild_id           = int(self.discord_guild_id)

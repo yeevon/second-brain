@@ -6,6 +6,8 @@ import pytest
 from secondbrain.app import (
     LocalWorkerStartup,
     format_status_report,
+    main,
+    run_discord_listener,
     run_service_runtime,
     start_local_worker_and_enqueue_recovered,
 )
@@ -215,6 +217,36 @@ def test_format_status_report_includes_operational_counts(tmp_path):
     assert "last reconciled Discord message ID: 1513233540316266517" in report
     assert "last successful vault write: 00_inbox/inbox.md" in report
     assert rejected.status == REJECTED_SENSITIVE
+
+
+def test_main_reports_configuration_errors_without_traceback(monkeypatch, capsys):
+    def fail_to_run():
+        raise RuntimeError("Missing required configuration: CAPTURE_SERVICE_INTERNAL_TOKEN")
+
+    monkeypatch.setattr("secondbrain.app.run_discord_listener", fail_to_run)
+
+    exit_code = main(["run"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert captured.err == "error: Missing required configuration: CAPTURE_SERVICE_INTERNAL_TOKEN\n"
+    assert "Traceback" not in captured.err
+
+
+def test_run_discord_listener_handles_keyboard_interrupt_cleanly(monkeypatch, capsys):
+    def raise_keyboard_interrupt(coro):
+        coro.close()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        "secondbrain.app.asyncio.run",
+        raise_keyboard_interrupt,
+    )
+
+    run_discord_listener()
+
+    captured = capsys.readouterr()
+    assert "shutdown complete" in captured.out
 
 
 @pytest.mark.asyncio
