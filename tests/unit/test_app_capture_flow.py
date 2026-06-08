@@ -649,6 +649,67 @@ async def test_startup_recovery_does_not_deadlock_when_backlog_exceeds_queue_siz
     assert ledger.status_counts() == {INBOX: 2}
 
 
+@pytest.mark.asyncio
+async def test_reconciliation_failure_does_not_permanently_block_worker_startup(tmp_path):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    capture = insert_attachment_only_capture(ledger, discord_message_id="1001")
+    queue = CaptureQueue(maxsize=1)
+    service = CaptureService(settings=settings, ledger=ledger, notify_capture=queue.enqueue)
+    startup = LocalWorkerStartup(
+        settings=settings,
+        capture_service=service,
+        queue=queue,
+        vault_writer=VaultWriter(settings.vault_path),
+    )
+
+    with pytest.raises(RuntimeError, match="simulated Discord history failure"):
+        await startup.start_once(FailingHistoryClient())
+
+    assert startup.worker_task is None
+
+    result = await startup.start_once(FakeHistoryClient([]))
+    assert result is not None
+    try:
+        await asyncio.wait_for(queue.join(), timeout=1)
+    finally:
+        startup.worker_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await startup.worker_task
+
+    assert result.capture_ids == [capture.capture_id]
+    assert ledger.status_counts() == {INBOX: 1}
+
+
+@pytest.mark.asyncio
+async def test_repeated_ready_callback_does_not_start_second_worker(tmp_path):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    insert_attachment_only_capture(ledger, discord_message_id="1001")
+    queue = CaptureQueue(maxsize=1)
+    service = CaptureService(settings=settings, ledger=ledger, notify_capture=queue.enqueue)
+    startup = LocalWorkerStartup(
+        settings=settings,
+        capture_service=service,
+        queue=queue,
+        vault_writer=VaultWriter(settings.vault_path),
+    )
+
+    first = await startup.start_once(FakeHistoryClient([]))
+    assert first is not None
+    second = await startup.start_once(FakeHistoryClient([]))
+
+    try:
+        await asyncio.wait_for(queue.join(), timeout=1)
+    finally:
+        first.worker_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first.worker_task
+
+    assert second is None
+    assert startup.worker_task is first.worker_task
+
+
 class FakeChannel:
     def __init__(self):
         self.id = 200
