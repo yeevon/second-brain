@@ -153,7 +153,7 @@ async def test_crash_before_sqlite_commit_is_recovered_by_next_catchup(tmp_path)
     channel = FakeDiscordChannel([make_message(1001, content="Recover me after crash.")])
     client = FakeDiscordClient(channel)
 
-    async def crashing_handler(message, *, notify_downstream):
+    async def crashing_handler(message, *, notify_downstream, advance_reconcile_marker=False):
         raise RuntimeError("crashed before commit")
 
     service = CaptureService(settings=settings, ledger=ledger)

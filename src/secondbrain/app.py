@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import dataclass
 
 from secondbrain.capture_models import CaptureStatusSnapshot
 from secondbrain.capture_service import CaptureService
@@ -9,6 +10,13 @@ from secondbrain.config import Settings
 from secondbrain.discord_capture import create_discord_client
 from secondbrain.vault_writer import VaultWriter
 from secondbrain.worker import CaptureQueue, run_capture_worker
+
+
+@dataclass(frozen=True)
+class LocalWorkerStartupResult:
+    reconcile_result: object
+    worker_task: asyncio.Task
+    capture_ids: list[str]
 
 
 async def start_local_worker_and_enqueue_recovered(
@@ -30,6 +38,41 @@ async def start_local_worker_and_enqueue_recovered(
     return worker_task, capture_ids
 
 
+class LocalWorkerStartup:
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        capture_service: CaptureService,
+        queue: CaptureQueue,
+        vault_writer: VaultWriter,
+    ) -> None:
+        self.settings = settings
+        self.capture_service = capture_service
+        self.queue = queue
+        self.vault_writer = vault_writer
+        self._startup_lock = asyncio.Lock()
+        self.worker_task: asyncio.Task | None = None
+
+    async def start_once(self, client) -> LocalWorkerStartupResult | None:
+        async with self._startup_lock:
+            if self.worker_task is not None and not self.worker_task.done():
+                return None
+
+            reconcile_result = await self.capture_service.startup_reconcile(client)
+            self.worker_task, capture_ids = await start_local_worker_and_enqueue_recovered(
+                settings=self.settings,
+                capture_service=self.capture_service,
+                queue=self.queue,
+                vault_writer=self.vault_writer,
+            )
+            return LocalWorkerStartupResult(
+                reconcile_result=reconcile_result,
+                worker_task=self.worker_task,
+                capture_ids=capture_ids,
+            )
+
+
 def run_discord_listener() -> None:
     settings = Settings()
     queue = CaptureQueue(maxsize=settings.classifier_queue_maxsize)
@@ -38,21 +81,19 @@ def run_discord_listener() -> None:
         settings,
         notify_capture=queue.enqueue,
     )
-    worker_started = False
+    startup = LocalWorkerStartup(
+        settings=settings,
+        capture_service=capture_service,
+        queue=queue,
+        vault_writer=vault_writer,
+    )
 
     async def start_background_worker_once() -> None:
-        nonlocal worker_started
-        if worker_started:
+        startup_result = await startup.start_once(client)
+        if startup_result is None:
             return
-
-        worker_started = True
-        reconcile_result = await capture_service.startup_reconcile(client)
-        _worker_task, capture_ids = await start_local_worker_and_enqueue_recovered(
-            settings=settings,
-            capture_service=capture_service,
-            queue=queue,
-            vault_writer=vault_writer,
-        )
+        reconcile_result = startup_result.reconcile_result
+        capture_ids = startup_result.capture_ids
         print("startup Discord history reconciliation complete")
         print(f"  messages seen: {reconcile_result.seen}")
         print(f"  captures handled: {reconcile_result.handled}")

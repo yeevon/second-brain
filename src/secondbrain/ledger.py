@@ -367,6 +367,26 @@ class Ledger:
                 (key, value, _iso(_now())),
             )
 
+    def advance_system_state_snowflake(self, key: str, candidate: str) -> None:
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT value FROM system_state WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is not None and int(candidate) <= int(row["value"]):
+                return
+
+            self._connection.execute(
+                """
+                INSERT INTO system_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (key, candidate, _iso(_now())),
+            )
+
     def get_system_state(self, key: str) -> str | None:
         row = self._connection.execute(
             "SELECT value FROM system_state WHERE key = ?",
