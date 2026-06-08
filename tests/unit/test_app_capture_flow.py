@@ -682,6 +682,37 @@ async def test_reconciliation_failure_does_not_permanently_block_worker_startup(
 
 
 @pytest.mark.asyncio
+async def test_forwarded_capture_is_recovered_after_restart(tmp_path):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    capture = insert_attachment_only_capture(ledger, discord_message_id="1001")
+    queue = CaptureQueue(maxsize=1)
+    service = CaptureService(settings=settings, ledger=ledger, notify_capture=queue.enqueue)
+
+    transition = service.mark_forwarded(capture.capture_id)
+    assert transition.status == FORWARDED
+
+    worker_task, capture_ids = await start_local_worker_and_enqueue_recovered(
+        settings=settings,
+        capture_service=service,
+        queue=queue,
+        vault_writer=VaultWriter(settings.vault_path),
+    )
+
+    try:
+        await asyncio.wait_for(queue.join(), timeout=1)
+    finally:
+        worker_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker_task
+
+    updated = service.get_capture(capture.capture_id)
+    assert capture_ids == [capture.capture_id]
+    assert updated.status == INBOX
+    assert updated.derived_note_path is not None
+
+
+@pytest.mark.asyncio
 async def test_repeated_ready_callback_does_not_start_second_worker(tmp_path):
     settings = make_settings(tmp_path)
     ledger = Ledger(settings.ledger_path)
@@ -758,6 +789,96 @@ async def test_enqueue_failure_cancels_started_worker_and_allows_clean_retry(tmp
         await result.worker_task
 
     assert cancelled == started
+
+
+@pytest.mark.asyncio
+async def test_runtime_stops_other_component_when_api_task_exits():
+    events = []
+    api_server = FakeRuntimeApiServer(events, exits_immediately=True)
+    client = FakeRuntimeDiscordClient(events)
+    startup = SimpleNamespace(worker_task=None)
+    capture_service = FakeRuntimeCaptureService(events)
+
+    await run_service_runtime(
+        api_task=asyncio.create_task(api_server.serve()),
+        discord_task=asyncio.create_task(client.start("token")),
+        api_server=api_server,
+        client=client,
+        startup=startup,
+        capture_service=capture_service,
+    )
+
+    assert "api.stop" in events
+    assert "discord.close" in events
+    assert "discord.cancelled" in events
+    assert events[-1] == "capture_service.close"
+
+
+@pytest.mark.asyncio
+async def test_runtime_stops_other_component_when_discord_task_exits():
+    events = []
+    api_server = FakeRuntimeApiServer(events)
+    client = FakeRuntimeDiscordClient(events, exits_immediately=True)
+    startup = SimpleNamespace(worker_task=None)
+    capture_service = FakeRuntimeCaptureService(events)
+
+    await run_service_runtime(
+        api_task=asyncio.create_task(api_server.serve()),
+        discord_task=asyncio.create_task(client.start("token")),
+        api_server=api_server,
+        client=client,
+        startup=startup,
+        capture_service=capture_service,
+    )
+
+    assert "api.stop" in events
+    assert "api.cancelled" in events
+    assert "discord.close" in events
+    assert events[-1] == "capture_service.close"
+
+
+@pytest.mark.asyncio
+async def test_runtime_cancels_worker_before_closing_capture_service():
+    events = []
+    api_server = FakeRuntimeApiServer(events, exits_immediately=True)
+    client = FakeRuntimeDiscordClient(events)
+    worker_task = asyncio.create_task(runtime_worker(events))
+    await asyncio.sleep(0)
+    startup = SimpleNamespace(worker_task=worker_task)
+    capture_service = FakeRuntimeCaptureService(events)
+
+    await run_service_runtime(
+        api_task=asyncio.create_task(api_server.serve()),
+        discord_task=asyncio.create_task(client.start("token")),
+        api_server=api_server,
+        client=client,
+        startup=startup,
+        capture_service=capture_service,
+    )
+
+    assert events.index("worker.cancelled") < events.index("capture_service.close")
+
+
+@pytest.mark.asyncio
+async def test_runtime_closes_capture_service_last():
+    events = []
+    api_server = FakeRuntimeApiServer(events, exits_immediately=True)
+    client = FakeRuntimeDiscordClient(events)
+    worker_task = asyncio.create_task(runtime_worker(events))
+    await asyncio.sleep(0)
+    startup = SimpleNamespace(worker_task=worker_task)
+    capture_service = FakeRuntimeCaptureService(events)
+
+    await run_service_runtime(
+        api_task=asyncio.create_task(api_server.serve()),
+        discord_task=asyncio.create_task(client.start("token")),
+        api_server=api_server,
+        client=client,
+        startup=startup,
+        capture_service=capture_service,
+    )
+
+    assert events[-1] == "capture_service.close"
 
 
 class FakeChannel:

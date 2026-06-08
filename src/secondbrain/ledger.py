@@ -51,6 +51,9 @@ def _validate_safe_slug(value: str) -> None:
         raise ValueError(f"unsafe delivery category string: {value!r}")
 
 
+UNSET = object()
+
+
 @dataclass(frozen=True)
 class InsertResult:
     capture: CaptureRecord
