@@ -325,6 +325,35 @@ async def test_startup_reconcile_counts_existing_duplicate_as_ignored(tmp_path):
     assert channel.sent_receipts == []
 
 
+@pytest.mark.asyncio
+async def test_live_marker_advances_even_when_downstream_notification_fails_after_commit(tmp_path):
+    async def fail_notify(capture_id):
+        raise RuntimeError("downstream unavailable")
+
+    settings = make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    service = CaptureService(settings=settings, ledger=ledger, notify_capture=fail_notify)
+
+    with pytest.raises(RuntimeError, match="downstream unavailable"):
+        await service.handle_gateway_message(
+            FakeDiscordMessage(message_id=1001, content="Durable before notify.")
+        )
+
+    assert service.total_captures() == 1
+    assert service.last_reconciled_message_id() == "1001"
+
+
+def test_reconcile_marker_never_moves_backward(tmp_path):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    service._advance_reconcile_marker("1002")
+    service._advance_reconcile_marker("1001")
+
+    assert service.last_reconciled_message_id() == "1002"
+
+
 class CommitCheckingChannel(FakeDiscordChannel):
     def __init__(self):
         super().__init__()
