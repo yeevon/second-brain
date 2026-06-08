@@ -53,11 +53,39 @@ async def reconcile_discord_history(
     mode: str,
     scan_limit: int,
 ) -> ReconcileResult:
+    messages, warning = await fetch_discord_history(
+        client=client,
+        settings=settings,
+        last_message_id=last_message_id,
+    )
+
+    handled = 0
+    ignored = 0
+    for message in messages:
+        created = await handle_capture(message)
+        if created is None:
+            ignored += 1
+        else:
+            handled += 1
+
+    return ReconcileResult(
+        seen=len(messages),
+        handled=handled,
+        ignored=ignored,
+        warning=warning,
+    )
+
+
+async def fetch_discord_history(
+    *,
+    client: discord.Client,
+    settings,
+    last_message_id: str | None,
+) -> tuple[list, str | None]:
     channel = client.get_channel(settings.discord_capture_channel_id)
     if channel is None:
         channel = await client.fetch_channel(settings.discord_capture_channel_id)
 
-    last_message_id = ledger.get_system_state(LAST_RECONCILED_MESSAGE_ID)
     after = discord.Object(id=int(last_message_id)) if last_message_id else None
 
     messages = [
