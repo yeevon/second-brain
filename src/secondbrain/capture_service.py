@@ -499,6 +499,7 @@ class CaptureService:
                 message,
                 capture,
                 has_attachments=bool(attachment_metadata),
+                downstream_processing_enabled=self._notify_capture is not None,
             )
         except Exception as exc:
             log_metadata(
@@ -513,6 +514,13 @@ class CaptureService:
         queued = notify_downstream and self._notify_capture is not None
         if queued:
             await self._notify_capture(capture.capture_id)
+        elif self._notify_capture is None:
+            log_metadata(
+                "capture_deferred",
+                capture_id=capture.capture_id,
+                discord_message_id=capture.discord_message_id,
+                reason="downstream processing disabled",
+            )
 
         log_metadata(
             "capture_received",

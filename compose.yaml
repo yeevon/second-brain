@@ -1,0 +1,54 @@
+services:
+  capture-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: second-brain-capture-service:local
+    container_name: second-brain-capture-service
+    env_file:
+      - /opt/second-brain/config/capture-service.env
+    restart: unless-stopped
+    init: true
+
+    volumes:
+      - /opt/second-brain/data:/var/lib/second-brain
+
+    expose:
+      - "8000"
+
+    networks:
+      - backend
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/app/.venv/bin/python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    read_only: true
+
+    tmpfs:
+      - /tmp
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  backend:
+    driver: bridge

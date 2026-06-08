@@ -19,8 +19,20 @@ class ReceiptDeliveryResult:
     receipt_message_id: str | None
 
 
-async def send_saved_receipt(message, capture: CaptureRecord, *, has_attachments: bool) -> str:
-    receipt = await message.channel.send(format_saved_receipt(capture, has_attachments=has_attachments))
+async def send_saved_receipt(
+    message,
+    capture: CaptureRecord,
+    *,
+    has_attachments: bool,
+    downstream_processing_enabled: bool = True,
+) -> str:
+    receipt = await message.channel.send(
+        format_saved_receipt(
+            capture,
+            has_attachments=has_attachments,
+            downstream_processing_enabled=downstream_processing_enabled,
+        )
+    )
     return str(receipt.id)
 
 
@@ -86,8 +98,20 @@ async def deliver_final_receipt(
     )
 
 
-def format_saved_receipt(capture: CaptureRecord, *, has_attachments: bool) -> str:
-    content = f"⏳ {capture.capture_id} received.\nYour note is saved. Processing…"
+def format_saved_receipt(
+    capture: CaptureRecord,
+    *,
+    has_attachments: bool,
+    downstream_processing_enabled: bool = True,
+) -> str:
+    if downstream_processing_enabled:
+        content = f"⏳ {capture.capture_id} received.\nYour note is saved. Processing…"
+    else:
+        content = (
+            f"⏳ {capture.capture_id} received.\n"
+            "Your note is safely captured.\n"
+            "Downstream filing is not enabled yet."
+        )
     if has_attachments:
         content += f"\n{ATTACHMENT_WARNING}"
     return content
