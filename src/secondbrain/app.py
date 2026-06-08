@@ -11,6 +11,25 @@ from secondbrain.vault_writer import VaultWriter
 from secondbrain.worker import CaptureQueue, run_capture_worker
 
 
+async def start_local_worker_and_enqueue_recovered(
+    *,
+    settings: Settings,
+    capture_service: CaptureService,
+    queue: CaptureQueue,
+    vault_writer: VaultWriter,
+):
+    worker_task = asyncio.create_task(
+        run_capture_worker(
+            settings=settings,
+            capture_service=capture_service,
+            queue=queue,
+            vault_writer=vault_writer,
+        )
+    )
+    capture_ids = await capture_service.enqueue_unfinished_captures()
+    return worker_task, capture_ids
+
+
 def run_discord_listener() -> None:
     settings = Settings()
     queue = CaptureQueue(maxsize=settings.classifier_queue_maxsize)
@@ -26,16 +45,13 @@ def run_discord_listener() -> None:
         if worker_started:
             return
 
-        reconcile_result = await capture_service.startup_reconcile(client)
-        capture_ids = await capture_service.enqueue_unfinished_captures()
         worker_started = True
-        asyncio.create_task(
-            run_capture_worker(
-                settings=settings,
-                capture_service=capture_service,
-                queue=queue,
-                vault_writer=vault_writer,
-            )
+        reconcile_result = await capture_service.startup_reconcile(client)
+        _worker_task, capture_ids = await start_local_worker_and_enqueue_recovered(
+            settings=settings,
+            capture_service=capture_service,
+            queue=queue,
+            vault_writer=vault_writer,
         )
         print("startup Discord history reconciliation complete")
         print(f"  messages seen: {reconcile_result.seen}")

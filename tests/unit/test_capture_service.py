@@ -259,16 +259,83 @@ async def test_service_startup_reconcile_recovers_missed_message_once(tmp_path):
     assert service.last_reconciled_message_id() == "1001"
 
 
+@pytest.mark.asyncio
+async def test_live_gateway_capture_advances_marker_after_durable_commit(tmp_path):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    channel = CommitCheckingChannel()
+    channel.expected_raw_text = "Live capture."
+    service = CaptureService(settings=settings, ledger=ledger)
+    channel.service = service
+
+    await service.handle_gateway_message(
+        FakeDiscordMessage(message_id=1001, channel=channel, content="Live capture.")
+    )
+
+    assert channel.commit_observed is True
+    assert service.last_reconciled_message_id() == "1001"
+
+
+@pytest.mark.asyncio
+async def test_live_marker_prevents_old_messages_from_starving_offline_recovery(tmp_path):
+    settings = make_settings(tmp_path, startup_reconcile_limit=2)
+    ledger = Ledger(settings.ledger_path)
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    await service.handle_gateway_message(FakeDiscordMessage(message_id=1001, content="Live one."))
+    await service.handle_gateway_message(FakeDiscordMessage(message_id=1002, content="Live two."))
+
+    channel = FakeDiscordChannel(
+        [
+            FakeDiscordMessage(message_id=1001, content="Live one."),
+            FakeDiscordMessage(message_id=1002, content="Live two."),
+            FakeDiscordMessage(message_id=1003, content="Missed while offline."),
+        ]
+    )
+    result = await service.startup_reconcile(FakeDiscordClient(channel))
+
+    assert result.seen == 1
+    assert result.handled == 1
+    assert result.ignored == 0
+    assert service.total_captures() == 3
+    assert service.last_reconciled_message_id() == "1003"
+
+
+@pytest.mark.asyncio
+async def test_startup_reconcile_counts_existing_duplicate_as_ignored(tmp_path):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    service = CaptureService(settings=settings, ledger=ledger)
+    ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="100",
+        discord_author_id="300",
+        raw_text="Already durable.",
+    )
+    channel = FakeDiscordChannel(
+        [FakeDiscordMessage(message_id=1001, content="Duplicate history event.")]
+    )
+
+    result = await service.startup_reconcile(FakeDiscordClient(channel))
+
+    assert result.handled == 0
+    assert result.ignored == 1
+    assert service.total_captures() == 1
+    assert channel.sent_receipts == []
+
+
 class CommitCheckingChannel(FakeDiscordChannel):
     def __init__(self):
         super().__init__()
         self.service = None
+        self.expected_raw_text = "Review reconnect."
         self.commit_observed = False
 
     async def send(self, content):
         captures = self.service.captures_by_status(RECEIVED)
         assert len(captures) == 1
-        assert captures[0].raw_text == "Review reconnect."
+        assert captures[0].raw_text == self.expected_raw_text
         self.commit_observed = True
         return await super().send(content)
 

@@ -64,7 +64,9 @@ class CaptureService:
         self._receipt_client = client
 
     async def handle_gateway_message(self, message) -> None:
-        await self._capture_if_allowed(message, notify_downstream=True)
+        disposition = await self._capture_if_allowed(message, notify_downstream=True)
+        if disposition is not None:
+            self._advance_reconcile_marker(str(message.id))
 
     async def startup_reconcile(self, client: Any) -> ReconcileResult:
         messages, warning = await fetch_discord_history(
@@ -77,10 +79,10 @@ class CaptureService:
         ignored = 0
         for message in messages:
             created = await self._capture_if_allowed(message, notify_downstream=False)
-            if created is None:
-                ignored += 1
-            else:
+            if created:
                 handled += 1
+            else:
+                ignored += 1
             self._advance_reconcile_marker(str(message.id))
 
         return ReconcileResult(
@@ -349,7 +351,8 @@ class CaptureService:
         else:
             self._ledger.set_receipt_message_id(capture.capture_id, receipt_message_id)
 
-        if notify_downstream and self._notify_capture is not None:
+        queued = notify_downstream and self._notify_capture is not None
+        if queued:
             await self._notify_capture(capture.capture_id)
 
         log_metadata(
@@ -358,7 +361,7 @@ class CaptureService:
             discord_message_id=capture.discord_message_id,
             status_transition=f"NEW->{RECEIVED}",
             receipt_message_id=receipt_message_id,
-            queued=notify_downstream,
+            queued=queued,
         )
         if attachment_metadata:
             log_metadata(
@@ -373,13 +376,25 @@ class CaptureService:
         if self._receipt_client is None:
             return
         try:
-            await deliver_final_receipt(self._receipt_client, self._ledger, capture, content)
+            delivery = await deliver_final_receipt(self._receipt_client, capture, content)
         except Exception as exc:
             log_metadata(
                 "final_receipt_failed",
                 capture_id=capture.capture_id,
                 discord_message_id=capture.discord_message_id,
                 error_type=type(exc).__name__,
+            )
+            return
+
+        if delivery.replaced and delivery.receipt_message_id is not None:
+            self._ledger.update_capture(
+                capture.capture_id,
+                receipt_message_id=delivery.receipt_message_id,
+                event_type="RECEIPT_REPLACED",
+                event_payload={
+                    "old_receipt_message_id": capture.receipt_message_id,
+                    "new_receipt_message_id": delivery.receipt_message_id,
+                },
             )
 
     def _advance_reconcile_marker(self, message_id: str) -> None:
