@@ -1546,6 +1546,26 @@ def test_ledger_terminal_failure_rejects_free_form_reason_type(tmp_path):
     ledger.close()
 
 
+def test_ledger_mark_inbox_rejects_free_form_reason_type(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(
+        capture_id="SB-20260609-0001",
+        delivery_attempt=1,
+        lease_until=_LEASE,
+    )
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="unsafe delivery category string"):
+        ledger.mark_inbox(
+            capture_id="SB-20260609-0001",
+            delivery_attempt=1,
+            derived_note_path="00_inbox/file.md",
+            reason_type="free form reason with <script>",
+        )
+    ledger.close()
+
+
 # ---------------------------------------------------------------------------
 # Local-full normalization
 # ---------------------------------------------------------------------------

@@ -155,7 +155,7 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
                 reason_type=request.reason_type,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=409, detail="stale delivery attempt") from exc
+            raise HTTPException(status_code=409, detail="stale or invalid delivery retry request") from exc
         capture = _get_capture(capture_service, capture_id)
         return DeliveryTransitionResponse(
             capture_id=capture_id,

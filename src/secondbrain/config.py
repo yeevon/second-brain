@@ -102,6 +102,7 @@ class Settings:
         self.delivery_processing_lease_seconds   = _parse_int_env("DELIVERY_PROCESSING_LEASE_SECONDS", "300")
         self.delivery_dispatch_interval_seconds  = _parse_int_env("DELIVERY_DISPATCH_INTERVAL_SECONDS", "2")
         self.delivery_dispatch_batch_size        = _parse_int_env("DELIVERY_DISPATCH_BATCH_SIZE", "25")
+        # Reserved for SB-108 (stale lease reaper — not yet implemented)
         self.delivery_reaper_interval_seconds    = _parse_int_env("DELIVERY_REAPER_INTERVAL_SECONDS", "30")
         self.delivery_reaper_batch_size          = _parse_int_env("DELIVERY_REAPER_BATCH_SIZE", "100")
 

@@ -217,60 +217,57 @@ async def test_dispatcher_loop_survives_claim_failure(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_late_webhook_acceptance_is_logged_as_stale_not_forwarded(tmp_path):
-    """mark_forwarded returning False (stale attempt) must not log capture_forwarded."""
+async def test_stale_while_forwarding_logs_stale_not_forwarded(tmp_path, capsys):
+    """Dispatcher must log stale_delivery_acceptance_ignored (not capture_forwarded) when
+    mark_forwarded returns stale_attempt.  This test executes the actual race by using a
+    downstream client that advances the delivery state *before* mark_forwarded is called."""
     ledger = make_ledger(tmp_path)
-    capture = accepted(ledger)
-    now = _NOW
-    lease = now + timedelta(seconds=60)
+    accepted(ledger)
+    settings = make_settings()
 
-    # Claim + manually advance attempt counter to make next mark_forwarded stale
-    ledger.claim_due_deliveries(now=now, lease_until=lease, batch_size=10)
-    # Force a second claim to bump attempt to 2
-    ledger.schedule_retry(
-        capture_id=capture.capture_id,
-        delivery_attempt=1,
-        now=now,
-        error_type="FakeError",
-        reason_type="test",
-        max_attempts=5,
-        base_delay_seconds=1,
-        max_delay_seconds=10,
-    )
-    # Reclaim at attempt 2
-    future = now + timedelta(hours=1)
-    ledger.claim_due_deliveries(now=future, lease_until=future + timedelta(seconds=60), batch_size=10)
+    class StaleWhileForwardingClient:
+        """Simulates a race: while we were forwarding, another thread scheduled a retry
+        and the dispatcher reclaimed the row under a new attempt number."""
 
-    # Now a client that returns "success" for attempt 1 (stale)
-    class StaleAttemptClient:
+        def __init__(self, ledger, settings):
+            self._ledger = ledger
+            self._settings = settings
+
         async def forward_capture(self, *, capture_id: str, delivery_attempt: int) -> None:
-            pass  # succeeds, but attempt will be 2, not 1
+            now = datetime.now(UTC)
+            # Advance attempt counter so the pending mark_forwarded call will be stale
+            self._ledger.schedule_retry(
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                now=now,
+                error_type="SyntheticRace",
+                reason_type="test_race",
+                max_attempts=self._settings.delivery_max_attempts,
+                base_delay_seconds=1,
+                max_delay_seconds=10,
+            )
+            self._ledger.claim_due_deliveries(
+                now=now + timedelta(seconds=20),
+                lease_until=now + timedelta(seconds=80),
+                batch_size=10,
+            )
 
-    # Re-insert a fresh capture at attempt 1 to test stale path
-    ledger2 = make_ledger(tmp_path / "l2")
-    cap2 = accepted(ledger2)
-    ledger2.claim_due_deliveries(now=now, lease_until=lease, batch_size=10)
-    # Manually expire by scheduling retry so delivery_attempts stays at 1 but status = RETRY_WAIT
-    ledger2.schedule_retry(
-        capture_id=cap2.capture_id,
-        delivery_attempt=1,
-        now=now,
-        error_type="FakeError",
-        reason_type="test",
-        max_attempts=5,
-        base_delay_seconds=1,
-        max_delay_seconds=10,
+    client = StaleWhileForwardingClient(ledger, settings)
+    await _run_one_dispatch_pass(
+        settings=settings,
+        ledger=ledger,
+        downstream_client=client,
+        _now=_NOW,
     )
-    # Now reclaim as attempt 2
-    ledger2.claim_due_deliveries(
-        now=future, lease_until=future + timedelta(seconds=60), batch_size=10
+
+    output = capsys.readouterr().out
+    assert "stale_delivery_acceptance_ignored" in output, (
+        "stale race must be logged as stale_delivery_acceptance_ignored"
     )
-    # The dispatcher is at attempt 2 now; mark_forwarded for attempt 1 would be stale
-    # We don't have a simple hook to intercept stale path, so verify via final state
-    updated = ledger2.get_capture(cap2.capture_id)
-    assert updated.delivery_attempts == 2
+    assert '"event":"capture_forwarded"' not in output, (
+        "stale race must NOT log capture_forwarded"
+    )
     ledger.close()
-    ledger2.close()
 
 
 @pytest.mark.asyncio

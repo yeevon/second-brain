@@ -898,3 +898,21 @@ async def test_local_full_normalization_clears_retry_metadata(tmp_path):
     assert normalized.processing_lease_until is None
     assert normalized.next_attempt_at is None
     ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_service_acknowledge_delivery_inbox_rejects_free_form_reason_type_without_http_adapter(tmp_path):
+    """acknowledge_delivery_inbox must reject unsafe reason_type strings at the domain layer."""
+    service, ledger, capture = _make_service_with_capture(tmp_path)
+    lease = _NOW + timedelta(seconds=60)
+    ledger.claim_due_deliveries(now=_NOW, lease_until=lease, batch_size=10)
+    ledger.mark_forwarded(capture_id=capture.capture_id, delivery_attempt=1, lease_until=lease)
+
+    with pytest.raises(ValueError, match="unsafe delivery category string"):
+        await service.acknowledge_delivery_inbox(
+            capture_id=capture.capture_id,
+            delivery_attempt=1,
+            derived_note_path="00_inbox/file.md",
+            reason_type="free form reason with spaces",
+        )
+    ledger.close()

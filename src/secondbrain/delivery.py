@@ -127,24 +127,30 @@ async def _run_one_dispatch_pass(
             continue
 
         processing_lease = datetime.now(UTC) + timedelta(seconds=settings.delivery_processing_lease_seconds)
-        changed = ledger.mark_forwarded(
+        result = ledger.mark_forwarded(
             capture_id=capture.capture_id,
             delivery_attempt=attempt,
             lease_until=processing_lease,
         )
-        if not changed:
+        if result.changed:
+            log_metadata(
+                "capture_forwarded",
+                capture_id=capture.capture_id,
+                delivery_attempt=attempt,
+            )
+        elif result.outcome == "idempotent_replay":
+            log_metadata(
+                "duplicate_delivery_acceptance_ignored",
+                capture_id=capture.capture_id,
+                delivery_attempt=attempt,
+            )
+        else:
             log_metadata(
                 "stale_delivery_acceptance_ignored",
                 capture_id=capture.capture_id,
                 delivery_attempt=attempt,
+                outcome=result.outcome,
             )
-            continue
-
-        log_metadata(
-            "capture_forwarded",
-            capture_id=capture.capture_id,
-            delivery_attempt=attempt,
-        )
 
 
 async def _edit_receipt_best_effort(

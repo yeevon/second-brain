@@ -301,6 +301,8 @@ class Ledger:
         git_commit_hash: str | None = None,
         reason_type: str = "",
     ) -> DeliveryMutationResult:
+        if reason_type:
+            _validate_safe_slug(reason_type)
         return self._write(
             "mark_inbox",
             lambda conn: self._mark_delivery_terminal(

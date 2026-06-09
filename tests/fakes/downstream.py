@@ -22,12 +22,6 @@ class FakeDownstreamClient:
             headers=self._headers,
         )
 
-    async def retry(self, capture_id: str):
-        return await self._client.post(
-            f"/internal/captures/{capture_id}/retry",
-            headers=self._headers,
-        )
-
     async def edit_receipt(self, capture_id: str, content: str):
         return await self._client.post(
             f"/internal/receipts/{capture_id}/edit",
