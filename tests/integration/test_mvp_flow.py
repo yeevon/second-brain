@@ -632,7 +632,8 @@ async def test_late_callback_from_old_attempt_cannot_override_new_attempt(tmp_pa
     stale_ok = ledger.mark_classifying_delivery(
         capture_id=capture_id, delivery_attempt=1, lease_until=after_retry
     )
-    assert stale_ok is False
+    assert stale_ok.changed is False
+    assert stale_ok.outcome == "stale_attempt"
 
     # Attempt 2 remains authoritative
     assert ledger.get_capture(capture_id).delivery_status == FORWARDING

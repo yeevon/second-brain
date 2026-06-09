@@ -136,7 +136,6 @@ async def test_invalid_request_payload_returns_422(api_context):
 @pytest.mark.parametrize(
     ("path", "payload"),
     [
-        ("/internal/captures/SB-20260609-0001/retry", None),
         ("/internal/captures/SB-20260609-0001/delivery/acknowledge-forwarded", {"delivery_attempt": 1}),
         ("/internal/captures/SB-20260609-0001/delivery/acknowledge-classifying", {"delivery_attempt": 1}),
         ("/internal/captures/SB-20260609-0001/delivery/renew-lease", {"delivery_attempt": 1}),
@@ -165,6 +164,17 @@ async def test_state_changing_routes_require_internal_token(api_context, path, p
 
     assert response.status_code == 401
     assert response.json() == {"detail": "unauthorized"}
+
+
+@pytest.mark.asyncio
+async def test_legacy_retry_route_returns_404(api_context):
+    """The /retry endpoint was removed in SB-107; downstream must not use it."""
+    capture = await ingest_normal_capture(api_context)
+    response = await api_context.test_client.post(
+        f"/internal/captures/{capture.capture_id}/retry",
+        headers={INTERNAL_TOKEN_HEADER: TOKEN},
+    )
+    assert response.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -378,27 +388,147 @@ async def test_sensitive_rejection_fetch_returns_redacted_text_only(api_context,
     assert secret not in captured.err
 
 
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/delivery/acknowledge-forwarded", {"delivery_attempt": 1}),
+        ("/delivery/acknowledge-classifying", {"delivery_attempt": 1}),
+        ("/delivery/renew-lease", {"delivery_attempt": 1}),
+        ("/delivery/acknowledge-filed", {"delivery_attempt": 1, "note_path": "x.md"}),
+        ("/delivery/acknowledge-inbox", {"delivery_attempt": 1, "note_path": "x.md"}),
+        ("/delivery/schedule-retry", {"delivery_attempt": 1, "error_type": "T", "reason_type": "r"}),
+        ("/delivery/acknowledge-failed", {"delivery_attempt": 1}),
+    ],
+)
 @pytest.mark.asyncio
-async def test_failed_capture_retry_returns_to_received(api_context):
-    capture, attempt = await _capture_in_classifying_state(api_context)
-    await api_context.downstream.acknowledge_failed(capture.capture_id, attempt)
-
-    retried = await api_context.downstream.retry(capture.capture_id)
-
-    assert retried.json()["status"] == RECEIVED
-    assert event_types(api_context.ledger, capture.capture_id).count("CAPTURE_RETRIED") == 1
+async def test_unknown_capture_callback_returns_404(api_context, path, payload):
+    response = await api_context.test_client.post(
+        f"/internal/captures/SB-UNKNOWN-9999{path}",
+        headers={INTERNAL_TOKEN_HEADER: TOKEN},
+        json=payload,
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "capture not found"
 
 
 @pytest.mark.asyncio
-async def test_retry_rejects_non_failed_capture(api_context):
+async def test_duplicate_acknowledge_forwarded_is_idempotent(api_context):
+    capture = await ingest_normal_capture(api_context)
+    cid = capture.capture_id
+    claimed = api_context.ledger.claim_due_deliveries(
+        now=_NOW, lease_until=_NOW + timedelta(seconds=60), batch_size=10
+    )
+    attempt = claimed[0].delivery_attempts
+
+    resp1 = await api_context.downstream.acknowledge_forwarded(cid, attempt)
+    resp2 = await api_context.downstream.acknowledge_forwarded(cid, attempt)
+
+    assert resp1.status_code == 200
+    assert resp1.json()["changed"] is True
+    assert resp1.json()["outcome"] == "changed"
+    assert resp2.status_code == 200
+    assert resp2.json()["changed"] is False
+    assert resp2.json()["outcome"] == "idempotent_replay"
+
+
+@pytest.mark.asyncio
+async def test_wrong_attempt_acknowledge_forwarded_returns_stale_outcome(api_context):
+    capture = await ingest_normal_capture(api_context)
+    cid = capture.capture_id
+    api_context.ledger.claim_due_deliveries(
+        now=_NOW, lease_until=_NOW + timedelta(seconds=60), batch_size=10
+    )
+    stale = await api_context.downstream.acknowledge_forwarded(cid, 99)
+
+    assert stale.status_code == 200
+    assert stale.json()["changed"] is False
+    assert stale.json()["outcome"] == "stale_attempt"
+    assert stale.json()["ignored_reason"] == "stale_attempt"
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_classifying_before_forwarded_returns_409(api_context):
+    """Classifying before forwarded ack is an invalid state transition."""
+    capture = await ingest_normal_capture(api_context)
+    cid = capture.capture_id
+    claimed = api_context.ledger.claim_due_deliveries(
+        now=_NOW, lease_until=_NOW + timedelta(seconds=60), batch_size=10
+    )
+    attempt = claimed[0].delivery_attempts
+    # State is FORWARDING; classifying callback is premature
+
+    response = await api_context.downstream.acknowledge_classifying(cid, attempt)
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_renew_lease_after_completion_returns_409(api_context):
+    """Renewing a lease after the capture is terminal must return 409."""
     capture, attempt = await _capture_in_classifying_state(api_context)
     await api_context.downstream.acknowledge_filed(
         capture.capture_id, attempt, "20_projects/halo/file.md"
     )
 
-    response = await api_context.downstream.retry(capture.capture_id)
+    response = await api_context.downstream.renew_lease(capture.capture_id, attempt)
 
     assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_wrong_attempt_renew_lease_returns_stale_outcome(api_context):
+    capture, attempt = await _capture_in_classifying_state(api_context)
+
+    stale = await api_context.downstream.renew_lease(capture.capture_id, attempt + 1)
+
+    assert stale.status_code == 200
+    assert stale.json()["changed"] is False
+    assert stale.json()["outcome"] == "stale_attempt"
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_failed_from_invalid_state_returns_409(api_context):
+    """Explicitly failing a capture that is already FILED must return 409."""
+    capture, attempt = await _capture_in_classifying_state(api_context)
+    await api_context.downstream.acknowledge_filed(
+        capture.capture_id, attempt, "20_projects/halo/file.md"
+    )
+
+    response = await api_context.downstream.acknowledge_failed(capture.capture_id, attempt)
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_idempotent_filed_replay_repairs_failed_receipt_delivery(api_context):
+    """An idempotent FILED replay must attempt to edit the Discord receipt."""
+    capture, attempt = await _capture_in_classifying_state(api_context)
+    cid = capture.capture_id
+    note_path = "20_projects/halo/file.md"
+
+    # First call succeeds
+    await api_context.downstream.acknowledge_filed(cid, attempt, note_path)
+    edits_after_first = api_context.channel.edit_attempts
+
+    # Second call is an idempotent replay — receipt edit must still be attempted
+    await api_context.downstream.acknowledge_filed(cid, attempt, note_path)
+
+    assert api_context.channel.edit_attempts > edits_after_first
+
+
+@pytest.mark.asyncio
+async def test_idempotent_inbox_replay_repairs_failed_receipt_delivery(api_context):
+    """An idempotent INBOX replay must attempt to edit the Discord receipt."""
+    capture, attempt = await _capture_in_classifying_state(api_context)
+    cid = capture.capture_id
+    note_path = "00_inbox/file.md"
+
+    await api_context.downstream.acknowledge_inbox(cid, attempt, note_path)
+    edits_after_first = api_context.channel.edit_attempts
+
+    await api_context.downstream.acknowledge_inbox(cid, attempt, note_path)
+
+    assert api_context.channel.edit_attempts > edits_after_first
 
 
 @pytest.mark.asyncio

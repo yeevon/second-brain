@@ -94,8 +94,12 @@ def test_api_routes_delegate_to_capture_service():
     assert "capture_service.acknowledge_delivery_failed" in source
     assert "capture_service.schedule_delivery_retry" in source
     assert "capture_service.renew_delivery_lease" in source
-    assert "capture_service.retry" in source
     assert "capture_service.edit_receipt" in source
+
+
+def test_legacy_retry_route_not_registered():
+    source = (SRC / "capture_api.py").read_text(encoding="utf-8")
+    assert '"/internal/captures/{capture_id}/retry"' not in source
 
 
 def test_no_module_global_capture_service_is_constructed_by_capture_api():

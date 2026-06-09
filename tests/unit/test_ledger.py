@@ -1109,11 +1109,38 @@ def test_mark_forwarded_moves_forwarding_to_forwarded(tmp_path):
     ledger = make_ledger(tmp_path)
     _accepted(ledger, "1001")
     ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
-    ok = ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
-    assert ok is True
+    result = ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    assert result.changed is True
+    assert result.outcome == "changed"
     capture = ledger.get_capture("SB-20260609-0001")
     assert capture.delivery_status == DELIVERY_FORWARDED
     assert capture.processing_lease_until.isoformat() == _LATER.isoformat()
+    ledger.close()
+
+
+def test_mark_forwarded_duplicate_same_attempt_is_idempotent_replay(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    result2 = ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    assert result2.changed is False
+    assert result2.outcome == "idempotent_replay"
+    ledger.close()
+
+
+def test_mark_forwarded_from_invalid_state_returns_invalid_state(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="path/note.md"
+    )
+    # State is now COMPLETE (FILED/COMPLETE) — attempt matches (1==1) but state is invalid
+    result = ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    assert result.changed is False
+    assert result.outcome == "invalid_state"
     ledger.close()
 
 
@@ -1122,12 +1149,26 @@ def test_mark_classifying_moves_forwarded_to_classifying(tmp_path):
     _accepted(ledger, "1001")
     ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
     ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
-    ok = ledger.mark_classifying_delivery(
+    result = ledger.mark_classifying_delivery(
         capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER
     )
-    assert ok is True
+    assert result.changed is True
+    assert result.outcome == "changed"
     capture = ledger.get_capture("SB-20260609-0001")
     assert capture.delivery_status == DELIVERY_CLASSIFYING
+    ledger.close()
+
+
+def test_mark_classifying_before_forwarded_returns_invalid_state(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    # State is FORWARDING, not DELIVERY_FORWARDED — classifying is premature
+    result = ledger.mark_classifying_delivery(
+        capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER
+    )
+    assert result.changed is False
+    assert result.outcome == "invalid_state"
     ledger.close()
 
 
@@ -1140,10 +1181,11 @@ def test_mark_classifying_renews_existing_classifying_lease(tmp_path):
         capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER
     )
     new_lease = datetime(2026, 6, 9, 12, 20, 0, tzinfo=UTC)
-    ok = ledger.mark_classifying_delivery(
+    result = ledger.mark_classifying_delivery(
         capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=new_lease
     )
-    assert ok is True
+    assert result.changed is True
+    assert result.outcome == "changed"
     capture = ledger.get_capture("SB-20260609-0001")
     assert capture.processing_lease_until.isoformat() == new_lease.isoformat()
     ledger.close()
@@ -1224,10 +1266,11 @@ def test_stale_attempt_callback_is_ignored(tmp_path):
     ledger = make_ledger(tmp_path)
     _accepted(ledger, "1001")
     ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
-    ok = ledger.mark_forwarded(
+    result = ledger.mark_forwarded(
         capture_id="SB-20260609-0001", delivery_attempt=99, lease_until=_LATER
     )
-    assert ok is False
+    assert result.changed is False
+    assert result.outcome == "stale_attempt"
     ledger.close()
 
 
@@ -1242,7 +1285,66 @@ def test_terminal_capture_cannot_regress_to_classifying(tmp_path):
     regress = ledger.mark_classifying_delivery(
         capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER
     )
-    assert regress is False
+    assert regress.changed is False
+    assert regress.outcome == "invalid_state"
+    ledger.close()
+
+
+def test_renew_delivery_lease_stale_attempt_returns_stale_attempt(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    result = ledger.renew_delivery_lease(
+        capture_id="SB-20260609-0001", delivery_attempt=99, lease_until=_LATER
+    )
+    assert result.changed is False
+    assert result.outcome == "stale_attempt"
+    ledger.close()
+
+
+def test_renew_delivery_lease_after_completion_returns_invalid_state(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="path/note.md"
+    )
+    result = ledger.renew_delivery_lease(
+        capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER
+    )
+    assert result.changed is False
+    assert result.outcome == "invalid_state"
+    ledger.close()
+
+
+def test_mark_delivery_failed_terminally_stale_attempt(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    result = ledger.mark_delivery_failed_terminally(
+        capture_id="SB-20260609-0001", delivery_attempt=99
+    )
+    assert result.changed is False
+    assert result.outcome == "stale_attempt"
+    ledger.close()
+
+
+def test_mark_delivery_failed_terminally_invalid_state(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="path/note.md"
+    )
+    # State is COMPLETE (FILED) — attempt matches (1==1) but delivery state is invalid
+    result = ledger.mark_delivery_failed_terminally(
+        capture_id="SB-20260609-0001", delivery_attempt=1
+    )
+    assert result.changed is False
+    assert result.outcome == "invalid_state"
     ledger.close()
 
 
@@ -1383,6 +1485,138 @@ def test_retry_cap_appends_retry_limit_exceeded_event(tmp_path):
         ]
     )
     assert "RETRY_LIMIT_EXCEEDED" in events
+    ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# Safe-slug validation
+# ---------------------------------------------------------------------------
+
+def test_ledger_schedule_retry_rejects_free_form_error_type(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    s = _make_retry_settings()
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="unsafe delivery category string"):
+        ledger.schedule_retry(
+            capture_id="SB-20260609-0001",
+            delivery_attempt=1,
+            now=_NOW,
+            error_type="TimeoutError: POST https://n8n.internal?token=secret",
+            reason_type="webhook_failure",
+            max_attempts=s.delivery_max_attempts,
+            base_delay_seconds=s.delivery_retry_base_delay_seconds,
+            max_delay_seconds=s.delivery_retry_max_delay_seconds,
+        )
+    ledger.close()
+
+
+def test_ledger_schedule_retry_rejects_free_form_reason_type(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    s = _make_retry_settings()
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="unsafe delivery category string"):
+        ledger.schedule_retry(
+            capture_id="SB-20260609-0001",
+            delivery_attempt=1,
+            now=_NOW,
+            error_type="TimeoutError",
+            reason_type="free form reason with spaces",
+            max_attempts=s.delivery_max_attempts,
+            base_delay_seconds=s.delivery_retry_base_delay_seconds,
+            max_delay_seconds=s.delivery_retry_max_delay_seconds,
+        )
+    ledger.close()
+
+
+def test_ledger_terminal_failure_rejects_free_form_reason_type(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="unsafe delivery category string"):
+        ledger.mark_delivery_failed_terminally(
+            capture_id="SB-20260609-0001",
+            delivery_attempt=1,
+            reason="reason with spaces or <script>",
+        )
+    ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# Local-full normalization
+# ---------------------------------------------------------------------------
+
+def test_normalize_delivery_for_local_full_handles_forwarding_row(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    # State is now FORWARDING
+    assert ledger.get_capture("SB-20260609-0001").delivery_status == FORWARDING
+    count = ledger.normalize_delivery_for_local_full()
+    assert count == 1
+    assert ledger.get_capture("SB-20260609-0001").delivery_status == NOT_APPLICABLE
+    ledger.close()
+
+
+def test_normalize_delivery_for_local_full_handles_forwarded_row(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    assert ledger.get_capture("SB-20260609-0001").delivery_status == DELIVERY_FORWARDED
+    ledger.normalize_delivery_for_local_full()
+    assert ledger.get_capture("SB-20260609-0001").delivery_status == NOT_APPLICABLE
+    ledger.close()
+
+
+def test_normalize_delivery_for_local_full_handles_classifying_row(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ledger.mark_classifying_delivery(
+        capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER
+    )
+    assert ledger.get_capture("SB-20260609-0001").delivery_status == DELIVERY_CLASSIFYING
+    ledger.normalize_delivery_for_local_full()
+    assert ledger.get_capture("SB-20260609-0001").delivery_status == NOT_APPLICABLE
+    ledger.close()
+
+
+def test_normalize_delivery_for_local_full_clears_lease_and_retry_metadata(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    # Confirm lease is set before normalization
+    assert ledger.get_capture("SB-20260609-0001").processing_lease_until is not None
+    ledger.normalize_delivery_for_local_full()
+    normalized = ledger.get_capture("SB-20260609-0001")
+    assert normalized.processing_lease_until is None
+    assert normalized.next_attempt_at is None
+    assert normalized.last_error is None
+    ledger.close()
+
+
+def test_normalize_delivery_for_local_full_appends_audit_event(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.normalize_delivery_for_local_full()
+    events = ledger._runtime.read(
+        lambda conn: [
+            row["event_type"]
+            for row in conn.execute(
+                "SELECT event_type FROM capture_events WHERE capture_id = ? ORDER BY id",
+                ("SB-20260609-0001",),
+            ).fetchall()
+        ]
+    )
+    assert "DELIVERY_DISABLED_FOR_LOCAL_FULL" in events
     ledger.close()
 
 

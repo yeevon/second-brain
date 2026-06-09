@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+import re
 import sqlite3
 from typing import Any
 
@@ -36,6 +37,13 @@ from secondbrain.sqlite_runtime import SQLiteRuntime
 
 
 UNSET = object()
+
+_SAFE_SLUG_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
+
+
+def _validate_safe_slug(value: str) -> None:
+    if not _SAFE_SLUG_RE.match(value):
+        raise ValueError(f"unsafe delivery category string: {value!r}")
 
 
 @dataclass(frozen=True)
@@ -241,7 +249,7 @@ class Ledger:
         capture_id: str,
         delivery_attempt: int,
         lease_until: datetime,
-    ) -> bool:
+    ) -> DeliveryMutationResult:
         return self._write(
             "mark_forwarded",
             lambda conn: self._mark_forwarded(
@@ -255,7 +263,7 @@ class Ledger:
         capture_id: str,
         delivery_attempt: int,
         lease_until: datetime,
-    ) -> bool:
+    ) -> DeliveryMutationResult:
         return self._write(
             "mark_classifying_delivery",
             lambda conn: self._mark_classifying_delivery(
@@ -340,7 +348,7 @@ class Ledger:
         capture_id: str,
         delivery_attempt: int,
         lease_until: datetime,
-    ) -> bool:
+    ) -> DeliveryMutationResult:
         return self._write(
             "renew_delivery_lease",
             lambda conn: self._renew_delivery_lease(
@@ -357,7 +365,7 @@ class Ledger:
         capture_id: str,
         delivery_attempt: int,
         reason: str = "",
-    ) -> bool:
+    ) -> DeliveryMutationResult:
         return self._write(
             "mark_delivery_failed_terminally",
             lambda conn: self._mark_delivery_failed_terminally(
@@ -776,11 +784,28 @@ class Ledger:
         capture_id: str,
         delivery_attempt: int,
         lease_until: datetime,
-    ) -> bool:
+    ) -> DeliveryMutationResult:
         lease_iso = _iso(lease_until)
         row = self._get_by_capture_id(conn, capture_id)
-        if row["delivery_status"] != FORWARDING or row["delivery_attempts"] != delivery_attempt:
-            return False
+
+        def _result(outcome: str, changed: bool = False) -> DeliveryMutationResult:
+            return DeliveryMutationResult(
+                capture_id=capture_id,
+                delivery_status=row["delivery_status"],
+                delivery_attempts=row["delivery_attempts"],
+                changed=changed,
+                outcome=outcome,
+            )
+
+        if row["delivery_attempts"] != delivery_attempt:
+            return _result("stale_attempt")
+
+        current_ds = row["delivery_status"]
+        if current_ds == DELIVERY_FORWARDED:
+            return _result("idempotent_replay")
+        if current_ds != FORWARDING:
+            return _result("invalid_state")
+
         conn.execute(
             """
             UPDATE captures
@@ -796,7 +821,13 @@ class Ledger:
             "CAPTURE_FORWARDED",
             {"delivery_attempt": delivery_attempt, "lease_until": lease_iso},
         )
-        return True
+        return DeliveryMutationResult(
+            capture_id=capture_id,
+            delivery_status=DELIVERY_FORWARDED,
+            delivery_attempts=delivery_attempt,
+            changed=True,
+            outcome="changed",
+        )
 
     def _mark_classifying_delivery(
         self,
@@ -805,14 +836,26 @@ class Ledger:
         capture_id: str,
         delivery_attempt: int,
         lease_until: datetime,
-    ) -> bool:
+    ) -> DeliveryMutationResult:
         lease_iso = _iso(lease_until)
         row = self._get_by_capture_id(conn, capture_id)
+
+        def _result(outcome: str, changed: bool = False) -> DeliveryMutationResult:
+            return DeliveryMutationResult(
+                capture_id=capture_id,
+                delivery_status=row["delivery_status"],
+                delivery_attempts=row["delivery_attempts"],
+                changed=changed,
+                outcome=outcome,
+            )
+
         if row["delivery_attempts"] != delivery_attempt:
-            return False
+            return _result("stale_attempt")
+
         current_ds = row["delivery_status"]
         if current_ds not in (DELIVERY_FORWARDED, DELIVERY_CLASSIFYING):
-            return False
+            return _result("invalid_state")
+
         is_renewal = current_ds == DELIVERY_CLASSIFYING
         conn.execute(
             """
@@ -829,7 +872,13 @@ class Ledger:
             event,
             {"delivery_attempt": delivery_attempt, "lease_until": lease_iso},
         )
-        return True
+        return DeliveryMutationResult(
+            capture_id=capture_id,
+            delivery_status=DELIVERY_CLASSIFYING,
+            delivery_attempts=delivery_attempt,
+            changed=True,
+            outcome="changed",
+        )
 
     def _mark_delivery_terminal(
         self,
@@ -915,12 +964,23 @@ class Ledger:
         capture_id: str,
         delivery_attempt: int,
         lease_until: datetime,
-    ) -> bool:
+    ) -> DeliveryMutationResult:
         row = self._get_by_capture_id(conn, capture_id)
+
+        def _result(outcome: str, changed: bool = False) -> DeliveryMutationResult:
+            return DeliveryMutationResult(
+                capture_id=capture_id,
+                delivery_status=row["delivery_status"],
+                delivery_attempts=row["delivery_attempts"],
+                changed=changed,
+                outcome=outcome,
+            )
+
         if row["delivery_attempts"] != delivery_attempt:
-            return False
+            return _result("stale_attempt")
         if row["delivery_status"] not in LEASABLE_DELIVERY_STATUSES:
-            return False
+            return _result("invalid_state")
+
         conn.execute(
             """
             UPDATE captures
@@ -929,7 +989,13 @@ class Ledger:
             """,
             (_iso(lease_until), _iso(_now()), capture_id),
         )
-        return True
+        return DeliveryMutationResult(
+            capture_id=capture_id,
+            delivery_status=row["delivery_status"],
+            delivery_attempts=row["delivery_attempts"],
+            changed=True,
+            outcome="changed",
+        )
 
     def _mark_delivery_failed_terminally(
         self,
@@ -938,13 +1004,28 @@ class Ledger:
         capture_id: str,
         delivery_attempt: int,
         reason: str,
-    ) -> bool:
+    ) -> DeliveryMutationResult:
+        if reason:
+            _validate_safe_slug(reason)
+
         row = self._get_by_capture_id(conn, capture_id)
+
+        def _result(outcome: str, changed: bool = False) -> DeliveryMutationResult:
+            return DeliveryMutationResult(
+                capture_id=capture_id,
+                delivery_status=row["delivery_status"],
+                delivery_attempts=row["delivery_attempts"],
+                changed=changed,
+                outcome=outcome,
+            )
+
         if row["delivery_attempts"] != delivery_attempt:
-            return False
+            return _result("stale_attempt")
+
         current_ds = row["delivery_status"]
         if current_ds not in (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING):
-            return False
+            return _result("invalid_state")
+
         now_ts = _iso(_now())
         conn.execute(
             """
@@ -965,7 +1046,13 @@ class Ledger:
                 "reason": reason,
             },
         )
-        return True
+        return DeliveryMutationResult(
+            capture_id=capture_id,
+            delivery_status=DELIVERY_FAILED,
+            delivery_attempts=delivery_attempt,
+            changed=True,
+            outcome="changed",
+        )
 
     def _schedule_retry(
         self,
@@ -980,6 +1067,10 @@ class Ledger:
         base_delay_seconds: int,
         max_delay_seconds: int,
     ) -> RetryDisposition:
+        _validate_safe_slug(error_type)
+        if reason_type:
+            _validate_safe_slug(reason_type)
+
         row = self._get_by_capture_id(conn, capture_id)
         current_ds = row["delivery_status"]
         if current_ds not in (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING):
@@ -1063,17 +1154,33 @@ class Ledger:
         )
 
     def _normalize_delivery_for_local_full(self, conn: sqlite3.Connection) -> int:
-        """Normalize PENDING_FORWARD/RETRY_WAIT rows to NOT_APPLICABLE for local-full mode."""
+        """Normalize all non-terminal delivery states to NOT_APPLICABLE for local-full mode."""
         now = _iso(_now())
-        cursor = conn.execute(
+        affected = conn.execute(
+            """
+            SELECT capture_id FROM captures
+            WHERE delivery_status IN (?, ?, ?, ?, ?)
+            """,
+            (PENDING_FORWARD, FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING, RETRY_WAIT),
+        ).fetchall()
+
+        if not affected:
+            return 0
+
+        conn.execute(
             """
             UPDATE captures
-            SET delivery_status = ?, updated_at = ?
-            WHERE delivery_status IN (?, ?)
+            SET delivery_status = ?, processing_lease_until = NULL,
+                next_attempt_at = NULL, last_error = NULL, updated_at = ?
+            WHERE delivery_status IN (?, ?, ?, ?, ?)
             """,
-            (NOT_APPLICABLE, now, PENDING_FORWARD, RETRY_WAIT),
+            (NOT_APPLICABLE, now,
+             PENDING_FORWARD, FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING, RETRY_WAIT),
         )
-        return cursor.rowcount
+        for row in affected:
+            self._append_event(conn, row["capture_id"], "DELIVERY_DISABLED_FOR_LOCAL_FULL", {})
+
+        return len(affected)
 
     # ------------------------------------------------------------------
     # Private system state implementations

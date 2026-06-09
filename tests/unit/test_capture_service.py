@@ -541,11 +541,12 @@ def test_service_ignores_stale_classifying_callback(tmp_path):
     ledger.claim_due_deliveries(now=now, lease_until=lease, batch_size=10)
     ledger.mark_forwarded(capture_id=capture.capture_id, delivery_attempt=1, lease_until=lease)
 
-    # Stale attempt 0 must be ignored
+    # Stale attempt — must be ignored
     result = service.acknowledge_delivery_classifying(
-        capture_id=capture.capture_id, delivery_attempt=0
+        capture_id=capture.capture_id, delivery_attempt=99
     )
-    assert result is False
+    assert result.changed is False
+    assert result.outcome == "stale_attempt"
     # Current state unchanged
     assert ledger.get_capture(capture.capture_id).delivery_status == DELIVERY_FORWARDED
     ledger.close()
@@ -602,10 +603,11 @@ def test_service_renews_current_attempt_lease(tmp_path):
     ledger.mark_forwarded(capture_id=capture.capture_id, delivery_attempt=1, lease_until=short_lease)
 
     before_renewal = datetime.now(UTC)
-    changed = service.renew_delivery_lease(
+    result = service.renew_delivery_lease(
         capture_id=capture.capture_id, delivery_attempt=1
     )
-    assert changed is True
+    assert result.changed is True
+    assert result.outcome == "changed"
     updated = ledger.get_capture(capture.capture_id)
     assert updated.processing_lease_until is not None
     # New lease must be in the future relative to the real clock
@@ -683,12 +685,13 @@ async def test_acknowledge_delivery_failed_marks_capture_terminally_failed(tmp_p
     ledger.claim_due_deliveries(now=now, lease_until=lease, batch_size=10)
     ledger.mark_forwarded(capture_id=capture.capture_id, delivery_attempt=1, lease_until=lease)
 
-    changed = await service.acknowledge_delivery_failed(
+    result = await service.acknowledge_delivery_failed(
         capture_id=capture.capture_id,
         delivery_attempt=1,
         reason_type="writer_failure",
     )
-    assert changed is True
+    assert result.changed is True
+    assert result.outcome == "changed"
     updated = ledger.get_capture(capture.capture_id)
     assert updated.delivery_status == DELIVERY_FAILED
     ledger.close()
@@ -795,4 +798,103 @@ async def test_local_full_startup_normalizes_migrated_received_rows(tmp_path):
     await service.enqueue_unfinished_captures()
     updated = ledger.get_capture(result.capture.capture_id)
     assert updated.delivery_status == NOT_APPLICABLE
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_service_retry_rejects_free_form_error_type_without_http_adapter(tmp_path):
+    """schedule_delivery_retry must reject free-form error strings at the domain layer."""
+    service, ledger, capture = _make_service_with_capture(tmp_path)
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_NOW + timedelta(seconds=60), batch_size=10)
+
+    with pytest.raises(ValueError, match="unsafe delivery category string"):
+        await service.schedule_delivery_retry(
+            capture_id=capture.capture_id,
+            delivery_attempt=1,
+            error_type="TimeoutError: POST https://n8n.example.com?token=secret",
+        )
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_local_full_startup_normalizes_forwarding_row(tmp_path):
+    """normalize_delivery_for_local_full handles in-flight FORWARDING rows."""
+    settings = make_delivery_settings(tmp_path, capture_processing_mode="local-full")
+    ledger = Ledger(settings.ledger_path)
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="note",
+        initial_delivery_status=PENDING_FORWARD,
+        received_at=_NOW,
+    )
+    cid = "SB-20260609-0001"
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_NOW + timedelta(seconds=60), batch_size=10)
+    assert ledger.get_capture(cid).delivery_status == FORWARDING
+
+    await service.enqueue_unfinished_captures()
+    assert ledger.get_capture(cid).delivery_status == NOT_APPLICABLE
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_local_full_startup_normalizes_forwarded_row(tmp_path):
+    """normalize_delivery_for_local_full handles DELIVERY_FORWARDED rows."""
+    settings = make_delivery_settings(tmp_path, capture_processing_mode="local-full")
+    ledger = Ledger(settings.ledger_path)
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="note",
+        initial_delivery_status=PENDING_FORWARD,
+        received_at=_NOW,
+    )
+    cid = "SB-20260609-0001"
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_NOW + timedelta(seconds=60), batch_size=10)
+    ledger.mark_forwarded(capture_id=cid, delivery_attempt=1,
+                          lease_until=_NOW + timedelta(seconds=300))
+    assert ledger.get_capture(cid).delivery_status == DELIVERY_FORWARDED
+
+    await service.enqueue_unfinished_captures()
+    assert ledger.get_capture(cid).delivery_status == NOT_APPLICABLE
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_local_full_normalization_clears_retry_metadata(tmp_path):
+    """normalize_delivery_for_local_full clears processing_lease_until and next_attempt_at."""
+    settings = make_delivery_settings(tmp_path, capture_processing_mode="local-full")
+    ledger = Ledger(settings.ledger_path)
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="note",
+        initial_delivery_status=PENDING_FORWARD,
+        received_at=_NOW,
+    )
+    cid = "SB-20260609-0001"
+    lease = _NOW + timedelta(seconds=60)
+    ledger.claim_due_deliveries(now=_NOW, lease_until=lease, batch_size=10)
+    ledger.mark_forwarded(capture_id=cid, delivery_attempt=1, lease_until=lease)
+    # Confirm lease is set
+    assert ledger.get_capture(cid).processing_lease_until is not None
+
+    await service.enqueue_unfinished_captures()
+
+    normalized = ledger.get_capture(cid)
+    assert normalized.delivery_status == NOT_APPLICABLE
+    assert normalized.processing_lease_until is None
+    assert normalized.next_attempt_at is None
     ledger.close()

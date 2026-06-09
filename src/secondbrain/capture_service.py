@@ -407,7 +407,8 @@ class CaptureService:
         *,
         capture_id: str,
         delivery_attempt: int,
-    ) -> bool:
+    ) -> DeliveryMutationResult:
+        self.get_capture(capture_id)
         lease_until = datetime.now(UTC) + timedelta(
             seconds=self.settings.delivery_processing_lease_seconds
         )
@@ -422,7 +423,8 @@ class CaptureService:
         *,
         capture_id: str,
         delivery_attempt: int,
-    ) -> bool:
+    ) -> DeliveryMutationResult:
+        self.get_capture(capture_id)
         lease_until = datetime.now(UTC) + timedelta(
             seconds=self.settings.delivery_processing_lease_seconds
         )
@@ -437,7 +439,8 @@ class CaptureService:
         *,
         capture_id: str,
         delivery_attempt: int,
-    ) -> bool:
+    ) -> DeliveryMutationResult:
+        self.get_capture(capture_id)
         lease_until = datetime.now(UTC) + timedelta(
             seconds=self.settings.delivery_processing_lease_seconds
         )
@@ -462,7 +465,7 @@ class CaptureService:
             derived_note_path=derived_note_path,
             git_commit_hash=git_commit_hash,
         )
-        if result.changed:
+        if result.outcome in {"changed", "idempotent_replay"}:
             try:
                 await self.edit_receipt(
                     capture_id=capture_id,
@@ -496,7 +499,7 @@ class CaptureService:
             git_commit_hash=git_commit_hash,
             reason_type=reason_type,
         )
-        if result.changed:
+        if result.outcome in {"changed", "idempotent_replay"}:
             try:
                 await self.edit_receipt(
                     capture_id=capture_id,
@@ -553,20 +556,21 @@ class CaptureService:
         capture_id: str,
         delivery_attempt: int,
         reason_type: str = "",
-    ) -> bool:
+    ) -> DeliveryMutationResult:
         from secondbrain.delivery import _FAILED_RECEIPT, _edit_receipt_best_effort
-        changed = self._ledger.mark_delivery_failed_terminally(
+        self.get_capture(capture_id)
+        result = self._ledger.mark_delivery_failed_terminally(
             capture_id=capture_id,
             delivery_attempt=delivery_attempt,
             reason=reason_type,
         )
-        if changed:
+        if result.changed:
             await _edit_receipt_best_effort(
                 self,
                 capture_id=capture_id,
                 content=_FAILED_RECEIPT.format(capture_id=capture_id),
             )
-        return changed
+        return result
 
     def status_snapshot(self) -> CaptureStatusSnapshot:
         counts = self._ledger.status_counts()
