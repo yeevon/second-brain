@@ -311,6 +311,7 @@ def format_status_report(
     settings: Settings,
     snapshot: CaptureStatusSnapshot,
     periodic_snapshot: dict | None = None,
+    delivery_snapshot: dict | None = None,
 ) -> str:
     last_reconciled = snapshot.last_reconciled_discord_message_id or "none"
     last_successful_vault_write = snapshot.last_successful_vault_write or "none"
@@ -344,6 +345,19 @@ def format_status_report(
             f"periodic reconciliation last warning: {p.get('periodic_reconcile_last_warning') or 'none'}",
             f"periodic reconciliation most recent error type: {p.get('periodic_reconcile_last_error_type') or 'none'}",
         ]
+    if delivery_snapshot is not None:
+        d = delivery_snapshot
+        lines += [
+            f"delivery pending forward: {d.get('pending_forward', 0)}",
+            f"delivery forwarding: {d.get('forwarding', 0)}",
+            f"delivery forwarded awaiting callback: {d.get('forwarded', 0)}",
+            f"delivery classifying: {d.get('classifying', 0)}",
+            f"delivery waiting for retry: {d.get('retry_wait', 0)}",
+            f"delivery failed after retry cap: {d.get('failed', 0)}",
+            f"expired processing leases: {d.get('expired_leases', 0)}",
+            f"total downstream delivery attempts: {d.get('total_delivery_attempts', 0)}",
+            f"next scheduled delivery attempt: {d.get('next_attempt_at') or 'none'}",
+        ]
     return "\n".join(lines)
 
 
@@ -352,7 +366,13 @@ def run_status() -> None:
     capture_service = CaptureService.open(settings)
     try:
         periodic_snapshot = capture_service.periodic_reconcile_snapshot()
-        print(format_status_report(settings, capture_service.status_snapshot(), periodic_snapshot))
+        delivery_snapshot = capture_service.delivery_snapshot()
+        print(format_status_report(
+            settings,
+            capture_service.status_snapshot(),
+            periodic_snapshot,
+            delivery_snapshot,
+        ))
     finally:
         capture_service.close()
 

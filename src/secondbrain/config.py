@@ -94,6 +94,17 @@ class Settings:
         self.periodic_reconcile_limit            = _parse_int_env("PERIODIC_RECONCILE_LIMIT", "100")
         self.capture_api_port           = int(self.capture_api_port)
 
+        # Delivery dispatcher and reaper
+        self.delivery_max_attempts               = _parse_int_env("DELIVERY_MAX_ATTEMPTS", "5")
+        self.delivery_retry_base_delay_seconds   = _parse_int_env("DELIVERY_RETRY_BASE_DELAY_SECONDS", "10")
+        self.delivery_retry_max_delay_seconds    = _parse_int_env("DELIVERY_RETRY_MAX_DELAY_SECONDS", "300")
+        self.delivery_forward_lease_seconds      = _parse_int_env("DELIVERY_FORWARD_LEASE_SECONDS", "60")
+        self.delivery_processing_lease_seconds   = _parse_int_env("DELIVERY_PROCESSING_LEASE_SECONDS", "300")
+        self.delivery_dispatch_interval_seconds  = _parse_int_env("DELIVERY_DISPATCH_INTERVAL_SECONDS", "2")
+        self.delivery_dispatch_batch_size        = _parse_int_env("DELIVERY_DISPATCH_BATCH_SIZE", "25")
+        self.delivery_reaper_interval_seconds    = _parse_int_env("DELIVERY_REAPER_INTERVAL_SECONDS", "30")
+        self.delivery_reaper_batch_size          = _parse_int_env("DELIVERY_REAPER_BATCH_SIZE", "100")
+
         self.ledger_path = Path(self.ledger_path)
 
         if self.capture_processing_mode == "local-full":
@@ -123,6 +134,25 @@ class Settings:
             raise RuntimeError("PERIODIC_RECONCILE_INTERVAL_SECONDS must be >= 1")
         if self.periodic_reconcile_limit < 1:
             raise RuntimeError("PERIODIC_RECONCILE_LIMIT must be >= 1")
+
+        if self.delivery_max_attempts < 1:
+            raise RuntimeError("DELIVERY_MAX_ATTEMPTS must be >= 1")
+        if self.delivery_retry_base_delay_seconds < 1:
+            raise RuntimeError("DELIVERY_RETRY_BASE_DELAY_SECONDS must be >= 1")
+        if self.delivery_retry_max_delay_seconds < self.delivery_retry_base_delay_seconds:
+            raise RuntimeError("DELIVERY_RETRY_MAX_DELAY_SECONDS must be >= DELIVERY_RETRY_BASE_DELAY_SECONDS")
+        if self.delivery_forward_lease_seconds < 1:
+            raise RuntimeError("DELIVERY_FORWARD_LEASE_SECONDS must be >= 1")
+        if self.delivery_processing_lease_seconds < self.delivery_forward_lease_seconds:
+            raise RuntimeError("DELIVERY_PROCESSING_LEASE_SECONDS must be >= DELIVERY_FORWARD_LEASE_SECONDS")
+        if self.delivery_dispatch_interval_seconds < 1:
+            raise RuntimeError("DELIVERY_DISPATCH_INTERVAL_SECONDS must be >= 1")
+        if self.delivery_dispatch_batch_size < 1:
+            raise RuntimeError("DELIVERY_DISPATCH_BATCH_SIZE must be >= 1")
+        if self.delivery_reaper_interval_seconds < 1:
+            raise RuntimeError("DELIVERY_REAPER_INTERVAL_SECONDS must be >= 1")
+        if self.delivery_reaper_batch_size < 1:
+            raise RuntimeError("DELIVERY_REAPER_BATCH_SIZE must be >= 1")
 
         if self.sqlite_busy_timeout_ms < 0:
             raise RuntimeError("SQLITE_BUSY_TIMEOUT_MS must be >= 0")

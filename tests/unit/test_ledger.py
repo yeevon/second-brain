@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 import re
 import sqlite3
@@ -8,6 +8,16 @@ from types import SimpleNamespace
 
 import pytest
 
+from secondbrain.capture_models import (
+    COMPLETE,
+    DELIVERY_CLASSIFYING,
+    DELIVERY_FAILED,
+    DELIVERY_FORWARDED,
+    FORWARDING,
+    NOT_APPLICABLE,
+    PENDING_FORWARD,
+    RETRY_WAIT,
+)
 from secondbrain.ledger import (
     ALL_STATUSES,
     CLASSIFYING,
@@ -19,6 +29,7 @@ from secondbrain.ledger import (
     REJECTED_SENSITIVE,
     TERMINAL_STATUSES,
     Ledger,
+    _calculate_retry_delay,
 )
 
 
@@ -135,6 +146,11 @@ def test_minimal_schema_tables_columns_and_indexes_match_mvp(tmp_path):
         "receipt_message_id",
         "last_error",
         "updated_at",
+        # Added by migration 002
+        "delivery_status",
+        "delivery_attempts",
+        "processing_lease_until",
+        "next_attempt_at",
     ]
     assert table_columns(ledger, "capture_events") == [
         "id",
@@ -147,6 +163,8 @@ def test_minimal_schema_tables_columns_and_indexes_match_mvp(tmp_path):
 
     assert index_columns(ledger, "idx_captures_status") == ["status"]
     assert index_columns(ledger, "idx_capture_events_capture_id") == ["capture_id"]
+    assert index_columns(ledger, "idx_captures_delivery_due") == ["delivery_status", "next_attempt_at"]
+    assert index_columns(ledger, "idx_captures_processing_lease") == ["delivery_status", "processing_lease_until"]
     assert unique_index_exists(ledger, "captures", ["capture_id"])
     assert unique_index_exists(ledger, "captures", ["discord_message_id"])
 
@@ -309,7 +327,11 @@ def test_existing_mvp_database_is_adopted_without_data_loss(tmp_path):
     migration_count = ledger._runtime.read(
         lambda conn: conn.execute("SELECT COUNT(*) AS c FROM schema_migrations").fetchone()["c"]
     )
-    assert migration_count == 1
+    assert migration_count == 2  # migration 001 back-applied + migration 002 new
+    # Verify delivery columns were added and existing row has correct default
+    capture = ledger.get_capture("SB-20260607-0001")
+    assert capture.delivery_status == "PENDING_FORWARD"
+    assert capture.delivery_attempts == 0
     ledger.close()
 
 
@@ -843,3 +865,783 @@ async def test_service_level_busy_exhaustion_sends_no_receipt_and_leaves_no_row(
     assert channel.sent_receipts == [], "no receipt must be sent when insert fails"
     assert ledger.total_captures() == 0, "no capture row must be written when insert fails"
     ledger.close()
+
+
+# ===========================================================================
+# SB-107 — Delivery leases
+# ===========================================================================
+
+_NOW = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
+_LEASE = datetime(2026, 6, 9, 12, 1, 0, tzinfo=UTC)
+_LATER = datetime(2026, 6, 9, 12, 10, 0, tzinfo=UTC)
+
+
+def _accepted(ledger, msg_id="1001"):
+    return ledger.insert_accepted_capture(
+        discord_message_id=msg_id,
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="note",
+    ).capture
+
+
+def _make_retry_settings(**overrides):
+    defaults = dict(
+        delivery_max_attempts=5,
+        delivery_retry_base_delay_seconds=10,
+        delivery_retry_max_delay_seconds=300,
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+# ---------------------------------------------------------------------------
+# Migration tests
+# ---------------------------------------------------------------------------
+
+def test_delivery_lease_migration_adds_required_columns(tmp_path):
+    ledger = make_ledger(tmp_path)
+    cols = table_columns(ledger, "captures")
+    assert "delivery_status" in cols
+    assert "delivery_attempts" in cols
+    assert "processing_lease_until" in cols
+    assert "next_attempt_at" in cols
+    ledger.close()
+
+
+def test_delivery_lease_migration_adds_due_and_lease_indexes(tmp_path):
+    ledger = make_ledger(tmp_path)
+    assert index_columns(ledger, "idx_captures_delivery_due") == ["delivery_status", "next_attempt_at"]
+    assert index_columns(ledger, "idx_captures_processing_lease") == ["delivery_status", "processing_lease_until"]
+    ledger.close()
+
+
+def test_delivery_lease_migration_maps_received_rows_to_pending_forward(tmp_path):
+    db_path = tmp_path / "ledger.sqlite3"
+    _seed_mvp_db(db_path, status=RECEIVED)
+    ledger = make_ledger(tmp_path)
+    capture = ledger.get_capture("SB-20260607-0001")
+    assert capture.delivery_status == PENDING_FORWARD
+    ledger.close()
+
+
+def test_delivery_lease_migration_maps_sensitive_rows_to_not_applicable(tmp_path):
+    db_path = tmp_path / "ledger.sqlite3"
+    _seed_mvp_db_sensitive(db_path)
+    ledger = make_ledger(tmp_path)
+    capture = ledger.get_capture("SB-20260607-0001")
+    assert capture.delivery_status == NOT_APPLICABLE
+    ledger.close()
+
+
+def test_delivery_lease_migration_maps_terminal_rows_to_complete_or_failed(tmp_path):
+    db_path = tmp_path / "ledger.sqlite3"
+    _seed_mvp_db(db_path, status=FILED)
+    ledger = make_ledger(tmp_path)
+    capture = ledger.get_capture("SB-20260607-0001")
+    assert capture.delivery_status == COMPLETE
+
+    db_path2 = tmp_path / "ledger2.sqlite3"
+    _seed_mvp_db(db_path2, status=FAILED)
+    ledger2 = Ledger(db_path2)
+    c2 = ledger2.get_capture("SB-20260607-0001")
+    assert c2.delivery_status == DELIVERY_FAILED
+    ledger.close()
+    ledger2.close()
+
+
+def test_delivery_lease_migration_resets_legacy_classifying_rows_safely(tmp_path):
+    db_path = tmp_path / "ledger.sqlite3"
+    _seed_mvp_db(db_path, status=CLASSIFYING)
+    ledger = make_ledger(tmp_path)
+    capture = ledger.get_capture("SB-20260607-0001")
+    assert capture.status == RECEIVED
+    assert capture.delivery_status == PENDING_FORWARD
+    ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# Insert behavior
+# ---------------------------------------------------------------------------
+
+def test_accepted_capture_starts_pending_forward(tmp_path):
+    ledger = make_ledger(tmp_path)
+    capture = _accepted(ledger)
+    assert capture.delivery_status == PENDING_FORWARD
+    assert capture.delivery_attempts == 0
+    assert capture.processing_lease_until is None
+    assert capture.next_attempt_at is None
+    ledger.close()
+
+
+def test_sensitive_rejection_starts_not_applicable(tmp_path):
+    ledger = make_ledger(tmp_path)
+    capture = ledger.insert_sensitive_rejection(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        redacted_text="REDACTED",
+        sensitivity_flags=["token"],
+    ).capture
+    assert capture.delivery_status == NOT_APPLICABLE
+    assert capture.delivery_attempts == 0
+    ledger.close()
+
+
+def test_duplicate_discord_message_returns_existing_delivery_state(tmp_path):
+    ledger = make_ledger(tmp_path)
+    first = _accepted(ledger, "1001")
+    # Simulate delivery claimed
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    second = ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="note",
+    ).capture
+    assert second.delivery_status == FORWARDING
+    assert second.delivery_attempts == 1
+    ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# Due-delivery claiming
+# ---------------------------------------------------------------------------
+
+def test_claim_due_deliveries_claims_pending_rows(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    claimed = ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    assert len(claimed) == 1
+    assert claimed[0].delivery_status == FORWARDING
+    ledger.close()
+
+
+def test_claim_due_deliveries_claims_retry_rows_only_after_next_attempt_at(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    s = _make_retry_settings()
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.schedule_retry(
+        capture_id="SB-20260609-0001",
+        delivery_attempt=1,
+        now=_NOW,
+        error_type="TimeoutError",
+        reason_type="webhook_failure",
+        max_attempts=s.delivery_max_attempts,
+        base_delay_seconds=s.delivery_retry_base_delay_seconds,
+        max_delay_seconds=s.delivery_retry_max_delay_seconds,
+    )
+    # Too early — next_attempt_at is in the future
+    early = ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    assert early == []
+    # After next_attempt_at
+    due = ledger.claim_due_deliveries(now=_LATER, lease_until=_LATER, batch_size=10)
+    assert len(due) == 1
+    assert due[0].delivery_attempts == 2
+    ledger.close()
+
+
+def test_claim_due_deliveries_increments_attempt_count_once(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    claimed = ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    assert claimed[0].delivery_attempts == 1
+    ledger.close()
+
+
+def test_claim_due_deliveries_assigns_forwarding_lease(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    claimed = ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    capture = claimed[0]
+    assert capture.processing_lease_until is not None
+    assert capture.processing_lease_until.isoformat() == _LEASE.isoformat()
+    assert capture.next_attempt_at is None
+    assert capture.last_error is None
+    ledger.close()
+
+
+def test_claim_due_deliveries_is_bounded(tmp_path):
+    ledger = make_ledger(tmp_path)
+    for i in range(5):
+        _accepted(ledger, str(1001 + i))
+    claimed = ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=3)
+    assert len(claimed) == 3
+    ledger.close()
+
+
+def test_concurrent_claims_do_not_claim_same_capture_twice(tmp_path):
+    import threading
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    results = []
+
+    def claim():
+        r = ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+        results.extend(r)
+
+    threads = [threading.Thread(target=claim) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    claimed_ids = [c.capture_id for c in results if c.delivery_status == FORWARDING]
+    assert len(claimed_ids) == 1
+    ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# Callback transitions
+# ---------------------------------------------------------------------------
+
+def test_mark_forwarded_moves_forwarding_to_forwarded(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ok = ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    assert ok is True
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.delivery_status == DELIVERY_FORWARDED
+    assert capture.processing_lease_until.isoformat() == _LATER.isoformat()
+    ledger.close()
+
+
+def test_mark_classifying_moves_forwarded_to_classifying(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ok = ledger.mark_classifying_delivery(
+        capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER
+    )
+    assert ok is True
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.delivery_status == DELIVERY_CLASSIFYING
+    ledger.close()
+
+
+def test_mark_classifying_renews_existing_classifying_lease(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ledger.mark_classifying_delivery(
+        capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER
+    )
+    new_lease = datetime(2026, 6, 9, 12, 20, 0, tzinfo=UTC)
+    ok = ledger.mark_classifying_delivery(
+        capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=new_lease
+    )
+    assert ok is True
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.processing_lease_until.isoformat() == new_lease.isoformat()
+    ledger.close()
+
+
+def test_mark_filed_moves_capture_to_terminal_complete(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ok = ledger.mark_filed(
+        capture_id="SB-20260609-0001",
+        delivery_attempt=1,
+        derived_note_path="20_projects/note.md",
+    )
+    assert ok is True
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.status == FILED
+    assert capture.delivery_status == COMPLETE
+    assert capture.processing_lease_until is None
+    assert capture.next_attempt_at is None
+    ledger.close()
+
+
+def test_mark_inbox_moves_capture_to_terminal_complete(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ok = ledger.mark_inbox(
+        capture_id="SB-20260609-0001",
+        delivery_attempt=1,
+        derived_note_path="00_inbox/note.md",
+        reason_type="needs_context",
+    )
+    assert ok is True
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.status == INBOX
+    assert capture.delivery_status == COMPLETE
+    ledger.close()
+
+
+def test_duplicate_identical_terminal_callback_is_idempotent(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="path/note.md"
+    )
+    ok2 = ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="path/note.md"
+    )
+    assert ok2 is True  # idempotent
+    ledger.close()
+
+
+def test_conflicting_terminal_callback_is_rejected(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="path/note.md"
+    )
+    conflict = ledger.mark_inbox(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="path/note2.md"
+    )
+    assert conflict is False
+    ledger.close()
+
+
+def test_stale_attempt_callback_is_ignored(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ok = ledger.mark_forwarded(
+        capture_id="SB-20260609-0001", delivery_attempt=99, lease_until=_LATER
+    )
+    assert ok is False
+    ledger.close()
+
+
+def test_terminal_capture_cannot_regress_to_classifying(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="path/note.md"
+    )
+    regress = ledger.mark_classifying_delivery(
+        capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER
+    )
+    assert regress is False
+    ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# Retry scheduling
+# ---------------------------------------------------------------------------
+
+def test_schedule_retry_moves_active_attempt_to_retry_wait(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    s = _make_retry_settings()
+    disp = ledger.schedule_retry(
+        capture_id="SB-20260609-0001",
+        delivery_attempt=1,
+        now=_NOW,
+        error_type="TimeoutError",
+        reason_type="webhook_failure",
+        max_attempts=s.delivery_max_attempts,
+        base_delay_seconds=s.delivery_retry_base_delay_seconds,
+        max_delay_seconds=s.delivery_retry_max_delay_seconds,
+    )
+    assert disp.retry_scheduled is True
+    assert disp.failed_terminally is False
+    assert disp.delivery_status == RETRY_WAIT
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.delivery_status == RETRY_WAIT
+    assert capture.processing_lease_until is None
+    ledger.close()
+
+
+def test_schedule_retry_sets_capped_exponential_backoff(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    s = _make_retry_settings(delivery_retry_base_delay_seconds=10, delivery_retry_max_delay_seconds=300)
+    disp = ledger.schedule_retry(
+        capture_id="SB-20260609-0001",
+        delivery_attempt=1,
+        now=_NOW,
+        error_type="TimeoutError",
+        reason_type="webhook_failure",
+        max_attempts=s.delivery_max_attempts,
+        base_delay_seconds=s.delivery_retry_base_delay_seconds,
+        max_delay_seconds=s.delivery_retry_max_delay_seconds,
+    )
+    assert disp.next_attempt_at is not None
+    delay = (disp.next_attempt_at - _NOW).total_seconds()
+    assert delay == 10  # attempt 1: base * 2^0 = 10
+    ledger.close()
+
+
+def test_schedule_retry_clears_processing_lease(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    s = _make_retry_settings()
+    ledger.schedule_retry(
+        capture_id="SB-20260609-0001",
+        delivery_attempt=1,
+        now=_NOW,
+        error_type="TimeoutError",
+        reason_type="webhook_failure",
+        max_attempts=s.delivery_max_attempts,
+        base_delay_seconds=s.delivery_retry_base_delay_seconds,
+        max_delay_seconds=s.delivery_retry_max_delay_seconds,
+    )
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.processing_lease_until is None
+    ledger.close()
+
+
+def test_schedule_retry_preserves_safe_error_type(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    s = _make_retry_settings()
+    ledger.schedule_retry(
+        capture_id="SB-20260609-0001",
+        delivery_attempt=1,
+        now=_NOW,
+        error_type="ConnectionError",
+        reason_type="webhook_failure",
+        max_attempts=s.delivery_max_attempts,
+        base_delay_seconds=s.delivery_retry_base_delay_seconds,
+        max_delay_seconds=s.delivery_retry_max_delay_seconds,
+    )
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert "ConnectionError" in (capture.last_error or "")
+    ledger.close()
+
+
+def test_schedule_retry_marks_failed_when_attempt_cap_exceeded(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    s = _make_retry_settings(delivery_max_attempts=1)
+    disp = ledger.schedule_retry(
+        capture_id="SB-20260609-0001",
+        delivery_attempt=1,
+        now=_NOW,
+        error_type="TimeoutError",
+        reason_type="webhook_failure",
+        max_attempts=s.delivery_max_attempts,
+        base_delay_seconds=s.delivery_retry_base_delay_seconds,
+        max_delay_seconds=s.delivery_retry_max_delay_seconds,
+    )
+    assert disp.failed_terminally is True
+    assert disp.retry_scheduled is False
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.status == FAILED
+    assert capture.delivery_status == DELIVERY_FAILED
+    ledger.close()
+
+
+def test_retry_cap_appends_retry_limit_exceeded_event(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    s = _make_retry_settings(delivery_max_attempts=1)
+    ledger.schedule_retry(
+        capture_id="SB-20260609-0001",
+        delivery_attempt=1,
+        now=_NOW,
+        error_type="TimeoutError",
+        reason_type="webhook_failure",
+        max_attempts=s.delivery_max_attempts,
+        base_delay_seconds=s.delivery_retry_base_delay_seconds,
+        max_delay_seconds=s.delivery_retry_max_delay_seconds,
+    )
+    events = ledger._runtime.read(
+        lambda conn: [
+            row["event_type"]
+            for row in conn.execute(
+                "SELECT event_type FROM capture_events WHERE capture_id = ? ORDER BY id",
+                ("SB-20260609-0001",),
+            ).fetchall()
+        ]
+    )
+    assert "RETRY_LIMIT_EXCEEDED" in events
+    ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# Stale-lease reaper
+# ---------------------------------------------------------------------------
+
+def _claim_and_forward(ledger, capture_id, attempt=1):
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id=capture_id, delivery_attempt=attempt, lease_until=_LEASE)
+
+
+def test_reaper_requeues_expired_forwarding_lease(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    result = ledger.requeue_expired_leases(
+        now=_LATER, batch_size=10, max_attempts=5,
+        base_delay_seconds=10, max_delay_seconds=300,
+    )
+    assert result.requeued == 1
+    assert result.terminal_failures == 0
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.delivery_status == RETRY_WAIT
+    assert capture.processing_lease_until is None
+    assert capture.next_attempt_at is not None
+    ledger.close()
+
+
+def test_reaper_requeues_expired_forwarded_lease(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    _claim_and_forward(ledger, "SB-20260609-0001")
+    result = ledger.requeue_expired_leases(
+        now=_LATER, batch_size=10, max_attempts=5,
+        base_delay_seconds=10, max_delay_seconds=300,
+    )
+    assert result.requeued == 1
+    ledger.close()
+
+
+def test_reaper_requeues_expired_classifying_lease(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    _claim_and_forward(ledger, "SB-20260609-0001")
+    ledger.mark_classifying_delivery(
+        capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LEASE
+    )
+    result = ledger.requeue_expired_leases(
+        now=_LATER, batch_size=10, max_attempts=5,
+        base_delay_seconds=10, max_delay_seconds=300,
+    )
+    assert result.requeued == 1
+    ledger.close()
+
+
+def test_reaper_ignores_unexpired_lease(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LATER, batch_size=10)
+    result = ledger.requeue_expired_leases(
+        now=_NOW, batch_size=10, max_attempts=5,
+        base_delay_seconds=10, max_delay_seconds=300,
+    )
+    assert result.requeued == 0
+    ledger.close()
+
+
+def test_reaper_ignores_terminal_capture(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    _claim_and_forward(ledger, "SB-20260609-0001")
+    ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="path.md"
+    )
+    result = ledger.requeue_expired_leases(
+        now=_LATER, batch_size=10, max_attempts=5,
+        base_delay_seconds=10, max_delay_seconds=300,
+    )
+    assert result.requeued == 0
+    assert result.terminal_failures == 0
+    ledger.close()
+
+
+def test_reaper_processes_bounded_batch(tmp_path):
+    ledger = make_ledger(tmp_path)
+    for i in range(5):
+        _accepted(ledger, str(1001 + i))
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    result = ledger.requeue_expired_leases(
+        now=_LATER, batch_size=3, max_attempts=5,
+        base_delay_seconds=10, max_delay_seconds=300,
+    )
+    assert result.requeued == 3
+    ledger.close()
+
+
+def test_reaper_does_not_increment_attempt_count_until_dispatcher_claims_retry(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    # After claim: attempts = 1
+    result = ledger.requeue_expired_leases(
+        now=_LATER, batch_size=10, max_attempts=5,
+        base_delay_seconds=10, max_delay_seconds=300,
+    )
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.delivery_attempts == 1  # reaper did NOT increment
+    assert capture.delivery_status == RETRY_WAIT
+    # Now dispatcher claims again after retry window — attempts becomes 2
+    _MUCH_LATER = _LATER + timedelta(minutes=5)
+    claimed = ledger.claim_due_deliveries(now=_MUCH_LATER, lease_until=_MUCH_LATER, batch_size=10)
+    assert claimed[0].delivery_attempts == 2
+    ledger.close()
+
+
+def test_reaper_marks_failed_when_retry_cap_exceeded(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    result = ledger.requeue_expired_leases(
+        now=_LATER, batch_size=10, max_attempts=1,
+        base_delay_seconds=10, max_delay_seconds=300,
+    )
+    assert result.terminal_failures == 1
+    assert result.requeued == 0
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.status == FAILED
+    assert capture.delivery_status == DELIVERY_FAILED
+    ledger.close()
+
+
+def test_reaper_returns_capture_ids_requiring_visible_alert(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    result = ledger.requeue_expired_leases(
+        now=_LATER, batch_size=10, max_attempts=1,
+        base_delay_seconds=10, max_delay_seconds=300,
+    )
+    assert "SB-20260609-0001" in result.failed_capture_ids
+    ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# Backoff helper
+# ---------------------------------------------------------------------------
+
+def test_backoff_grows_exponentially_from_base():
+    assert _calculate_retry_delay(delivery_attempts=1, base_delay_seconds=10, max_delay_seconds=300) == 10
+    assert _calculate_retry_delay(delivery_attempts=2, base_delay_seconds=10, max_delay_seconds=300) == 20
+    assert _calculate_retry_delay(delivery_attempts=3, base_delay_seconds=10, max_delay_seconds=300) == 40
+    assert _calculate_retry_delay(delivery_attempts=4, base_delay_seconds=10, max_delay_seconds=300) == 80
+    assert _calculate_retry_delay(delivery_attempts=5, base_delay_seconds=10, max_delay_seconds=300) == 160
+
+
+def test_backoff_is_capped_at_max():
+    assert _calculate_retry_delay(delivery_attempts=10, base_delay_seconds=10, max_delay_seconds=300) == 300
+
+
+# ---------------------------------------------------------------------------
+# Migration seed helpers
+# ---------------------------------------------------------------------------
+
+def _seed_mvp_db(db_path, *, status):
+    raw = sqlite3.connect(str(db_path))
+    raw.executescript("""
+        CREATE TABLE captures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            capture_id TEXT NOT NULL UNIQUE,
+            discord_message_id TEXT NOT NULL UNIQUE,
+            discord_channel_id TEXT NOT NULL,
+            discord_guild_id TEXT NOT NULL,
+            discord_author_id TEXT NOT NULL,
+            raw_text TEXT,
+            redacted_text TEXT,
+            is_sensitive INTEGER NOT NULL DEFAULT 0,
+            sensitivity_flags TEXT,
+            has_attachments INTEGER NOT NULL DEFAULT 0,
+            attachment_metadata_json TEXT,
+            received_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            classification_json TEXT,
+            derived_note_path TEXT,
+            receipt_message_id TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE capture_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            capture_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            event_payload_json TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE system_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+    """)
+    raw.execute(
+        """
+        INSERT INTO captures (
+            capture_id, discord_message_id, discord_channel_id,
+            discord_guild_id, discord_author_id, raw_text, is_sensitive,
+            has_attachments, received_at, status, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+        """,
+        (
+            "SB-20260607-0001", "1001", "200", "300", "400",
+            "Existing capture",
+            "2026-06-07T12:00:00+00:00", status, "2026-06-07T12:00:00+00:00",
+        ),
+    )
+    raw.commit()
+    raw.close()
+
+
+def _seed_mvp_db_sensitive(db_path):
+    raw = sqlite3.connect(str(db_path))
+    raw.executescript("""
+        CREATE TABLE captures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            capture_id TEXT NOT NULL UNIQUE,
+            discord_message_id TEXT NOT NULL UNIQUE,
+            discord_channel_id TEXT NOT NULL,
+            discord_guild_id TEXT NOT NULL,
+            discord_author_id TEXT NOT NULL,
+            raw_text TEXT,
+            redacted_text TEXT,
+            is_sensitive INTEGER NOT NULL DEFAULT 0,
+            sensitivity_flags TEXT,
+            has_attachments INTEGER NOT NULL DEFAULT 0,
+            attachment_metadata_json TEXT,
+            received_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            classification_json TEXT,
+            derived_note_path TEXT,
+            receipt_message_id TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE capture_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            capture_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            event_payload_json TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE system_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+    """)
+    raw.execute(
+        """
+        INSERT INTO captures (
+            capture_id, discord_message_id, discord_channel_id,
+            discord_guild_id, discord_author_id, redacted_text, is_sensitive,
+            has_attachments, received_at, status, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?)
+        """,
+        (
+            "SB-20260607-0001", "1001", "200", "300", "400",
+            "REDACTED",
+            "2026-06-07T12:00:00+00:00", REJECTED_SENSITIVE, "2026-06-07T12:00:00+00:00",
+        ),
+    )
+    raw.commit()
+    raw.close()

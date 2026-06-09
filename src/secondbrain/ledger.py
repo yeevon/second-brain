@@ -8,16 +8,28 @@ import sqlite3
 from typing import Any
 
 from secondbrain.capture_models import (
+    ALL_DELIVERY_STATUSES,
     ALL_STATUSES,
     CLASSIFYING,
+    COMPLETE,
+    DELIVERY_CLASSIFYING,
+    DELIVERY_FAILED,
+    DELIVERY_FORWARDED,
     FAILED,
     FILED,
     FORWARDED,
+    FORWARDING,
     INBOX,
+    LEASABLE_DELIVERY_STATUSES,
+    NOT_APPLICABLE,
+    PENDING_FORWARD,
     RECEIVED,
     REJECTED_SENSITIVE,
+    RETRY_WAIT,
     TERMINAL_STATUSES,
     CaptureRecord,
+    LeaseReaperResult,
+    RetryDisposition,
     TransitionResult,
 )
 from secondbrain.sqlite_runtime import SQLiteRuntime
@@ -201,6 +213,154 @@ class Ledger:
             ),
         )
 
+    # ------------------------------------------------------------------
+    # Delivery ledger methods
+    # ------------------------------------------------------------------
+
+    def claim_due_deliveries(
+        self,
+        *,
+        now: datetime,
+        lease_until: datetime,
+        batch_size: int,
+    ) -> list[CaptureRecord]:
+        return self._write(
+            "claim_due_deliveries",
+            lambda conn: self._claim_due_deliveries(
+                conn, now=now, lease_until=lease_until, batch_size=batch_size
+            ),
+        )
+
+    def mark_forwarded(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        lease_until: datetime,
+    ) -> bool:
+        return self._write(
+            "mark_forwarded",
+            lambda conn: self._mark_forwarded(
+                conn, capture_id=capture_id, delivery_attempt=delivery_attempt, lease_until=lease_until
+            ),
+        )
+
+    def mark_classifying_delivery(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        lease_until: datetime,
+    ) -> bool:
+        return self._write(
+            "mark_classifying_delivery",
+            lambda conn: self._mark_classifying_delivery(
+                conn, capture_id=capture_id, delivery_attempt=delivery_attempt, lease_until=lease_until
+            ),
+        )
+
+    def mark_filed(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        derived_note_path: str,
+        git_commit_hash: str | None = None,
+    ) -> bool:
+        return self._write(
+            "mark_filed",
+            lambda conn: self._mark_delivery_terminal(
+                conn,
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                note_status=FILED,
+                derived_note_path=derived_note_path,
+                git_commit_hash=git_commit_hash,
+                event_type="CAPTURE_FILED",
+            ),
+        )
+
+    def mark_inbox(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        derived_note_path: str,
+        git_commit_hash: str | None = None,
+        reason_type: str = "",
+    ) -> bool:
+        return self._write(
+            "mark_inbox",
+            lambda conn: self._mark_delivery_terminal(
+                conn,
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                note_status=INBOX,
+                derived_note_path=derived_note_path,
+                git_commit_hash=git_commit_hash,
+                event_type="CAPTURE_INBOX",
+                extra_payload={"reason_type": reason_type} if reason_type else None,
+            ),
+        )
+
+    def schedule_retry(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        now: datetime,
+        error_type: str,
+        reason_type: str,
+        max_attempts: int,
+        base_delay_seconds: int,
+        max_delay_seconds: int,
+    ) -> RetryDisposition:
+        return self._write(
+            "schedule_retry",
+            lambda conn: self._schedule_retry(
+                conn,
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                now=now,
+                error_type=error_type,
+                reason_type=reason_type,
+                max_attempts=max_attempts,
+                base_delay_seconds=base_delay_seconds,
+                max_delay_seconds=max_delay_seconds,
+            ),
+        )
+
+    def requeue_expired_leases(
+        self,
+        *,
+        now: datetime,
+        batch_size: int,
+        max_attempts: int,
+        base_delay_seconds: int,
+        max_delay_seconds: int,
+    ) -> LeaseReaperResult:
+        return self._write(
+            "requeue_expired_leases",
+            lambda conn: self._requeue_expired_leases(
+                conn,
+                now=now,
+                batch_size=batch_size,
+                max_attempts=max_attempts,
+                base_delay_seconds=base_delay_seconds,
+                max_delay_seconds=max_delay_seconds,
+            ),
+        )
+
+    def delivery_status_counts(self) -> dict[str, int]:
+        return self._read("delivery_status_counts", self._delivery_status_counts)
+
+    def delivery_snapshot(self) -> dict[str, Any]:
+        return self._read("delivery_snapshot", self._delivery_snapshot)
+
+    # ------------------------------------------------------------------
+    # System state
+    # ------------------------------------------------------------------
+
     def set_system_state(self, key: str, value: str) -> None:
         self._write("set_system_state", lambda conn: self._set_system_state(conn, key, value))
 
@@ -306,9 +466,11 @@ class Ledger:
                 attachment_metadata_json,
                 received_at,
                 status,
+                delivery_status,
+                delivery_attempts,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 0, ?)
             """,
             (
                 capture_id,
@@ -321,6 +483,7 @@ class Ledger:
                 _json_dumps(attachment_metadata or []),
                 _iso(received_at),
                 RECEIVED,
+                PENDING_FORWARD,
                 now,
             ),
         )
@@ -362,9 +525,11 @@ class Ledger:
                 has_attachments,
                 received_at,
                 status,
+                delivery_status,
+                delivery_attempts,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, 1, ?, 0, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, 0, ?, ?, ?, 0, ?)
             """,
             (
                 capture_id,
@@ -376,6 +541,7 @@ class Ledger:
                 _json_dumps(sensitivity_flags),
                 _iso(received_at),
                 REJECTED_SENSITIVE,
+                NOT_APPLICABLE,
                 now,
             ),
         )
@@ -524,6 +690,349 @@ class Ledger:
             changed=True,
         )
 
+    # ------------------------------------------------------------------
+    # Private delivery write implementations
+    # ------------------------------------------------------------------
+
+    def _claim_due_deliveries(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        now: datetime,
+        lease_until: datetime,
+        batch_size: int,
+    ) -> list[CaptureRecord]:
+        now_iso = _iso(now)
+        lease_iso = _iso(lease_until)
+        rows = conn.execute(
+            """
+            SELECT * FROM captures
+            WHERE
+                delivery_status = 'PENDING_FORWARD'
+                OR (delivery_status = 'RETRY_WAIT' AND next_attempt_at <= ?)
+            ORDER BY id
+            LIMIT ?
+            """,
+            (now_iso, batch_size),
+        ).fetchall()
+
+        claimed = []
+        for row in rows:
+            capture_id = row["capture_id"]
+            new_attempts = row["delivery_attempts"] + 1
+            conn.execute(
+                """
+                UPDATE captures
+                SET delivery_status = ?, delivery_attempts = ?, processing_lease_until = ?,
+                    next_attempt_at = NULL, last_error = NULL, updated_at = ?
+                WHERE capture_id = ?
+                """,
+                (FORWARDING, new_attempts, lease_iso, _iso(_now()), capture_id),
+            )
+            self._append_event(
+                conn,
+                capture_id,
+                "DELIVERY_ATTEMPT_CLAIMED",
+                {"delivery_attempt": new_attempts, "lease_until": lease_iso},
+            )
+            claimed.append(_record_from_row(self._get_by_capture_id(conn, capture_id)))
+        return claimed
+
+    def _mark_forwarded(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        lease_until: datetime,
+    ) -> bool:
+        lease_iso = _iso(lease_until)
+        row = self._get_by_capture_id(conn, capture_id)
+        if row["delivery_status"] != FORWARDING or row["delivery_attempts"] != delivery_attempt:
+            return False
+        conn.execute(
+            """
+            UPDATE captures
+            SET delivery_status = ?, processing_lease_until = ?, next_attempt_at = NULL,
+                last_error = NULL, updated_at = ?
+            WHERE capture_id = ?
+            """,
+            (DELIVERY_FORWARDED, lease_iso, _iso(_now()), capture_id),
+        )
+        self._append_event(
+            conn,
+            capture_id,
+            "CAPTURE_FORWARDED",
+            {"delivery_attempt": delivery_attempt, "lease_until": lease_iso},
+        )
+        return True
+
+    def _mark_classifying_delivery(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        lease_until: datetime,
+    ) -> bool:
+        lease_iso = _iso(lease_until)
+        row = self._get_by_capture_id(conn, capture_id)
+        if row["delivery_attempts"] != delivery_attempt:
+            return False
+        current_ds = row["delivery_status"]
+        if current_ds not in (DELIVERY_FORWARDED, DELIVERY_CLASSIFYING):
+            return False
+        is_renewal = current_ds == DELIVERY_CLASSIFYING
+        conn.execute(
+            """
+            UPDATE captures
+            SET delivery_status = ?, processing_lease_until = ?, updated_at = ?
+            WHERE capture_id = ?
+            """,
+            (DELIVERY_CLASSIFYING, lease_iso, _iso(_now()), capture_id),
+        )
+        event = "PROCESSING_LEASE_RENEWED" if is_renewal else "CAPTURE_CLASSIFYING"
+        self._append_event(
+            conn,
+            capture_id,
+            event,
+            {"delivery_attempt": delivery_attempt, "lease_until": lease_iso},
+        )
+        return True
+
+    def _mark_delivery_terminal(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        note_status: str,
+        derived_note_path: str,
+        git_commit_hash: str | None,
+        event_type: str,
+        extra_payload: dict[str, Any] | None = None,
+    ) -> bool:
+        row = self._get_by_capture_id(conn, capture_id)
+        if row["delivery_attempts"] != delivery_attempt:
+            return False
+        current_ds = row["delivery_status"]
+        # Idempotent: same terminal callback
+        if row["status"] == note_status and current_ds == COMPLETE:
+            return True
+        # Reject conflicting terminal
+        if current_ds == COMPLETE:
+            return False
+        if current_ds not in (DELIVERY_FORWARDED, DELIVERY_CLASSIFYING):
+            return False
+        now = _iso(_now())
+        conn.execute(
+            """
+            UPDATE captures
+            SET status = ?, delivery_status = ?, derived_note_path = ?,
+                processing_lease_until = NULL, next_attempt_at = NULL, last_error = NULL,
+                updated_at = ?
+            WHERE capture_id = ?
+            """,
+            (note_status, COMPLETE, derived_note_path, now, capture_id),
+        )
+        payload: dict[str, Any] = {
+            "delivery_attempt": delivery_attempt,
+            "derived_note_path": derived_note_path,
+        }
+        if git_commit_hash:
+            payload["git_commit_hash"] = git_commit_hash
+        if extra_payload:
+            payload.update(extra_payload)
+        self._append_event(conn, capture_id, event_type, payload)
+        return True
+
+    def _schedule_retry(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        now: datetime,
+        error_type: str,
+        reason_type: str,
+        max_attempts: int,
+        base_delay_seconds: int,
+        max_delay_seconds: int,
+    ) -> RetryDisposition:
+        row = self._get_by_capture_id(conn, capture_id)
+        current_ds = row["delivery_status"]
+        if current_ds not in (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING):
+            raise ValueError(f"cannot schedule retry from delivery_status={current_ds!r}")
+        if row["delivery_attempts"] != delivery_attempt:
+            raise ValueError(
+                f"stale delivery_attempt: got {delivery_attempt}, "
+                f"current={row['delivery_attempts']}"
+            )
+
+        now_ts = _iso(now)
+        safe_reason = f"{reason_type}:{error_type}"
+
+        if delivery_attempt >= max_attempts:
+            # Terminal failure
+            conn.execute(
+                """
+                UPDATE captures
+                SET status = ?, delivery_status = ?, processing_lease_until = NULL,
+                    next_attempt_at = NULL, last_error = ?, updated_at = ?
+                WHERE capture_id = ?
+                """,
+                (FAILED, DELIVERY_FAILED, safe_reason, now_ts, capture_id),
+            )
+            self._append_event(
+                conn,
+                capture_id,
+                "RETRY_LIMIT_EXCEEDED",
+                {
+                    "delivery_attempt": delivery_attempt,
+                    "delivery_status": DELIVERY_FAILED,
+                    "error_type": error_type,
+                    "reason_type": reason_type,
+                },
+            )
+            return RetryDisposition(
+                capture_id=capture_id,
+                delivery_status=DELIVERY_FAILED,
+                delivery_attempts=delivery_attempt,
+                next_attempt_at=None,
+                retry_scheduled=False,
+                failed_terminally=True,
+            )
+
+        delay = _calculate_retry_delay(
+            delivery_attempts=delivery_attempt,
+            base_delay_seconds=base_delay_seconds,
+            max_delay_seconds=max_delay_seconds,
+        )
+        from datetime import timedelta
+        next_attempt = now + timedelta(seconds=delay)
+        next_iso = _iso(next_attempt)
+        conn.execute(
+            """
+            UPDATE captures
+            SET delivery_status = ?, processing_lease_until = NULL, next_attempt_at = ?,
+                last_error = ?, updated_at = ?
+            WHERE capture_id = ?
+            """,
+            (RETRY_WAIT, next_iso, safe_reason, now_ts, capture_id),
+        )
+        self._append_event(
+            conn,
+            capture_id,
+            "DELIVERY_RETRY_SCHEDULED",
+            {
+                "delivery_attempt": delivery_attempt,
+                "delivery_status": RETRY_WAIT,
+                "next_attempt_at": next_iso,
+                "error_type": error_type,
+                "reason_type": reason_type,
+            },
+        )
+        return RetryDisposition(
+            capture_id=capture_id,
+            delivery_status=RETRY_WAIT,
+            delivery_attempts=delivery_attempt,
+            next_attempt_at=next_attempt,
+            retry_scheduled=True,
+            failed_terminally=False,
+        )
+
+    def _requeue_expired_leases(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        now: datetime,
+        batch_size: int,
+        max_attempts: int,
+        base_delay_seconds: int,
+        max_delay_seconds: int,
+    ) -> LeaseReaperResult:
+        now_iso = _iso(now)
+        rows = conn.execute(
+            """
+            SELECT * FROM captures
+            WHERE delivery_status IN (?, ?, ?)
+              AND processing_lease_until <= ?
+            ORDER BY id
+            LIMIT ?
+            """,
+            (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING, now_iso, batch_size),
+        ).fetchall()
+
+        requeued = 0
+        terminal_failures = 0
+        failed_ids: list[str] = []
+
+        for row in rows:
+            capture_id = row["capture_id"]
+            attempts = row["delivery_attempts"]
+
+            if attempts >= max_attempts:
+                # Exceeded cap — mark terminal
+                conn.execute(
+                    """
+                    UPDATE captures
+                    SET status = ?, delivery_status = ?, processing_lease_until = NULL,
+                        next_attempt_at = NULL, updated_at = ?
+                    WHERE capture_id = ?
+                    """,
+                    (FAILED, DELIVERY_FAILED, _iso(_now()), capture_id),
+                )
+                self._append_event(
+                    conn,
+                    capture_id,
+                    "RETRY_LIMIT_EXCEEDED",
+                    {
+                        "delivery_attempt": attempts,
+                        "delivery_status": DELIVERY_FAILED,
+                        "reason_type": "expired_lease",
+                    },
+                )
+                terminal_failures += 1
+                failed_ids.append(capture_id)
+            else:
+                delay = _calculate_retry_delay(
+                    delivery_attempts=attempts,
+                    base_delay_seconds=base_delay_seconds,
+                    max_delay_seconds=max_delay_seconds,
+                )
+                from datetime import timedelta
+                next_attempt = now + timedelta(seconds=delay)
+                conn.execute(
+                    """
+                    UPDATE captures
+                    SET delivery_status = ?, processing_lease_until = NULL,
+                        next_attempt_at = ?, updated_at = ?
+                    WHERE capture_id = ?
+                    """,
+                    (RETRY_WAIT, _iso(next_attempt), _iso(_now()), capture_id),
+                )
+                self._append_event(
+                    conn,
+                    capture_id,
+                    "REQUEUED_STALE_LEASE",
+                    {
+                        "delivery_attempt": attempts,
+                        "delivery_status": RETRY_WAIT,
+                        "next_attempt_at": _iso(next_attempt),
+                    },
+                )
+                requeued += 1
+
+        return LeaseReaperResult(
+            requeued=requeued,
+            terminal_failures=terminal_failures,
+            failed_capture_ids=failed_ids,
+        )
+
+    # ------------------------------------------------------------------
+    # Private system state implementations
+    # ------------------------------------------------------------------
+
     def _set_system_state(self, conn: sqlite3.Connection, key: str, value: str) -> None:
         conn.execute(
             """
@@ -621,6 +1130,49 @@ class Ledger:
         ).fetchall()
         return {row["status"]: row["count"] for row in rows}
 
+    def _delivery_status_counts(self, conn: sqlite3.Connection) -> dict[str, int]:
+        rows = conn.execute(
+            "SELECT delivery_status, COUNT(*) AS count FROM captures GROUP BY delivery_status"
+        ).fetchall()
+        return {row["delivery_status"]: row["count"] for row in rows}
+
+    def _delivery_snapshot(self, conn: sqlite3.Connection) -> dict[str, Any]:
+        counts = {row["delivery_status"]: row["count"] for row in conn.execute(
+            "SELECT delivery_status, COUNT(*) AS count FROM captures GROUP BY delivery_status"
+        ).fetchall()}
+        total_attempts = conn.execute(
+            "SELECT COALESCE(SUM(delivery_attempts), 0) AS total FROM captures"
+        ).fetchone()["total"]
+        next_row = conn.execute(
+            """
+            SELECT MIN(next_attempt_at) AS next
+            FROM captures
+            WHERE delivery_status = ? AND next_attempt_at IS NOT NULL
+            """,
+            (RETRY_WAIT,),
+        ).fetchone()
+        expired_count = conn.execute(
+            """
+            SELECT COUNT(*) AS count FROM captures
+            WHERE delivery_status IN (?, ?, ?)
+              AND processing_lease_until < datetime('now')
+            """,
+            (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING),
+        ).fetchone()["count"]
+        return {
+            "pending_forward": counts.get(PENDING_FORWARD, 0),
+            "forwarding": counts.get(FORWARDING, 0),
+            "forwarded": counts.get(DELIVERY_FORWARDED, 0),
+            "classifying": counts.get(DELIVERY_CLASSIFYING, 0),
+            "retry_wait": counts.get(RETRY_WAIT, 0),
+            "complete": counts.get(COMPLETE, 0),
+            "failed": counts.get(DELIVERY_FAILED, 0),
+            "not_applicable": counts.get(NOT_APPLICABLE, 0),
+            "total_delivery_attempts": total_attempts,
+            "next_attempt_at": next_row["next"] if next_row else None,
+            "expired_leases": expired_count,
+        }
+
     def _total_captures(self, conn: sqlite3.Connection) -> int:
         row = conn.execute("SELECT COUNT(*) AS count FROM captures").fetchone()
         return int(row["count"])
@@ -704,6 +1256,9 @@ class Ledger:
 
 
 def _record_from_row(row: sqlite3.Row) -> CaptureRecord:
+    def _parse_dt(value: str | None) -> datetime | None:
+        return datetime.fromisoformat(value) if value else None
+
     return CaptureRecord(
         capture_id=row["capture_id"],
         discord_message_id=row["discord_message_id"],
@@ -711,6 +1266,10 @@ def _record_from_row(row: sqlite3.Row) -> CaptureRecord:
         discord_guild_id=row["discord_guild_id"],
         discord_author_id=row["discord_author_id"],
         status=row["status"],
+        delivery_status=row["delivery_status"],
+        delivery_attempts=row["delivery_attempts"],
+        processing_lease_until=_parse_dt(row["processing_lease_until"]),
+        next_attempt_at=_parse_dt(row["next_attempt_at"]),
         raw_text=row["raw_text"],
         redacted_text=row["redacted_text"],
         is_sensitive=bool(row["is_sensitive"]),
@@ -721,6 +1280,16 @@ def _record_from_row(row: sqlite3.Row) -> CaptureRecord:
         derived_note_path=row["derived_note_path"],
         last_error=row["last_error"],
     )
+
+
+def _calculate_retry_delay(
+    *,
+    delivery_attempts: int,
+    base_delay_seconds: int,
+    max_delay_seconds: int,
+) -> int:
+    delay = base_delay_seconds * (2 ** max(delivery_attempts - 1, 0))
+    return min(delay, max_delay_seconds)
 
 
 def _json_dumps(value: Any) -> str:

@@ -76,6 +76,25 @@ _MIGRATIONS: list[Migration] = [
             "CREATE INDEX IF NOT EXISTS idx_capture_events_capture_id ON capture_events(capture_id)",
         ),
     ),
+    Migration(
+        version=2,
+        name="delivery_leases",
+        statements=(
+            "ALTER TABLE captures ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'PENDING_FORWARD'",
+            "ALTER TABLE captures ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE captures ADD COLUMN processing_lease_until TEXT",
+            "ALTER TABLE captures ADD COLUMN next_attempt_at TEXT",
+            # Normalize existing rows by lifecycle status
+            "UPDATE captures SET delivery_status = 'NOT_APPLICABLE' WHERE status = 'REJECTED_SENSITIVE'",
+            "UPDATE captures SET delivery_status = 'COMPLETE' WHERE status IN ('FILED', 'INBOX')",
+            "UPDATE captures SET delivery_status = 'FAILED' WHERE status = 'FAILED'",
+            # Reset in-flight legacy statuses to retryable RECEIVED/PENDING_FORWARD
+            "UPDATE captures SET status = 'RECEIVED', delivery_status = 'PENDING_FORWARD' WHERE status IN ('CLASSIFYING', 'FORWARDED')",
+            # Indexes for dispatcher and reaper hot paths
+            "CREATE INDEX IF NOT EXISTS idx_captures_delivery_due ON captures(delivery_status, next_attempt_at)",
+            "CREATE INDEX IF NOT EXISTS idx_captures_processing_lease ON captures(delivery_status, processing_lease_until)",
+        ),
+    ),
 ]
 
 

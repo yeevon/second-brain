@@ -1,10 +1,19 @@
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
+from secondbrain.capture_models import (
+    DELIVERY_FAILED,
+    DELIVERY_FORWARDED,
+    FORWARDING,
+    PENDING_FORWARD,
+    RETRY_WAIT,
+)
 from secondbrain.capture_service import CaptureService
-from secondbrain.ledger import FILED, RECEIVED, Ledger
+from secondbrain.delivery import _run_one_dispatch_pass, _run_one_reaper_pass
+from secondbrain.ledger import FAILED, FILED, RECEIVED, Ledger
 from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID
 from secondbrain.vault_writer import VaultWriter
 from secondbrain.worker import CaptureQueue, process_capture_once
@@ -437,6 +446,252 @@ async def test_skipped_gateway_event_is_recovered_by_periodic_reconciliation(tmp
     assert ledger.get_system_state("periodic_reconcile_recovered_total") == "1"
     assert ledger.get_system_state("periodic_reconcile_duplicates_total") == "1"
     assert queue.qsize() == 1  # only the recovered capture was re-enqueued
+
+
+# ===========================================================================
+# SB-107 — Delivery lease integration tests
+# ===========================================================================
+
+def make_delivery_settings(**overrides):
+    data = dict(
+        delivery_max_attempts=5,
+        delivery_retry_base_delay_seconds=10,
+        delivery_retry_max_delay_seconds=300,
+        delivery_forward_lease_seconds=60,
+        delivery_processing_lease_seconds=300,
+        delivery_dispatch_interval_seconds=2,
+        delivery_dispatch_batch_size=25,
+        delivery_reaper_interval_seconds=30,
+        delivery_reaper_batch_size=100,
+        discord_capture_channel_id=200,
+    )
+    data.update(overrides)
+    return SimpleNamespace(**data)
+
+
+class AlwaysAcceptClient:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def forward_capture(self, *, capture_id: str, delivery_attempt: int) -> None:
+        self.calls.append({"capture_id": capture_id, "delivery_attempt": delivery_attempt})
+
+
+class FakeReceiptClient:
+    def __init__(self):
+        self.sent: list[str] = []
+
+    def get_channel(self, channel_id):
+        return self
+
+    async def fetch_channel(self, channel_id):
+        return self
+
+    async def send(self, content):
+        self.sent.append(content)
+
+
+@pytest.mark.asyncio
+async def test_downstream_crash_after_webhook_acceptance_becomes_retryable(tmp_path):
+    """Primary SB-107 acceptance test: FORWARDED → expired lease → RETRY_WAIT → reclaimable."""
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    settings = make_delivery_settings()
+    now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
+    short_lease = now + timedelta(seconds=30)
+
+    ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="important note",
+    )
+    capture_id = "SB-20260609-0001"
+
+    # Claim delivery attempt 1
+    claimed = ledger.claim_due_deliveries(now=now, lease_until=short_lease, batch_size=10)
+    assert len(claimed) == 1
+    assert claimed[0].delivery_attempts == 1
+
+    # Fake webhook accepts request → mark FORWARDED with processing lease
+    ledger.mark_forwarded(
+        capture_id=capture_id, delivery_attempt=1, lease_until=short_lease
+    )
+    assert ledger.get_capture(capture_id).delivery_status == DELIVERY_FORWARDED
+
+    # Simulate downstream crash: no CLASSIFYING, no FILED callback arrives
+    # Advance clock beyond lease
+    expired = now + timedelta(seconds=120)
+
+    # Run stale-lease reaper
+    receipt_client = FakeReceiptClient()
+    result = ledger.requeue_expired_leases(
+        now=expired,
+        batch_size=10,
+        max_attempts=settings.delivery_max_attempts,
+        base_delay_seconds=settings.delivery_retry_base_delay_seconds,
+        max_delay_seconds=settings.delivery_retry_max_delay_seconds,
+    )
+    assert result.requeued == 1
+    assert result.terminal_failures == 0
+
+    capture = ledger.get_capture(capture_id)
+    assert capture.delivery_status == RETRY_WAIT
+    assert capture.next_attempt_at is not None
+    assert capture.processing_lease_until is None
+    assert capture.status == RECEIVED  # note lifecycle unchanged
+    assert capture.raw_text == "important note"  # raw text immutable
+
+    # Verify REQUEUED_STALE_LEASE event was appended
+    events = ledger._runtime.read(
+        lambda conn: [
+            row["event_type"]
+            for row in conn.execute(
+                "SELECT event_type FROM capture_events WHERE capture_id = ? ORDER BY id",
+                (capture_id,),
+            ).fetchall()
+        ]
+    )
+    assert "REQUEUED_STALE_LEASE" in events
+
+    # Advance clock past next_attempt_at
+    after_retry = capture.next_attempt_at + timedelta(seconds=1)
+
+    # Dispatcher claims delivery attempt 2
+    reclaimed = ledger.claim_due_deliveries(now=after_retry, lease_until=after_retry, batch_size=10)
+    assert len(reclaimed) == 1
+    assert reclaimed[0].delivery_attempts == 2
+    assert reclaimed[0].delivery_status == FORWARDING
+
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_repeated_downstream_crashes_fail_visibly_after_retry_cap(tmp_path):
+    """After max_attempts crashes, capture becomes terminally FAILED with RETRY_LIMIT_EXCEEDED."""
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    settings = make_delivery_settings(delivery_max_attempts=3)
+    now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
+    capture_id = "SB-20260609-0001"
+
+    ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="important note",
+    )
+
+    # Cycle: claim → forward → expire lease → requeue — until cap exceeded
+    t = now
+    for cycle in range(settings.delivery_max_attempts):
+        lease = t + timedelta(seconds=30)
+        claimed = ledger.claim_due_deliveries(now=t, lease_until=lease, batch_size=10)
+        assert claimed[0].delivery_attempts == cycle + 1
+        ledger.mark_forwarded(capture_id=capture_id, delivery_attempt=cycle + 1, lease_until=lease)
+        expired = t + timedelta(seconds=120)
+        result = ledger.requeue_expired_leases(
+            now=expired,
+            batch_size=10,
+            max_attempts=settings.delivery_max_attempts,
+            base_delay_seconds=settings.delivery_retry_base_delay_seconds,
+            max_delay_seconds=settings.delivery_retry_max_delay_seconds,
+        )
+        t = expired + timedelta(seconds=300)
+        if result.terminal_failures > 0:
+            break
+
+    capture = ledger.get_capture(capture_id)
+    assert capture.status == FAILED
+    assert capture.delivery_status == DELIVERY_FAILED
+    assert capture.processing_lease_until is None
+    assert capture.next_attempt_at is None
+    assert capture.raw_text == "important note"  # raw text still intact
+
+    events = ledger._runtime.read(
+        lambda conn: [
+            row["event_type"]
+            for row in conn.execute(
+                "SELECT event_type FROM capture_events WHERE capture_id = ? ORDER BY id",
+                (capture_id,),
+            ).fetchall()
+        ]
+    )
+    assert "RETRY_LIMIT_EXCEEDED" in events
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_late_callback_from_old_attempt_cannot_override_new_attempt(tmp_path):
+    """Stale attempt callbacks are ignored; current attempt remains authoritative."""
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
+    capture_id = "SB-20260609-0001"
+
+    ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="note",
+    )
+
+    # Attempt 1: claim → forward → lease expires → requeue
+    lease1 = now + timedelta(seconds=30)
+    ledger.claim_due_deliveries(now=now, lease_until=lease1, batch_size=10)
+    ledger.mark_forwarded(capture_id=capture_id, delivery_attempt=1, lease_until=lease1)
+    expired = now + timedelta(seconds=120)
+    ledger.requeue_expired_leases(
+        now=expired, batch_size=10, max_attempts=5,
+        base_delay_seconds=10, max_delay_seconds=300,
+    )
+
+    # Attempt 2: claim
+    after_retry = expired + timedelta(seconds=300)
+    ledger.claim_due_deliveries(now=after_retry, lease_until=after_retry, batch_size=10)
+    assert ledger.get_capture(capture_id).delivery_attempts == 2
+    assert ledger.get_capture(capture_id).delivery_status == FORWARDING
+
+    # Late CLASSIFYING callback from attempt 1 must be ignored
+    stale_ok = ledger.mark_classifying_delivery(
+        capture_id=capture_id, delivery_attempt=1, lease_until=after_retry
+    )
+    assert stale_ok is False
+
+    # Attempt 2 remains authoritative
+    assert ledger.get_capture(capture_id).delivery_status == FORWARDING
+    assert ledger.get_capture(capture_id).delivery_attempts == 2
+
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_saved_receipt_commit_precedes_delivery_claim(tmp_path):
+    """SQLite commit (RECEIVED + PENDING_FORWARD) is visible before delivery begins."""
+    db_path = tmp_path / "ledger.sqlite3"
+    ledger = Ledger(db_path)
+
+    result = ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="note",
+    )
+    capture_id = result.capture.capture_id
+
+    # Separate connection verifies state before delivery claiming
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT status, delivery_status FROM captures WHERE capture_id = ?", (capture_id,)
+    ).fetchone()
+    conn.close()
+
+    assert row["status"] == RECEIVED
+    assert row["delivery_status"] == PENDING_FORWARD
+
+    ledger.close()
 
 
 class FakeGeminiModels:

@@ -176,3 +176,85 @@ def test_periodic_reconcile_settings_reject_non_numeric_values_cleanly(monkeypat
 
     with pytest.raises(RuntimeError, match="PERIODIC_RECONCILE_INTERVAL_SECONDS"):
         Settings()
+
+
+def test_delivery_settings_use_safe_defaults(monkeypatch):
+    _set_required_env(monkeypatch)
+    for key in (
+        "DELIVERY_MAX_ATTEMPTS",
+        "DELIVERY_RETRY_BASE_DELAY_SECONDS",
+        "DELIVERY_RETRY_MAX_DELAY_SECONDS",
+        "DELIVERY_FORWARD_LEASE_SECONDS",
+        "DELIVERY_PROCESSING_LEASE_SECONDS",
+        "DELIVERY_DISPATCH_INTERVAL_SECONDS",
+        "DELIVERY_DISPATCH_BATCH_SIZE",
+        "DELIVERY_REAPER_INTERVAL_SECONDS",
+        "DELIVERY_REAPER_BATCH_SIZE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    s = Settings()
+    assert s.delivery_max_attempts == 5
+    assert s.delivery_retry_base_delay_seconds == 10
+    assert s.delivery_retry_max_delay_seconds == 300
+    assert s.delivery_forward_lease_seconds == 60
+    assert s.delivery_processing_lease_seconds == 300
+    assert s.delivery_dispatch_interval_seconds == 2
+    assert s.delivery_dispatch_batch_size == 25
+    assert s.delivery_reaper_interval_seconds == 30
+    assert s.delivery_reaper_batch_size == 100
+
+
+def test_delivery_settings_accept_valid_overrides(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("DELIVERY_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("DELIVERY_RETRY_BASE_DELAY_SECONDS", "5")
+    monkeypatch.setenv("DELIVERY_RETRY_MAX_DELAY_SECONDS", "120")
+    monkeypatch.setenv("DELIVERY_FORWARD_LEASE_SECONDS", "30")
+    monkeypatch.setenv("DELIVERY_PROCESSING_LEASE_SECONDS", "120")
+    monkeypatch.setenv("DELIVERY_DISPATCH_INTERVAL_SECONDS", "5")
+    monkeypatch.setenv("DELIVERY_DISPATCH_BATCH_SIZE", "10")
+    monkeypatch.setenv("DELIVERY_REAPER_INTERVAL_SECONDS", "60")
+    monkeypatch.setenv("DELIVERY_REAPER_BATCH_SIZE", "50")
+
+    s = Settings()
+    assert s.delivery_max_attempts == 3
+    assert s.delivery_retry_max_delay_seconds == 120
+    assert s.delivery_forward_lease_seconds == 30
+
+
+def test_delivery_max_attempts_rejects_zero(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("DELIVERY_MAX_ATTEMPTS", "0")
+    with pytest.raises(RuntimeError, match="DELIVERY_MAX_ATTEMPTS"):
+        Settings()
+
+
+def test_delivery_retry_max_delay_rejects_less_than_base(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("DELIVERY_RETRY_BASE_DELAY_SECONDS", "60")
+    monkeypatch.setenv("DELIVERY_RETRY_MAX_DELAY_SECONDS", "30")
+    with pytest.raises(RuntimeError, match="DELIVERY_RETRY_MAX_DELAY_SECONDS"):
+        Settings()
+
+
+def test_delivery_processing_lease_rejects_less_than_forward_lease(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("DELIVERY_FORWARD_LEASE_SECONDS", "120")
+    monkeypatch.setenv("DELIVERY_PROCESSING_LEASE_SECONDS", "60")
+    with pytest.raises(RuntimeError, match="DELIVERY_PROCESSING_LEASE_SECONDS"):
+        Settings()
+
+
+def test_delivery_dispatch_interval_rejects_zero(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("DELIVERY_DISPATCH_INTERVAL_SECONDS", "0")
+    with pytest.raises(RuntimeError, match="DELIVERY_DISPATCH_INTERVAL_SECONDS"):
+        Settings()
+
+
+def test_delivery_settings_reject_non_numeric_values_cleanly(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("DELIVERY_MAX_ATTEMPTS", "not-a-number")
+    with pytest.raises(RuntimeError, match="DELIVERY_MAX_ATTEMPTS"):
+        Settings()

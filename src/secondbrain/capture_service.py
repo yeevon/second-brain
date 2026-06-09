@@ -381,6 +381,9 @@ class CaptureService:
     def periodic_reconcile_snapshot(self) -> dict[str, str | None]:
         return self._ledger.periodic_reconcile_snapshot()
 
+    def delivery_snapshot(self) -> dict:
+        return self._ledger.delivery_snapshot()
+
     def status_snapshot(self) -> CaptureStatusSnapshot:
         counts = self._ledger.status_counts()
         return CaptureStatusSnapshot(
