@@ -121,6 +121,32 @@ async def reconcile_discord_history(
     )
 
 
+def _record_periodic_failure_best_effort(*, ledger, exc: Exception) -> None:
+    operations = (
+        (
+            "periodic_reconcile_failures_total",
+            lambda: ledger.increment_system_counter("periodic_reconcile_failures_total"),
+        ),
+        (
+            "periodic_reconcile_last_warning",
+            lambda: ledger.set_system_state("periodic_reconcile_last_warning", "scan_failed"),
+        ),
+        (
+            "periodic_reconcile_last_error_type",
+            lambda: ledger.set_system_state("periodic_reconcile_last_error_type", type(exc).__name__),
+        ),
+    )
+    for key, operation in operations:
+        try:
+            operation()
+        except Exception as persist_exc:
+            log_metadata(
+                "discord_reconcile_failure_state_write_failed",
+                metric_key=key,
+                error_type=type(persist_exc).__name__,
+            )
+
+
 async def run_periodic_reconciliation(
     *,
     client,
@@ -147,6 +173,7 @@ async def run_periodic_reconciliation(
                     mode="periodic",
                     error_type=type(exc).__name__,
                 )
+                _record_periodic_failure_best_effort(ledger=ledger, exc=exc)
                 await _send_reconcile_warning(client, settings, _RECONCILE_FAILURE_WARNING)
 
 
@@ -176,9 +203,7 @@ async def _run_one_periodic_pass(
             mode="periodic",
             error_type=type(exc).__name__,
         )
-        ledger.increment_system_counter("periodic_reconcile_failures_total")
-        ledger.set_system_state("periodic_reconcile_last_warning", "scan_failed")
-        ledger.set_system_state("periodic_reconcile_last_error_type", type(exc).__name__)
+        _record_periodic_failure_best_effort(ledger=ledger, exc=exc)
         await _send_reconcile_warning(client, settings, _RECONCILE_FAILURE_WARNING)
         return
 

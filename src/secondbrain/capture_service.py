@@ -378,6 +378,9 @@ class CaptureService:
     def last_reconciled_message_id(self) -> str | None:
         return self._ledger.get_system_state(LAST_RECONCILED_MESSAGE_ID)
 
+    def periodic_reconcile_snapshot(self) -> dict[str, str | None]:
+        return self._ledger.periodic_reconcile_snapshot()
+
     def status_snapshot(self) -> CaptureStatusSnapshot:
         counts = self._ledger.status_counts()
         return CaptureStatusSnapshot(
@@ -619,9 +622,6 @@ class CaptureService:
         if "last_error" in replay_payload and capture.last_error != replay_payload["last_error"]:
             return False
         return True
-
-    def periodic_reconcile_snapshot(self) -> dict:
-        return self._ledger.periodic_reconcile_snapshot()
 
     @staticmethod
     def _log_duplicate(capture: CaptureRecord) -> None:

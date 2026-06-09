@@ -10,6 +10,7 @@ from secondbrain.capture_service import CaptureService
 from secondbrain.ledger import Ledger
 from secondbrain.reconcile import (
     LAST_RECONCILED_MESSAGE_ID,
+    _record_periodic_failure_best_effort,
     _run_one_periodic_pass,
     run_periodic_reconciliation,
 )
@@ -648,6 +649,85 @@ async def test_periodic_loop_continues_after_unexpected_pass_failure(tmp_path, m
     )
 
     await asyncio.wait_for(success.wait(), timeout=2.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(passes) >= 2
+
+
+@pytest.mark.asyncio
+async def test_outer_loop_failure_persists_safe_failure_state(tmp_path, monkeypatch):
+    """An exception escaping _run_one_periodic_pass must update the persisted failure counters."""
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    passes = []
+
+    async def fail_once(**kwargs):
+        passes.append(1)
+        if len(passes) == 1:
+            raise RuntimeError("metric write exploded")
+
+    monkeypatch.setattr("secondbrain.reconcile._run_one_periodic_pass", fail_once)
+
+    settings = make_settings(periodic_reconcile_interval_seconds=0)
+    task = asyncio.create_task(
+        run_periodic_reconciliation(
+            client=FakeClientWithChannel(FakeFullChannel([])),
+            settings=settings,
+            ledger=ledger,
+            handle_capture=lambda msg: None,
+        )
+    )
+
+    for _ in range(40):
+        await asyncio.sleep(0)
+        if len(passes) >= 2:
+            break
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert ledger.get_system_state("periodic_reconcile_last_warning") == "scan_failed"
+    assert ledger.get_system_state("periodic_reconcile_last_error_type") == "RuntimeError"
+    assert int(ledger.get_system_state("periodic_reconcile_failures_total") or 0) >= 1
+
+
+@pytest.mark.asyncio
+async def test_failure_state_write_failure_does_not_kill_periodic_loop(tmp_path, monkeypatch):
+    """A failure inside _record_periodic_failure_best_effort must not propagate to the loop."""
+    successes = asyncio.Event()
+    passes = []
+
+    async def fail_first_pass(**kwargs):
+        passes.append(1)
+        if len(passes) == 1:
+            raise RuntimeError("inner pass failed")
+        successes.set()
+
+    monkeypatch.setattr("secondbrain.reconcile._run_one_periodic_pass", fail_first_pass)
+
+    class BrokenLedger:
+        def increment_system_counter(self, *a, **kw):
+            raise OSError("disk full — metric write failed")
+
+        def set_system_state(self, *a, **kw):
+            raise OSError("disk full — state write failed")
+
+    # Verify helper does not raise even when every write fails
+    _record_periodic_failure_best_effort(ledger=BrokenLedger(), exc=RuntimeError("boom"))
+
+    settings = make_settings(periodic_reconcile_interval_seconds=0)
+    task = asyncio.create_task(
+        run_periodic_reconciliation(
+            client=FakeClientWithChannel(FakeFullChannel([])),
+            settings=settings,
+            ledger=Ledger(tmp_path / "ledger.sqlite3"),
+            handle_capture=lambda msg: None,
+        )
+    )
+
+    await asyncio.wait_for(successes.wait(), timeout=2.0)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task

@@ -342,7 +342,7 @@ def format_status_report(
             f"periodic reconciliation last success: {p.get('periodic_reconcile_last_success_at') or 'never'}",
             f"periodic reconciliation last recovered count: {p.get('periodic_reconcile_last_recovered_count') or '0'}",
             f"periodic reconciliation last warning: {p.get('periodic_reconcile_last_warning') or 'none'}",
-        f"periodic reconciliation last error type: {p.get('periodic_reconcile_last_error_type') or 'none'}",
+            f"periodic reconciliation most recent error type: {p.get('periodic_reconcile_last_error_type') or 'none'}",
         ]
     return "\n".join(lines)
 

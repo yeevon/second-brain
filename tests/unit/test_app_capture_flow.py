@@ -10,6 +10,7 @@ from secondbrain.app import (
     main,
     run_discord_listener,
     run_service_runtime,
+    run_status,
     start_local_worker_and_enqueue_recovered,
 )
 from secondbrain.capture_service import CaptureService
@@ -725,7 +726,7 @@ def test_run_status_includes_periodic_reconciliation_metrics(tmp_path):
 
     assert "periodic reconciliation runs:" in report
     assert "periodic reconciliation last warning:" in report
-    assert "periodic reconciliation last error type:" in report
+    assert "periodic reconciliation most recent error type:" in report
     assert "periodic reconciliation interval:" in report
     assert "periodic reconciliation scan limit:" in report
 
@@ -802,3 +803,47 @@ async def test_ensure_periodic_task_does_not_replace_running_task(tmp_path, monk
     first_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first_task
+
+
+def test_run_status_cli_path_prints_periodic_metrics(tmp_path, monkeypatch, capsys):
+    """run_status() opens a real service, prints the full report, and closes cleanly."""
+    settings = make_settings(tmp_path)
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    service = CaptureService(settings=settings, ledger=ledger)
+    closed = []
+    real_close = service.close
+
+    def tracked_close():
+        closed.append(1)
+        real_close()
+
+    service.close = tracked_close
+
+    monkeypatch.setattr("secondbrain.app.Settings", lambda: settings)
+    monkeypatch.setattr("secondbrain.app.CaptureService.open", lambda s: service)
+
+    run_status()
+
+    output = capsys.readouterr().out
+    assert "Second Brain status" in output
+    assert "periodic reconciliation runs:" in output
+    assert "periodic reconciliation last warning:" in output
+    assert "periodic reconciliation most recent error type:" in output
+    assert len(closed) == 1
+
+
+def test_run_status_via_main_cli(tmp_path, monkeypatch, capsys):
+    """main(['status']) executes run_status() end-to-end and exits with code 0."""
+    settings = make_settings(tmp_path)
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    monkeypatch.setattr("secondbrain.app.Settings", lambda: settings)
+    monkeypatch.setattr("secondbrain.app.CaptureService.open", lambda s: service)
+
+    exit_code = main(["status"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Second Brain status" in output
+    assert "periodic reconciliation runs:" in output
