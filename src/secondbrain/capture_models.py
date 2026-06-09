@@ -73,6 +73,8 @@ class CaptureRecord:
     receipt_message_id: str | None
     derived_note_path: str | None
     last_error: str | None
+    delivery_commit_hash: str | None = None
+    delivery_reason_type: str | None = None
 
 
 @dataclass(frozen=True)

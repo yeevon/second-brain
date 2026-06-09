@@ -20,6 +20,10 @@ class CaptureResponse(BaseModel):
     discord_guild_id: str
     discord_author_id: str
     status: str
+    delivery_status: str
+    delivery_attempts: int
+    processing_lease_until: datetime | None
+    next_attempt_at: datetime | None
     raw_text: str | None
     redacted_text: str | None
     is_sensitive: bool
@@ -51,6 +55,42 @@ class MarkInboxRequest(BaseModel):
 
 class MarkFailedRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
+
+
+class AcknowledgeForwardedRequest(BaseModel):
+    delivery_attempt: int = Field(ge=1)
+
+
+class AcknowledgeClassifyingRequest(BaseModel):
+    delivery_attempt: int = Field(ge=1)
+
+
+class RenewLeaseRequest(BaseModel):
+    delivery_attempt: int = Field(ge=1)
+
+
+class AcknowledgeFiledRequest(BaseModel):
+    delivery_attempt: int = Field(ge=1)
+    note_path: str = Field(min_length=1, max_length=1000)
+    git_commit_hash: str | None = Field(default=None, max_length=100)
+
+
+class AcknowledgeInboxRequest(BaseModel):
+    delivery_attempt: int = Field(ge=1)
+    note_path: str = Field(min_length=1, max_length=1000)
+    git_commit_hash: str | None = Field(default=None, max_length=100)
+    reason_type: str = Field(default="", max_length=100)
+
+
+class ScheduleRetryRequest(BaseModel):
+    delivery_attempt: int = Field(ge=1)
+    error_type: str = Field(min_length=1, max_length=200)
+    reason_type: str = Field(default="webhook_failure", max_length=100)
+
+
+class AcknowledgeDeliveryFailedRequest(BaseModel):
+    delivery_attempt: int = Field(ge=1)
+    reason: str = Field(default="", max_length=500)
 
 
 class EditReceiptRequest(BaseModel):

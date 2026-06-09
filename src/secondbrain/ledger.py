@@ -90,6 +90,7 @@ class Ledger:
         has_attachments: bool = False,
         attachment_metadata: list[dict[str, Any]] | None = None,
         received_at: datetime | None = None,
+        initial_delivery_status: str = PENDING_FORWARD,
     ) -> InsertResult:
         received_at = received_at or _now()
         return self._write(
@@ -104,6 +105,7 @@ class Ledger:
                 has_attachments=has_attachments,
                 attachment_metadata=attachment_metadata,
                 received_at=received_at,
+                initial_delivery_status=initial_delivery_status,
             ),
         )
 
@@ -330,6 +332,40 @@ class Ledger:
             ),
         )
 
+    def renew_delivery_lease(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        lease_until: datetime,
+    ) -> bool:
+        return self._write(
+            "renew_delivery_lease",
+            lambda conn: self._renew_delivery_lease(
+                conn,
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                lease_until=lease_until,
+            ),
+        )
+
+    def mark_delivery_failed_terminally(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        reason: str = "",
+    ) -> bool:
+        return self._write(
+            "mark_delivery_failed_terminally",
+            lambda conn: self._mark_delivery_failed_terminally(
+                conn,
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                reason=reason,
+            ),
+        )
+
     def requeue_expired_leases(
         self,
         *,
@@ -445,6 +481,7 @@ class Ledger:
         has_attachments: bool,
         attachment_metadata: list[dict[str, Any]] | None,
         received_at: datetime,
+        initial_delivery_status: str = PENDING_FORWARD,
     ) -> InsertResult:
         existing = self._get_by_discord_message_id(conn, discord_message_id)
         if existing is not None:
@@ -483,7 +520,7 @@ class Ledger:
                 _json_dumps(attachment_metadata or []),
                 _iso(received_at),
                 RECEIVED,
-                PENDING_FORWARD,
+                initial_delivery_status,
                 now,
             ),
         )
@@ -816,8 +853,17 @@ class Ledger:
         if row["delivery_attempts"] != delivery_attempt:
             return False
         current_ds = row["delivery_status"]
-        # Idempotent: same terminal callback
+        # Idempotent: exact same terminal callback (path, commit hash, reason all match)
         if row["status"] == note_status and current_ds == COMPLETE:
+            if row["derived_note_path"] != derived_note_path:
+                return False
+            stored_hash = row["delivery_commit_hash"]
+            if git_commit_hash is not None and stored_hash != git_commit_hash:
+                return False
+            stored_reason = row["delivery_reason_type"]
+            incoming_reason = (extra_payload or {}).get("reason_type", None)
+            if incoming_reason is not None and stored_reason != incoming_reason:
+                return False
             return True
         # Reject conflicting terminal
         if current_ds == COMPLETE:
@@ -825,15 +871,17 @@ class Ledger:
         if current_ds not in (DELIVERY_FORWARDED, DELIVERY_CLASSIFYING):
             return False
         now = _iso(_now())
+        reason_type = (extra_payload or {}).get("reason_type", None)
         conn.execute(
             """
             UPDATE captures
             SET status = ?, delivery_status = ?, derived_note_path = ?,
+                delivery_commit_hash = ?, delivery_reason_type = ?,
                 processing_lease_until = NULL, next_attempt_at = NULL, last_error = NULL,
                 updated_at = ?
             WHERE capture_id = ?
             """,
-            (note_status, COMPLETE, derived_note_path, now, capture_id),
+            (note_status, COMPLETE, derived_note_path, git_commit_hash, reason_type, now, capture_id),
         )
         payload: dict[str, Any] = {
             "delivery_attempt": delivery_attempt,
@@ -844,6 +892,65 @@ class Ledger:
         if extra_payload:
             payload.update(extra_payload)
         self._append_event(conn, capture_id, event_type, payload)
+        return True
+
+    def _renew_delivery_lease(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        lease_until: datetime,
+    ) -> bool:
+        row = self._get_by_capture_id(conn, capture_id)
+        if row["delivery_attempts"] != delivery_attempt:
+            return False
+        if row["delivery_status"] not in LEASABLE_DELIVERY_STATUSES:
+            return False
+        conn.execute(
+            """
+            UPDATE captures
+            SET processing_lease_until = ?, updated_at = ?
+            WHERE capture_id = ?
+            """,
+            (_iso(lease_until), _iso(_now()), capture_id),
+        )
+        return True
+
+    def _mark_delivery_failed_terminally(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        reason: str,
+    ) -> bool:
+        row = self._get_by_capture_id(conn, capture_id)
+        if row["delivery_attempts"] != delivery_attempt:
+            return False
+        current_ds = row["delivery_status"]
+        if current_ds not in (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING):
+            return False
+        now_ts = _iso(_now())
+        conn.execute(
+            """
+            UPDATE captures
+            SET status = ?, delivery_status = ?, processing_lease_until = NULL,
+                next_attempt_at = NULL, last_error = ?, updated_at = ?
+            WHERE capture_id = ?
+            """,
+            (FAILED, DELIVERY_FAILED, reason or None, now_ts, capture_id),
+        )
+        self._append_event(
+            conn,
+            capture_id,
+            "DELIVERY_FAILED_TERMINALLY",
+            {
+                "delivery_attempt": delivery_attempt,
+                "delivery_status": DELIVERY_FAILED,
+                "reason": reason,
+            },
+        )
         return True
 
     def _schedule_retry(
@@ -1151,13 +1258,14 @@ class Ledger:
             """,
             (RETRY_WAIT,),
         ).fetchone()
+        now_iso = _iso(_now())
         expired_count = conn.execute(
             """
             SELECT COUNT(*) AS count FROM captures
             WHERE delivery_status IN (?, ?, ?)
-              AND processing_lease_until < datetime('now')
+              AND processing_lease_until <= ?
             """,
-            (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING),
+            (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING, now_iso),
         ).fetchone()["count"]
         return {
             "pending_forward": counts.get(PENDING_FORWARD, 0),
@@ -1279,6 +1387,8 @@ def _record_from_row(row: sqlite3.Row) -> CaptureRecord:
         receipt_message_id=row["receipt_message_id"],
         derived_note_path=row["derived_note_path"],
         last_error=row["last_error"],
+        delivery_commit_hash=row["delivery_commit_hash"],
+        delivery_reason_type=row["delivery_reason_type"],
     )
 
 

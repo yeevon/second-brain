@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from secondbrain.capture_models import (
@@ -9,10 +10,13 @@ from secondbrain.capture_models import (
     FILED,
     FORWARDED,
     INBOX,
+    NOT_APPLICABLE,
+    PENDING_FORWARD,
     RECEIVED,
     REJECTED_SENSITIVE,
     CaptureRecord,
     CaptureStatusSnapshot,
+    RetryDisposition,
     TransitionResult,
 )
 from secondbrain.discord_capture import extract_attachment_metadata, should_capture_message
@@ -68,6 +72,9 @@ class CaptureService:
         self._ledger = ledger
         self._notify_capture = notify_capture
         self._receipt_client = receipt_client
+        # local-full mode processes notes locally; downstream delivery is not applicable
+        mode = getattr(settings, "capture_processing_mode", None)
+        self._initial_delivery_status = NOT_APPLICABLE if mode == "local-full" else PENDING_FORWARD
 
     @classmethod
     def open(
@@ -384,6 +391,151 @@ class CaptureService:
     def delivery_snapshot(self) -> dict:
         return self._ledger.delivery_snapshot()
 
+    # ------------------------------------------------------------------
+    # Attempt-aware downstream delivery callbacks
+    # Lease durations are calculated from trusted configuration rather
+    # than accepting arbitrary timestamps from the downstream caller.
+    # ------------------------------------------------------------------
+
+    def acknowledge_delivery_forwarded(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+    ) -> bool:
+        lease_until = datetime.now(UTC) + timedelta(
+            seconds=self.settings.delivery_processing_lease_seconds
+        )
+        return self._ledger.mark_forwarded(
+            capture_id=capture_id,
+            delivery_attempt=delivery_attempt,
+            lease_until=lease_until,
+        )
+
+    def acknowledge_delivery_classifying(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+    ) -> bool:
+        lease_until = datetime.now(UTC) + timedelta(
+            seconds=self.settings.delivery_processing_lease_seconds
+        )
+        return self._ledger.mark_classifying_delivery(
+            capture_id=capture_id,
+            delivery_attempt=delivery_attempt,
+            lease_until=lease_until,
+        )
+
+    def renew_delivery_lease(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+    ) -> bool:
+        lease_until = datetime.now(UTC) + timedelta(
+            seconds=self.settings.delivery_processing_lease_seconds
+        )
+        return self._ledger.renew_delivery_lease(
+            capture_id=capture_id,
+            delivery_attempt=delivery_attempt,
+            lease_until=lease_until,
+        )
+
+    async def acknowledge_delivery_filed(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        derived_note_path: str,
+        git_commit_hash: str | None = None,
+    ) -> bool:
+        changed = self._ledger.mark_filed(
+            capture_id=capture_id,
+            delivery_attempt=delivery_attempt,
+            derived_note_path=derived_note_path,
+            git_commit_hash=git_commit_hash,
+        )
+        if changed:
+            try:
+                from secondbrain.receipts import format_filed_receipt
+                await self.edit_receipt(
+                    capture_id=capture_id,
+                    content=format_filed_receipt(
+                        capture_id=capture_id,
+                        note_path=derived_note_path,
+                        classification=None,
+                        has_attachments=False,
+                    ),
+                )
+            except Exception:
+                pass
+        return changed
+
+    async def acknowledge_delivery_inbox(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        derived_note_path: str,
+        git_commit_hash: str | None = None,
+        reason_type: str = "",
+    ) -> bool:
+        changed = self._ledger.mark_inbox(
+            capture_id=capture_id,
+            delivery_attempt=delivery_attempt,
+            derived_note_path=derived_note_path,
+            git_commit_hash=git_commit_hash,
+            reason_type=reason_type,
+        )
+        if changed:
+            try:
+                from secondbrain.receipts import format_inbox_receipt
+                await self.edit_receipt(
+                    capture_id=capture_id,
+                    content=format_inbox_receipt(
+                        capture_id=capture_id,
+                        note_path=derived_note_path,
+                        reason=reason_type or None,
+                        has_attachments=False,
+                    ),
+                )
+            except Exception:
+                pass
+        return changed
+
+    def schedule_delivery_retry(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        error_type: str,
+        reason_type: str = "webhook_failure",
+    ) -> RetryDisposition:
+        return self._ledger.schedule_retry(
+            capture_id=capture_id,
+            delivery_attempt=delivery_attempt,
+            now=datetime.now(UTC),
+            error_type=error_type,
+            reason_type=reason_type,
+            max_attempts=self.settings.delivery_max_attempts,
+            base_delay_seconds=self.settings.delivery_retry_base_delay_seconds,
+            max_delay_seconds=self.settings.delivery_retry_max_delay_seconds,
+        )
+
+    def acknowledge_delivery_failed(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        reason: str = "",
+    ) -> bool:
+        return self._ledger.mark_delivery_failed_terminally(
+            capture_id=capture_id,
+            delivery_attempt=delivery_attempt,
+            reason=reason,
+        )
+
     def status_snapshot(self) -> CaptureStatusSnapshot:
         counts = self._ledger.status_counts()
         return CaptureStatusSnapshot(
@@ -487,6 +639,7 @@ class CaptureService:
             raw_text=raw_text,
             has_attachments=bool(attachment_metadata),
             attachment_metadata=attachment_metadata,
+            initial_delivery_status=self._initial_delivery_status,
         )
         capture = result.capture
         if not result.created:

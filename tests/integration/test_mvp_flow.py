@@ -12,7 +12,7 @@ from secondbrain.capture_models import (
     RETRY_WAIT,
 )
 from secondbrain.capture_service import CaptureService
-from secondbrain.delivery import _run_one_dispatch_pass, _run_one_reaper_pass
+from secondbrain.delivery import _run_one_dispatch_pass
 from secondbrain.ledger import FAILED, FILED, RECEIVED, Ledger
 from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID
 from secondbrain.vault_writer import VaultWriter
@@ -477,20 +477,6 @@ class AlwaysAcceptClient:
         self.calls.append({"capture_id": capture_id, "delivery_attempt": delivery_attempt})
 
 
-class FakeReceiptClient:
-    def __init__(self):
-        self.sent: list[str] = []
-
-    def get_channel(self, channel_id):
-        return self
-
-    async def fetch_channel(self, channel_id):
-        return self
-
-    async def send(self, content):
-        self.sent.append(content)
-
-
 @pytest.mark.asyncio
 async def test_downstream_crash_after_webhook_acceptance_becomes_retryable(tmp_path):
     """Primary SB-107 acceptance test: FORWARDED → expired lease → RETRY_WAIT → reclaimable."""
@@ -499,14 +485,15 @@ async def test_downstream_crash_after_webhook_acceptance_becomes_retryable(tmp_p
     now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
     short_lease = now + timedelta(seconds=30)
 
-    ledger.insert_accepted_capture(
+    insert_result = ledger.insert_accepted_capture(
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
         discord_author_id="400",
         raw_text="important note",
+        received_at=now,
     )
-    capture_id = "SB-20260609-0001"
+    capture_id = insert_result.capture.capture_id
 
     # Claim delivery attempt 1
     claimed = ledger.claim_due_deliveries(now=now, lease_until=short_lease, batch_size=10)
@@ -523,8 +510,7 @@ async def test_downstream_crash_after_webhook_acceptance_becomes_retryable(tmp_p
     # Advance clock beyond lease
     expired = now + timedelta(seconds=120)
 
-    # Run stale-lease reaper
-    receipt_client = FakeReceiptClient()
+    # Run stale-lease reaper via ledger (reaper service loop belongs to SB-108)
     result = ledger.requeue_expired_leases(
         now=expired,
         batch_size=10,
@@ -572,15 +558,16 @@ async def test_repeated_downstream_crashes_fail_visibly_after_retry_cap(tmp_path
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     settings = make_delivery_settings(delivery_max_attempts=3)
     now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
-    capture_id = "SB-20260609-0001"
 
-    ledger.insert_accepted_capture(
+    insert_result = ledger.insert_accepted_capture(
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
         discord_author_id="400",
         raw_text="important note",
+        received_at=now,
     )
+    capture_id = insert_result.capture.capture_id
 
     # Cycle: claim → forward → expire lease → requeue — until cap exceeded
     t = now
@@ -626,15 +613,16 @@ async def test_late_callback_from_old_attempt_cannot_override_new_attempt(tmp_pa
     """Stale attempt callbacks are ignored; current attempt remains authoritative."""
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
-    capture_id = "SB-20260609-0001"
 
-    ledger.insert_accepted_capture(
+    insert_result = ledger.insert_accepted_capture(
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
         discord_author_id="400",
         raw_text="note",
+        received_at=now,
     )
+    capture_id = insert_result.capture.capture_id
 
     # Attempt 1: claim → forward → lease expires → requeue
     lease1 = now + timedelta(seconds=30)

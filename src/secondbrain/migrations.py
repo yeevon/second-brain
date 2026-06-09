@@ -95,6 +95,15 @@ _MIGRATIONS: list[Migration] = [
             "CREATE INDEX IF NOT EXISTS idx_captures_processing_lease ON captures(delivery_status, processing_lease_until)",
         ),
     ),
+    Migration(
+        version=3,
+        name="terminal_delivery_fields",
+        statements=(
+            # Store git commit hash and outcome reason for idempotent terminal callbacks
+            "ALTER TABLE captures ADD COLUMN delivery_commit_hash TEXT",
+            "ALTER TABLE captures ADD COLUMN delivery_reason_type TEXT",
+        ),
+    ),
 ]
 
 

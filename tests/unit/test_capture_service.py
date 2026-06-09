@@ -472,3 +472,215 @@ def _insert_classifying_capture(ledger):
     capture = _insert_capture(ledger, "1001")
     ledger.mark_classifying(capture.capture_id)
     return ledger.get_capture(capture.capture_id)
+
+
+# ===========================================================================
+# SB-107 audit — Attempt-aware callback service methods
+# ===========================================================================
+
+from datetime import UTC, datetime, timedelta
+
+from secondbrain.capture_models import (
+    COMPLETE,
+    DELIVERY_FAILED,
+    DELIVERY_FORWARDED,
+    FORWARDING,
+    NOT_APPLICABLE,
+    PENDING_FORWARD,
+    RETRY_WAIT,
+)
+
+
+_NOW = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
+
+
+def make_delivery_settings(tmp_path, **overrides):
+    data = {
+        "capture_processing_mode": "capture-only",
+        "discord_guild_id": 100,
+        "discord_capture_channel_id": 200,
+        "discord_allowed_user_id": 300,
+        "startup_reconcile_limit": 10,
+        "ledger_path": tmp_path / "runtime" / "ledger.sqlite3",
+        "vault_path": None,
+        "delivery_max_attempts": 5,
+        "delivery_retry_base_delay_seconds": 10,
+        "delivery_retry_max_delay_seconds": 300,
+        "delivery_forward_lease_seconds": 60,
+        "delivery_processing_lease_seconds": 300,
+        "delivery_dispatch_interval_seconds": 2,
+        "delivery_dispatch_batch_size": 25,
+        "delivery_reaper_interval_seconds": 30,
+        "delivery_reaper_batch_size": 100,
+    }
+    data.update(overrides)
+    return SimpleNamespace(**data)
+
+
+def _make_service_with_capture(tmp_path, **settings_overrides):
+    settings = make_delivery_settings(tmp_path, **settings_overrides)
+    ledger = Ledger(settings.ledger_path)
+    service = CaptureService(settings=settings, ledger=ledger)
+    capture = ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="test note",
+        received_at=_NOW,
+    ).capture
+    return service, ledger, capture
+
+
+def test_service_ignores_stale_classifying_callback(tmp_path):
+    """acknowledge_delivery_classifying with wrong attempt returns False."""
+    service, ledger, capture = _make_service_with_capture(tmp_path)
+    now = _NOW
+    lease = now + timedelta(seconds=60)
+    # Claim attempt 1
+    ledger.claim_due_deliveries(now=now, lease_until=lease, batch_size=10)
+    ledger.mark_forwarded(capture_id=capture.capture_id, delivery_attempt=1, lease_until=lease)
+
+    # Stale attempt 0 must be ignored
+    result = service.acknowledge_delivery_classifying(
+        capture_id=capture.capture_id, delivery_attempt=0
+    )
+    assert result is False
+    # Current state unchanged
+    assert ledger.get_capture(capture.capture_id).delivery_status == DELIVERY_FORWARDED
+    ledger.close()
+
+
+def test_service_terminal_callback_is_idempotent(tmp_path):
+    """Same filed callback repeated with same path returns True."""
+    service, ledger, capture = _make_service_with_capture(tmp_path)
+    now = _NOW
+    lease = now + timedelta(seconds=60)
+    ledger.claim_due_deliveries(now=now, lease_until=lease, batch_size=10)
+    ledger.mark_forwarded(capture_id=capture.capture_id, delivery_attempt=1, lease_until=lease)
+
+    ok1 = ledger.mark_filed(
+        capture_id=capture.capture_id, delivery_attempt=1, derived_note_path="a.md"
+    )
+    ok2 = ledger.mark_filed(
+        capture_id=capture.capture_id, delivery_attempt=1, derived_note_path="a.md"
+    )
+    assert ok1 is True
+    assert ok2 is True  # identical replay is idempotent
+    ledger.close()
+
+
+def test_service_rejects_conflicting_terminal_callback(tmp_path):
+    """Filed callback with different path after completion returns False."""
+    service, ledger, capture = _make_service_with_capture(tmp_path)
+    now = _NOW
+    lease = now + timedelta(seconds=60)
+    ledger.claim_due_deliveries(now=now, lease_until=lease, batch_size=10)
+    ledger.mark_forwarded(capture_id=capture.capture_id, delivery_attempt=1, lease_until=lease)
+    ledger.mark_filed(
+        capture_id=capture.capture_id, delivery_attempt=1, derived_note_path="a.md"
+    )
+    conflict = ledger.mark_filed(
+        capture_id=capture.capture_id, delivery_attempt=1, derived_note_path="b.md"
+    )
+    assert conflict is False
+    ledger.close()
+
+
+def test_service_renews_current_attempt_lease(tmp_path):
+    """renew_delivery_lease for the current attempt updates processing_lease_until."""
+    service, ledger, capture = _make_service_with_capture(tmp_path)
+    now = _NOW
+    short_lease = now + timedelta(seconds=10)
+    ledger.claim_due_deliveries(now=now, lease_until=short_lease, batch_size=10)
+    ledger.mark_forwarded(capture_id=capture.capture_id, delivery_attempt=1, lease_until=short_lease)
+
+    before_renewal = datetime.now(UTC)
+    changed = service.renew_delivery_lease(
+        capture_id=capture.capture_id, delivery_attempt=1
+    )
+    assert changed is True
+    updated = ledger.get_capture(capture.capture_id)
+    assert updated.processing_lease_until is not None
+    # New lease must be in the future relative to the real clock
+    assert updated.processing_lease_until > before_renewal
+    ledger.close()
+
+
+# ===========================================================================
+# SB-107 audit — Local vs downstream processing isolation (Issue 4)
+# ===========================================================================
+
+def test_local_processing_does_not_leave_filed_note_pending_forward(tmp_path):
+    """capture-processing-mode=local-full inserts with NOT_APPLICABLE delivery status."""
+    settings = make_delivery_settings(tmp_path, capture_processing_mode="local-full")
+    ledger = Ledger(settings.ledger_path)
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    result = ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="local note",
+        initial_delivery_status=service._initial_delivery_status,
+        received_at=_NOW,
+    )
+    assert result.capture.delivery_status == NOT_APPLICABLE
+    ledger.close()
+
+
+def test_capture_only_mode_inserts_as_pending_forward(tmp_path):
+    """capture-processing-mode=capture-only inserts with PENDING_FORWARD delivery status."""
+    settings = make_delivery_settings(tmp_path, capture_processing_mode="capture-only")
+    ledger = Ledger(settings.ledger_path)
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    result = ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="downstream note",
+        initial_delivery_status=service._initial_delivery_status,
+        received_at=_NOW,
+    )
+    assert result.capture.delivery_status == PENDING_FORWARD
+    ledger.close()
+
+
+def test_schedule_delivery_retry_returns_retry_disposition(tmp_path):
+    """schedule_delivery_retry wires through settings correctly."""
+    service, ledger, capture = _make_service_with_capture(tmp_path)
+    now = _NOW
+    lease = now + timedelta(seconds=60)
+    ledger.claim_due_deliveries(now=now, lease_until=lease, batch_size=10)
+
+    disposition = service.schedule_delivery_retry(
+        capture_id=capture.capture_id,
+        delivery_attempt=1,
+        error_type="TimeoutError",
+    )
+    assert disposition.retry_scheduled is True
+    assert disposition.failed_terminally is False
+    assert ledger.get_capture(capture.capture_id).delivery_status == RETRY_WAIT
+    ledger.close()
+
+
+def test_acknowledge_delivery_failed_marks_capture_terminally_failed(tmp_path):
+    """acknowledge_delivery_failed sets delivery_status to FAILED."""
+    service, ledger, capture = _make_service_with_capture(tmp_path)
+    now = _NOW
+    lease = now + timedelta(seconds=60)
+    ledger.claim_due_deliveries(now=now, lease_until=lease, batch_size=10)
+    ledger.mark_forwarded(capture_id=capture.capture_id, delivery_attempt=1, lease_until=lease)
+
+    changed = service.acknowledge_delivery_failed(
+        capture_id=capture.capture_id,
+        delivery_attempt=1,
+        reason="unrecoverable downstream error",
+    )
+    assert changed is True
+    updated = ledger.get_capture(capture.capture_id)
+    assert updated.delivery_status == DELIVERY_FAILED
+    ledger.close()

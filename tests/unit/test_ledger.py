@@ -151,6 +151,9 @@ def test_minimal_schema_tables_columns_and_indexes_match_mvp(tmp_path):
         "delivery_attempts",
         "processing_lease_until",
         "next_attempt_at",
+        # Added by migration 003
+        "delivery_commit_hash",
+        "delivery_reason_type",
     ]
     assert table_columns(ledger, "capture_events") == [
         "id",
@@ -327,11 +330,13 @@ def test_existing_mvp_database_is_adopted_without_data_loss(tmp_path):
     migration_count = ledger._runtime.read(
         lambda conn: conn.execute("SELECT COUNT(*) AS c FROM schema_migrations").fetchone()["c"]
     )
-    assert migration_count == 2  # migration 001 back-applied + migration 002 new
+    assert migration_count == 3  # migration 001 back-applied + 002 delivery_leases + 003 terminal_fields
     # Verify delivery columns were added and existing row has correct default
     capture = ledger.get_capture("SB-20260607-0001")
     assert capture.delivery_status == "PENDING_FORWARD"
     assert capture.delivery_attempts == 0
+    assert capture.delivery_commit_hash is None
+    assert capture.delivery_reason_type is None
     ledger.close()
 
 
@@ -883,6 +888,7 @@ def _accepted(ledger, msg_id="1001"):
         discord_guild_id="300",
         discord_author_id="400",
         raw_text="note",
+        received_at=_NOW,
     ).capture
 
 
@@ -1531,6 +1537,160 @@ def test_backoff_grows_exponentially_from_base():
 
 def test_backoff_is_capped_at_max():
     assert _calculate_retry_delay(delivery_attempts=10, base_delay_seconds=10, max_delay_seconds=300) == 300
+
+
+# ---------------------------------------------------------------------------
+# Terminal callback idempotency / conflict detection (Issue 7)
+# ---------------------------------------------------------------------------
+
+def test_duplicate_terminal_callback_with_different_path_is_rejected(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ok1 = ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="a.md"
+    )
+    assert ok1 is True
+    conflict = ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="b.md"
+    )
+    assert conflict is False
+    ledger.close()
+
+
+def test_duplicate_terminal_callback_with_same_path_is_idempotent(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="a.md"
+    )
+    ok2 = ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="a.md"
+    )
+    assert ok2 is True  # same path → idempotent
+    ledger.close()
+
+
+def test_duplicate_terminal_callback_with_different_git_hash_is_rejected(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ok1 = ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="a.md",
+        git_commit_hash="abc123",
+    )
+    assert ok1 is True
+    conflict = ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="a.md",
+        git_commit_hash="def456",
+    )
+    assert conflict is False
+    ledger.close()
+
+
+def test_duplicate_inbox_callback_with_different_reason_is_rejected(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ledger.mark_classifying_delivery(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ok1 = ledger.mark_inbox(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="inbox.md",
+        reason_type="low_confidence",
+    )
+    assert ok1 is True
+    conflict = ledger.mark_inbox(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="inbox.md",
+        reason_type="needs_clarification",
+    )
+    assert conflict is False
+    ledger.close()
+
+
+def test_terminal_delivery_fields_stored_on_mark_filed(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="20_projects/a.md",
+        git_commit_hash="abc123",
+    )
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.delivery_commit_hash == "abc123"
+    assert capture.delivery_reason_type is None
+    ledger.close()
+
+
+def test_terminal_delivery_fields_stored_on_mark_inbox(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ledger.mark_classifying_delivery(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ledger.mark_inbox(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="inbox/b.md",
+        reason_type="low_confidence",
+    )
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.delivery_reason_type == "low_confidence"
+    ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# Delivery snapshot timestamp comparison (Issue 8)
+# ---------------------------------------------------------------------------
+
+def test_delivery_snapshot_counts_same_day_expired_iso_lease(tmp_path):
+    """ISO-8601 timestamps with T must compare correctly against _now() output.
+    Uses the real clock so the comparison is against the same time source.
+    """
+    from datetime import UTC as _UTC, datetime as _dt
+    now = _dt.now(_UTC)
+    past_lease = now - timedelta(seconds=60)
+
+    ledger = make_ledger(tmp_path)
+    # Insert with a fixed received_at to avoid date-sensitive capture IDs
+    ledger.insert_accepted_capture(
+        discord_message_id="9901",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="snapshot test",
+        received_at=now,
+    )
+    # Claim with an already-expired lease
+    ledger.claim_due_deliveries(now=now, lease_until=past_lease, batch_size=10)
+
+    snapshot = ledger.delivery_snapshot()
+    assert snapshot["expired_leases"] >= 1
+    ledger.close()
+
+
+def test_delivery_snapshot_ignores_future_iso_lease(tmp_path):
+    """A lease set far in the future must not appear as expired."""
+    from datetime import UTC as _UTC, datetime as _dt
+    now = _dt.now(_UTC)
+    future_lease = now + timedelta(hours=24)
+
+    ledger = make_ledger(tmp_path)
+    ledger.insert_accepted_capture(
+        discord_message_id="9902",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="snapshot test",
+        received_at=now,
+    )
+    ledger.claim_due_deliveries(now=now, lease_until=future_lease, batch_size=10)
+
+    snapshot = ledger.delivery_snapshot()
+    assert snapshot["expired_leases"] == 0
+    ledger.close()
 
 
 # ---------------------------------------------------------------------------
