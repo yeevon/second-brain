@@ -14,8 +14,10 @@ from secondbrain.capture_models import (
     PENDING_FORWARD,
     RECEIVED,
     REJECTED_SENSITIVE,
+    TERMINAL_STATUSES,
     CaptureRecord,
     CaptureStatusSnapshot,
+    DeliveryMutationResult,
     RetryDisposition,
     TransitionResult,
 )
@@ -25,6 +27,7 @@ from secondbrain.observability import log_metadata
 from secondbrain.receipts import (
     ReceiptDeliveryResult,
     deliver_final_receipt,
+    format_downstream_filed_receipt,
     format_filed_receipt,
     format_inbox_receipt,
     format_vault_failure_receipt,
@@ -122,6 +125,8 @@ class CaptureService:
         )
 
     async def enqueue_unfinished_captures(self) -> list[str]:
+        if self._initial_delivery_status == NOT_APPLICABLE:
+            self._ledger.normalize_delivery_for_local_full()
         capture_ids = self.unfinished_capture_ids()
         if self._notify_capture is not None:
             for capture_id in capture_ids:
@@ -449,28 +454,30 @@ class CaptureService:
         delivery_attempt: int,
         derived_note_path: str,
         git_commit_hash: str | None = None,
-    ) -> bool:
-        changed = self._ledger.mark_filed(
+    ) -> DeliveryMutationResult:
+        capture = self.get_capture(capture_id)
+        result = self._ledger.mark_filed(
             capture_id=capture_id,
             delivery_attempt=delivery_attempt,
             derived_note_path=derived_note_path,
             git_commit_hash=git_commit_hash,
         )
-        if changed:
+        if result.changed:
             try:
-                from secondbrain.receipts import format_filed_receipt
                 await self.edit_receipt(
                     capture_id=capture_id,
-                    content=format_filed_receipt(
+                    content=format_downstream_filed_receipt(
                         capture_id=capture_id,
                         note_path=derived_note_path,
-                        classification=None,
-                        has_attachments=False,
+                        has_attachments=capture.has_attachments,
                     ),
                 )
-            except Exception:
-                pass
-        return changed
+            except ReceiptDeliveryError:
+                log_metadata(
+                    "downstream_filed_receipt_failed",
+                    capture_id=capture_id,
+                )
+        return result
 
     async def acknowledge_delivery_inbox(
         self,
@@ -480,31 +487,34 @@ class CaptureService:
         derived_note_path: str,
         git_commit_hash: str | None = None,
         reason_type: str = "",
-    ) -> bool:
-        changed = self._ledger.mark_inbox(
+    ) -> DeliveryMutationResult:
+        capture = self.get_capture(capture_id)
+        result = self._ledger.mark_inbox(
             capture_id=capture_id,
             delivery_attempt=delivery_attempt,
             derived_note_path=derived_note_path,
             git_commit_hash=git_commit_hash,
             reason_type=reason_type,
         )
-        if changed:
+        if result.changed:
             try:
-                from secondbrain.receipts import format_inbox_receipt
                 await self.edit_receipt(
                     capture_id=capture_id,
                     content=format_inbox_receipt(
                         capture_id=capture_id,
                         note_path=derived_note_path,
                         reason=reason_type or None,
-                        has_attachments=False,
+                        has_attachments=capture.has_attachments,
                     ),
                 )
-            except Exception:
-                pass
-        return changed
+            except ReceiptDeliveryError:
+                log_metadata(
+                    "downstream_inbox_receipt_failed",
+                    capture_id=capture_id,
+                )
+        return result
 
-    def schedule_delivery_retry(
+    async def schedule_delivery_retry(
         self,
         *,
         capture_id: str,
@@ -512,7 +522,8 @@ class CaptureService:
         error_type: str,
         reason_type: str = "webhook_failure",
     ) -> RetryDisposition:
-        return self._ledger.schedule_retry(
+        from secondbrain.delivery import _RETRY_RECEIPT, _FAILED_RECEIPT, _edit_receipt_best_effort
+        disposition = self._ledger.schedule_retry(
             capture_id=capture_id,
             delivery_attempt=delivery_attempt,
             now=datetime.now(UTC),
@@ -522,19 +533,40 @@ class CaptureService:
             base_delay_seconds=self.settings.delivery_retry_base_delay_seconds,
             max_delay_seconds=self.settings.delivery_retry_max_delay_seconds,
         )
+        if disposition.failed_terminally:
+            await _edit_receipt_best_effort(
+                self,
+                capture_id=capture_id,
+                content=_FAILED_RECEIPT.format(capture_id=capture_id),
+            )
+        elif disposition.retry_scheduled:
+            await _edit_receipt_best_effort(
+                self,
+                capture_id=capture_id,
+                content=_RETRY_RECEIPT.format(capture_id=capture_id),
+            )
+        return disposition
 
-    def acknowledge_delivery_failed(
+    async def acknowledge_delivery_failed(
         self,
         *,
         capture_id: str,
         delivery_attempt: int,
-        reason: str = "",
+        reason_type: str = "",
     ) -> bool:
-        return self._ledger.mark_delivery_failed_terminally(
+        from secondbrain.delivery import _FAILED_RECEIPT, _edit_receipt_best_effort
+        changed = self._ledger.mark_delivery_failed_terminally(
             capture_id=capture_id,
             delivery_attempt=delivery_attempt,
-            reason=reason,
+            reason=reason_type,
         )
+        if changed:
+            await _edit_receipt_best_effort(
+                self,
+                capture_id=capture_id,
+                content=_FAILED_RECEIPT.format(capture_id=capture_id),
+            )
+        return changed
 
     def status_snapshot(self) -> CaptureStatusSnapshot:
         counts = self._ledger.status_counts()
@@ -755,6 +787,11 @@ class CaptureService:
         if capture.status not in from_statuses:
             raise InvalidCaptureTransitionError("invalid capture transition")
 
+        # In local-full mode, terminal transitions must not leave delivery_status pending forward
+        delivery_status_override = None
+        if to_status in TERMINAL_STATUSES and self._initial_delivery_status == NOT_APPLICABLE:
+            delivery_status_override = NOT_APPLICABLE
+
         result = self._ledger.transition_capture(
             capture_id,
             from_statuses=from_statuses,
@@ -764,6 +801,7 @@ class CaptureService:
             last_error=last_error,
             event_type=event_type,
             event_payload=event_payload,
+            delivery_status=delivery_status_override,
         )
         if result is None:
             raise InvalidCaptureTransitionError("invalid capture transition")

@@ -159,6 +159,21 @@ def format_sensitive_rejection_receipt() -> str:
     )
 
 
+def format_downstream_filed_receipt(
+    *,
+    capture_id: str,
+    note_path: str,
+    has_attachments: bool,
+) -> str:
+    content = (
+        f"✅ {capture_id} filed.\n"
+        f"Location: {_location_from_note_path(note_path)}"
+    )
+    if has_attachments:
+        content += f"\n{ATTACHMENT_WARNING}"
+    return content
+
+
 def format_vault_failure_receipt(capture_id: str, *, has_attachments: bool) -> str:
     content = (
         f"❌ {capture_id} captured but vault filing failed.\n"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +107,15 @@ class RetryDisposition:
 
 
 @dataclass(frozen=True)
-class LeaseReaperResult:
-    requeued: int
-    terminal_failures: int
-    failed_capture_ids: list[str]
+class DeliveryMutationResult:
+    capture_id: str
+    delivery_status: str
+    delivery_attempts: int
+    changed: bool
+    outcome: Literal[
+        "changed",
+        "idempotent_replay",
+        "stale_attempt",
+        "invalid_state",
+        "conflicting_replay",
+    ]

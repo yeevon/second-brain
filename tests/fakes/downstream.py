@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import httpx
 
 from secondbrain.capture_api import INTERNAL_TOKEN_HEADER
@@ -20,39 +22,6 @@ class FakeDownstreamClient:
             headers=self._headers,
         )
 
-    async def mark_forwarded(self, capture_id: str):
-        return await self._client.post(
-            f"/internal/captures/{capture_id}/mark-forwarded",
-            headers=self._headers,
-        )
-
-    async def mark_classifying(self, capture_id: str):
-        return await self._client.post(
-            f"/internal/captures/{capture_id}/mark-classifying",
-            headers=self._headers,
-        )
-
-    async def mark_filed(self, capture_id: str, payload: dict):
-        return await self._client.post(
-            f"/internal/captures/{capture_id}/mark-filed",
-            headers=self._headers,
-            json=payload,
-        )
-
-    async def mark_inbox(self, capture_id: str, payload: dict):
-        return await self._client.post(
-            f"/internal/captures/{capture_id}/mark-inbox",
-            headers=self._headers,
-            json=payload,
-        )
-
-    async def mark_failed(self, capture_id: str, reason: str):
-        return await self._client.post(
-            f"/internal/captures/{capture_id}/mark-failed",
-            headers=self._headers,
-            json={"reason": reason},
-        )
-
     async def retry(self, capture_id: str):
         return await self._client.post(
             f"/internal/captures/{capture_id}/retry",
@@ -64,4 +33,95 @@ class FakeDownstreamClient:
             f"/internal/receipts/{capture_id}/edit",
             headers=self._headers,
             json={"content": content},
+        )
+
+    # ------------------------------------------------------------------
+    # Attempt-aware downstream delivery callbacks
+    # ------------------------------------------------------------------
+
+    async def acknowledge_forwarded(self, capture_id: str, delivery_attempt: int):
+        return await self._client.post(
+            f"/internal/captures/{capture_id}/delivery/acknowledge-forwarded",
+            headers=self._headers,
+            json={"delivery_attempt": delivery_attempt},
+        )
+
+    async def acknowledge_classifying(self, capture_id: str, delivery_attempt: int):
+        return await self._client.post(
+            f"/internal/captures/{capture_id}/delivery/acknowledge-classifying",
+            headers=self._headers,
+            json={"delivery_attempt": delivery_attempt},
+        )
+
+    async def renew_lease(self, capture_id: str, delivery_attempt: int):
+        return await self._client.post(
+            f"/internal/captures/{capture_id}/delivery/renew-lease",
+            headers=self._headers,
+            json={"delivery_attempt": delivery_attempt},
+        )
+
+    async def acknowledge_filed(
+        self,
+        capture_id: str,
+        delivery_attempt: int,
+        note_path: str,
+        git_commit_hash: str | None = None,
+    ):
+        payload: dict = {"delivery_attempt": delivery_attempt, "note_path": note_path}
+        if git_commit_hash is not None:
+            payload["git_commit_hash"] = git_commit_hash
+        return await self._client.post(
+            f"/internal/captures/{capture_id}/delivery/acknowledge-filed",
+            headers=self._headers,
+            json=payload,
+        )
+
+    async def acknowledge_inbox(
+        self,
+        capture_id: str,
+        delivery_attempt: int,
+        note_path: str,
+        git_commit_hash: str | None = None,
+        reason_type: str = "",
+    ):
+        payload: dict = {
+            "delivery_attempt": delivery_attempt,
+            "note_path": note_path,
+            "reason_type": reason_type,
+        }
+        if git_commit_hash is not None:
+            payload["git_commit_hash"] = git_commit_hash
+        return await self._client.post(
+            f"/internal/captures/{capture_id}/delivery/acknowledge-inbox",
+            headers=self._headers,
+            json=payload,
+        )
+
+    async def schedule_retry(
+        self,
+        capture_id: str,
+        delivery_attempt: int,
+        error_type: str,
+        reason_type: str = "webhook_failure",
+    ):
+        return await self._client.post(
+            f"/internal/captures/{capture_id}/delivery/schedule-retry",
+            headers=self._headers,
+            json={
+                "delivery_attempt": delivery_attempt,
+                "error_type": error_type,
+                "reason_type": reason_type,
+            },
+        )
+
+    async def acknowledge_failed(
+        self,
+        capture_id: str,
+        delivery_attempt: int,
+        reason_type: str = "",
+    ):
+        return await self._client.post(
+            f"/internal/captures/{capture_id}/delivery/acknowledge-failed",
+            headers=self._headers,
+            json={"delivery_attempt": delivery_attempt, "reason_type": reason_type},
         )

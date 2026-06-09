@@ -28,7 +28,7 @@ from secondbrain.capture_models import (
     RETRY_WAIT,
     TERMINAL_STATUSES,
     CaptureRecord,
-    LeaseReaperResult,
+    DeliveryMutationResult,
     RetryDisposition,
     TransitionResult,
 )
@@ -196,6 +196,7 @@ class Ledger:
         last_error: str | None | object = UNSET,
         event_type: str,
         event_payload: dict[str, Any] | None = None,
+        delivery_status: str | None = None,
     ) -> TransitionResult | None:
         _validate_status(to_status)
         for s in from_statuses:
@@ -212,6 +213,7 @@ class Ledger:
                 last_error=last_error,
                 event_type=event_type,
                 event_payload=event_payload,
+                delivery_status=delivery_status,
             ),
         )
 
@@ -268,7 +270,7 @@ class Ledger:
         delivery_attempt: int,
         derived_note_path: str,
         git_commit_hash: str | None = None,
-    ) -> bool:
+    ) -> DeliveryMutationResult:
         return self._write(
             "mark_filed",
             lambda conn: self._mark_delivery_terminal(
@@ -290,7 +292,7 @@ class Ledger:
         derived_note_path: str,
         git_commit_hash: str | None = None,
         reason_type: str = "",
-    ) -> bool:
+    ) -> DeliveryMutationResult:
         return self._write(
             "mark_inbox",
             lambda conn: self._mark_delivery_terminal(
@@ -366,25 +368,11 @@ class Ledger:
             ),
         )
 
-    def requeue_expired_leases(
-        self,
-        *,
-        now: datetime,
-        batch_size: int,
-        max_attempts: int,
-        base_delay_seconds: int,
-        max_delay_seconds: int,
-    ) -> LeaseReaperResult:
+    def normalize_delivery_for_local_full(self) -> int:
+        """Set PENDING_FORWARD/RETRY_WAIT captures to NOT_APPLICABLE for local-full mode startup."""
         return self._write(
-            "requeue_expired_leases",
-            lambda conn: self._requeue_expired_leases(
-                conn,
-                now=now,
-                batch_size=batch_size,
-                max_attempts=max_attempts,
-                base_delay_seconds=base_delay_seconds,
-                max_delay_seconds=max_delay_seconds,
-            ),
+            "normalize_delivery_for_local_full",
+            self._normalize_delivery_for_local_full,
         )
 
     def delivery_status_counts(self) -> dict[str, int]:
@@ -684,6 +672,7 @@ class Ledger:
         last_error: str | None | object,
         event_type: str,
         event_payload: dict[str, Any] | None,
+        delivery_status: str | None = None,
     ) -> TransitionResult | None:
         current_row = self._get_by_capture_id(conn, capture_id)
         previous_status = current_row["status"]
@@ -701,6 +690,9 @@ class Ledger:
         if last_error is not UNSET:
             updates.append("last_error = ?")
             values.append(last_error)
+        if delivery_status is not None:
+            updates.append("delivery_status = ?")
+            values.append(delivery_status)
 
         updates.append("updated_at = ?")
         values.append(_iso(_now()))
@@ -744,9 +736,11 @@ class Ledger:
         rows = conn.execute(
             """
             SELECT * FROM captures
-            WHERE
-                delivery_status = 'PENDING_FORWARD'
-                OR (delivery_status = 'RETRY_WAIT' AND next_attempt_at <= ?)
+            WHERE status = 'RECEIVED'
+              AND (
+                  delivery_status = 'PENDING_FORWARD'
+                  OR (delivery_status = 'RETRY_WAIT' AND next_attempt_at <= ?)
+              )
             ORDER BY id
             LIMIT ?
             """,
@@ -848,28 +842,40 @@ class Ledger:
         git_commit_hash: str | None,
         event_type: str,
         extra_payload: dict[str, Any] | None = None,
-    ) -> bool:
+    ) -> DeliveryMutationResult:
         row = self._get_by_capture_id(conn, capture_id)
-        if row["delivery_attempts"] != delivery_attempt:
-            return False
         current_ds = row["delivery_status"]
-        # Idempotent: exact same terminal callback (path, commit hash, reason all match)
+
+        def _result(outcome: str, changed: bool) -> DeliveryMutationResult:
+            return DeliveryMutationResult(
+                capture_id=capture_id,
+                delivery_status=row["delivery_status"],
+                delivery_attempts=row["delivery_attempts"],
+                changed=changed,
+                outcome=outcome,
+            )
+
+        if row["delivery_attempts"] != delivery_attempt:
+            return _result("stale_attempt", False)
+
+        # Exact-equality idempotency check — all fields must match
         if row["status"] == note_status and current_ds == COMPLETE:
-            if row["derived_note_path"] != derived_note_path:
-                return False
-            stored_hash = row["delivery_commit_hash"]
-            if git_commit_hash is not None and stored_hash != git_commit_hash:
-                return False
-            stored_reason = row["delivery_reason_type"]
             incoming_reason = (extra_payload or {}).get("reason_type", None)
-            if incoming_reason is not None and stored_reason != incoming_reason:
-                return False
-            return True
-        # Reject conflicting terminal
+            if (
+                row["derived_note_path"] != derived_note_path
+                or row["delivery_commit_hash"] != git_commit_hash
+                or row["delivery_reason_type"] != incoming_reason
+            ):
+                return _result("conflicting_replay", False)
+            return _result("idempotent_replay", False)
+
+        # Any other complete state with different note_status is a conflict
         if current_ds == COMPLETE:
-            return False
+            return _result("conflicting_replay", False)
+
         if current_ds not in (DELIVERY_FORWARDED, DELIVERY_CLASSIFYING):
-            return False
+            return _result("invalid_state", False)
+
         now = _iso(_now())
         reason_type = (extra_payload or {}).get("reason_type", None)
         conn.execute(
@@ -892,7 +898,15 @@ class Ledger:
         if extra_payload:
             payload.update(extra_payload)
         self._append_event(conn, capture_id, event_type, payload)
-        return True
+        # Return fresh row state
+        updated = self._get_by_capture_id(conn, capture_id)
+        return DeliveryMutationResult(
+            capture_id=capture_id,
+            delivery_status=updated["delivery_status"],
+            delivery_attempts=updated["delivery_attempts"],
+            changed=True,
+            outcome="changed",
+        )
 
     def _renew_delivery_lease(
         self,
@@ -1048,93 +1062,18 @@ class Ledger:
             failed_terminally=False,
         )
 
-    def _requeue_expired_leases(
-        self,
-        conn: sqlite3.Connection,
-        *,
-        now: datetime,
-        batch_size: int,
-        max_attempts: int,
-        base_delay_seconds: int,
-        max_delay_seconds: int,
-    ) -> LeaseReaperResult:
-        now_iso = _iso(now)
-        rows = conn.execute(
+    def _normalize_delivery_for_local_full(self, conn: sqlite3.Connection) -> int:
+        """Normalize PENDING_FORWARD/RETRY_WAIT rows to NOT_APPLICABLE for local-full mode."""
+        now = _iso(_now())
+        cursor = conn.execute(
             """
-            SELECT * FROM captures
-            WHERE delivery_status IN (?, ?, ?)
-              AND processing_lease_until <= ?
-            ORDER BY id
-            LIMIT ?
+            UPDATE captures
+            SET delivery_status = ?, updated_at = ?
+            WHERE delivery_status IN (?, ?)
             """,
-            (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING, now_iso, batch_size),
-        ).fetchall()
-
-        requeued = 0
-        terminal_failures = 0
-        failed_ids: list[str] = []
-
-        for row in rows:
-            capture_id = row["capture_id"]
-            attempts = row["delivery_attempts"]
-
-            if attempts >= max_attempts:
-                # Exceeded cap — mark terminal
-                conn.execute(
-                    """
-                    UPDATE captures
-                    SET status = ?, delivery_status = ?, processing_lease_until = NULL,
-                        next_attempt_at = NULL, updated_at = ?
-                    WHERE capture_id = ?
-                    """,
-                    (FAILED, DELIVERY_FAILED, _iso(_now()), capture_id),
-                )
-                self._append_event(
-                    conn,
-                    capture_id,
-                    "RETRY_LIMIT_EXCEEDED",
-                    {
-                        "delivery_attempt": attempts,
-                        "delivery_status": DELIVERY_FAILED,
-                        "reason_type": "expired_lease",
-                    },
-                )
-                terminal_failures += 1
-                failed_ids.append(capture_id)
-            else:
-                delay = _calculate_retry_delay(
-                    delivery_attempts=attempts,
-                    base_delay_seconds=base_delay_seconds,
-                    max_delay_seconds=max_delay_seconds,
-                )
-                from datetime import timedelta
-                next_attempt = now + timedelta(seconds=delay)
-                conn.execute(
-                    """
-                    UPDATE captures
-                    SET delivery_status = ?, processing_lease_until = NULL,
-                        next_attempt_at = ?, updated_at = ?
-                    WHERE capture_id = ?
-                    """,
-                    (RETRY_WAIT, _iso(next_attempt), _iso(_now()), capture_id),
-                )
-                self._append_event(
-                    conn,
-                    capture_id,
-                    "REQUEUED_STALE_LEASE",
-                    {
-                        "delivery_attempt": attempts,
-                        "delivery_status": RETRY_WAIT,
-                        "next_attempt_at": _iso(next_attempt),
-                    },
-                )
-                requeued += 1
-
-        return LeaseReaperResult(
-            requeued=requeued,
-            terminal_failures=terminal_failures,
-            failed_capture_ids=failed_ids,
+            (NOT_APPLICABLE, now, PENDING_FORWARD, RETRY_WAIT),
         )
+        return cursor.rowcount
 
     # ------------------------------------------------------------------
     # Private system state implementations

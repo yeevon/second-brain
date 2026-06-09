@@ -87,11 +87,13 @@ def test_api_routes_delegate_to_capture_service():
     source = (SRC / "capture_api.py").read_text(encoding="utf-8")
 
     assert "capture_service.get_capture" in source
-    assert "capture_service.mark_forwarded" in source
-    assert "capture_service.mark_classifying" in source
-    assert "capture_service.mark_filed" in source
-    assert "capture_service.mark_inbox" in source
-    assert "capture_service.mark_failed" in source
+    assert "capture_service.acknowledge_delivery_forwarded" in source
+    assert "capture_service.acknowledge_delivery_classifying" in source
+    assert "capture_service.acknowledge_delivery_filed" in source
+    assert "capture_service.acknowledge_delivery_inbox" in source
+    assert "capture_service.acknowledge_delivery_failed" in source
+    assert "capture_service.schedule_delivery_retry" in source
+    assert "capture_service.renew_delivery_lease" in source
     assert "capture_service.retry" in source
     assert "capture_service.edit_receipt" in source
 

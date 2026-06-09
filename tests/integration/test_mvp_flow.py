@@ -478,8 +478,8 @@ class AlwaysAcceptClient:
 
 
 @pytest.mark.asyncio
-async def test_downstream_crash_after_webhook_acceptance_becomes_retryable(tmp_path):
-    """Primary SB-107 acceptance test: FORWARDED → expired lease → RETRY_WAIT → reclaimable."""
+async def test_schedule_retry_makes_capture_reclaimable(tmp_path):
+    """schedule_retry transitions DELIVERY_FORWARDED → RETRY_WAIT → reclaimable as attempt 2."""
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     settings = make_delivery_settings()
     now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
@@ -495,55 +495,35 @@ async def test_downstream_crash_after_webhook_acceptance_becomes_retryable(tmp_p
     )
     capture_id = insert_result.capture.capture_id
 
-    # Claim delivery attempt 1
     claimed = ledger.claim_due_deliveries(now=now, lease_until=short_lease, batch_size=10)
     assert len(claimed) == 1
     assert claimed[0].delivery_attempts == 1
 
-    # Fake webhook accepts request → mark FORWARDED with processing lease
-    ledger.mark_forwarded(
-        capture_id=capture_id, delivery_attempt=1, lease_until=short_lease
-    )
+    ledger.mark_forwarded(capture_id=capture_id, delivery_attempt=1, lease_until=short_lease)
     assert ledger.get_capture(capture_id).delivery_status == DELIVERY_FORWARDED
 
-    # Simulate downstream crash: no CLASSIFYING, no FILED callback arrives
-    # Advance clock beyond lease
+    # Downstream reports transient error → schedule retry
     expired = now + timedelta(seconds=120)
-
-    # Run stale-lease reaper via ledger (reaper service loop belongs to SB-108)
-    result = ledger.requeue_expired_leases(
+    disposition = ledger.schedule_retry(
+        capture_id=capture_id,
+        delivery_attempt=1,
         now=expired,
-        batch_size=10,
+        error_type="connection_timeout",
+        reason_type="webhook_failure",
         max_attempts=settings.delivery_max_attempts,
         base_delay_seconds=settings.delivery_retry_base_delay_seconds,
         max_delay_seconds=settings.delivery_retry_max_delay_seconds,
     )
-    assert result.requeued == 1
-    assert result.terminal_failures == 0
+    assert disposition.retry_scheduled is True
 
     capture = ledger.get_capture(capture_id)
     assert capture.delivery_status == RETRY_WAIT
     assert capture.next_attempt_at is not None
     assert capture.processing_lease_until is None
-    assert capture.status == RECEIVED  # note lifecycle unchanged
-    assert capture.raw_text == "important note"  # raw text immutable
+    assert capture.status == RECEIVED
+    assert capture.raw_text == "important note"
 
-    # Verify REQUEUED_STALE_LEASE event was appended
-    events = ledger._runtime.read(
-        lambda conn: [
-            row["event_type"]
-            for row in conn.execute(
-                "SELECT event_type FROM capture_events WHERE capture_id = ? ORDER BY id",
-                (capture_id,),
-            ).fetchall()
-        ]
-    )
-    assert "REQUEUED_STALE_LEASE" in events
-
-    # Advance clock past next_attempt_at
     after_retry = capture.next_attempt_at + timedelta(seconds=1)
-
-    # Dispatcher claims delivery attempt 2
     reclaimed = ledger.claim_due_deliveries(now=after_retry, lease_until=after_retry, batch_size=10)
     assert len(reclaimed) == 1
     assert reclaimed[0].delivery_attempts == 2
@@ -553,8 +533,8 @@ async def test_downstream_crash_after_webhook_acceptance_becomes_retryable(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_repeated_downstream_crashes_fail_visibly_after_retry_cap(tmp_path):
-    """After max_attempts crashes, capture becomes terminally FAILED with RETRY_LIMIT_EXCEEDED."""
+async def test_schedule_retry_reaches_terminal_failure_at_cap(tmp_path):
+    """After max_attempts retries, schedule_retry marks capture terminally FAILED."""
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     settings = make_delivery_settings(delivery_max_attempts=3)
     now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
@@ -569,7 +549,6 @@ async def test_repeated_downstream_crashes_fail_visibly_after_retry_cap(tmp_path
     )
     capture_id = insert_result.capture.capture_id
 
-    # Cycle: claim → forward → expire lease → requeue — until cap exceeded
     t = now
     for cycle in range(settings.delivery_max_attempts):
         lease = t + timedelta(seconds=30)
@@ -577,15 +556,18 @@ async def test_repeated_downstream_crashes_fail_visibly_after_retry_cap(tmp_path
         assert claimed[0].delivery_attempts == cycle + 1
         ledger.mark_forwarded(capture_id=capture_id, delivery_attempt=cycle + 1, lease_until=lease)
         expired = t + timedelta(seconds=120)
-        result = ledger.requeue_expired_leases(
+        disposition = ledger.schedule_retry(
+            capture_id=capture_id,
+            delivery_attempt=cycle + 1,
             now=expired,
-            batch_size=10,
+            error_type="connection_timeout",
+            reason_type="webhook_failure",
             max_attempts=settings.delivery_max_attempts,
             base_delay_seconds=settings.delivery_retry_base_delay_seconds,
             max_delay_seconds=settings.delivery_retry_max_delay_seconds,
         )
         t = expired + timedelta(seconds=300)
-        if result.terminal_failures > 0:
+        if disposition.failed_terminally:
             break
 
     capture = ledger.get_capture(capture_id)
@@ -593,7 +575,7 @@ async def test_repeated_downstream_crashes_fail_visibly_after_retry_cap(tmp_path
     assert capture.delivery_status == DELIVERY_FAILED
     assert capture.processing_lease_until is None
     assert capture.next_attempt_at is None
-    assert capture.raw_text == "important note"  # raw text still intact
+    assert capture.raw_text == "important note"
 
     events = ledger._runtime.read(
         lambda conn: [
@@ -624,14 +606,20 @@ async def test_late_callback_from_old_attempt_cannot_override_new_attempt(tmp_pa
     )
     capture_id = insert_result.capture.capture_id
 
-    # Attempt 1: claim → forward → lease expires → requeue
+    # Attempt 1: claim → forward → downstream reports transient error → RETRY_WAIT
     lease1 = now + timedelta(seconds=30)
     ledger.claim_due_deliveries(now=now, lease_until=lease1, batch_size=10)
     ledger.mark_forwarded(capture_id=capture_id, delivery_attempt=1, lease_until=lease1)
     expired = now + timedelta(seconds=120)
-    ledger.requeue_expired_leases(
-        now=expired, batch_size=10, max_attempts=5,
-        base_delay_seconds=10, max_delay_seconds=300,
+    ledger.schedule_retry(
+        capture_id=capture_id,
+        delivery_attempt=1,
+        now=expired,
+        error_type="connection_timeout",
+        reason_type="webhook_failure",
+        max_attempts=5,
+        base_delay_seconds=10,
+        max_delay_seconds=300,
     )
 
     # Attempt 2: claim

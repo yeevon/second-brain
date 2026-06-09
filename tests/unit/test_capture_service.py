@@ -551,39 +551,45 @@ def test_service_ignores_stale_classifying_callback(tmp_path):
     ledger.close()
 
 
-def test_service_terminal_callback_is_idempotent(tmp_path):
-    """Same filed callback repeated with same path returns True."""
+@pytest.mark.asyncio
+async def test_service_terminal_callback_is_idempotent(tmp_path):
+    """Same filed callback repeated with same path reports idempotent_replay."""
     service, ledger, capture = _make_service_with_capture(tmp_path)
     now = _NOW
     lease = now + timedelta(seconds=60)
     ledger.claim_due_deliveries(now=now, lease_until=lease, batch_size=10)
     ledger.mark_forwarded(capture_id=capture.capture_id, delivery_attempt=1, lease_until=lease)
 
-    ok1 = ledger.mark_filed(
+    ok1 = await service.acknowledge_delivery_filed(
         capture_id=capture.capture_id, delivery_attempt=1, derived_note_path="a.md"
     )
-    ok2 = ledger.mark_filed(
+    ok2 = await service.acknowledge_delivery_filed(
         capture_id=capture.capture_id, delivery_attempt=1, derived_note_path="a.md"
     )
-    assert ok1 is True
-    assert ok2 is True  # identical replay is idempotent
+    assert ok1.changed is True
+    assert ok1.outcome == "changed"
+    assert ok2.changed is False
+    assert ok2.outcome == "idempotent_replay"
     ledger.close()
 
 
-def test_service_rejects_conflicting_terminal_callback(tmp_path):
-    """Filed callback with different path after completion returns False."""
+@pytest.mark.asyncio
+async def test_service_rejects_conflicting_terminal_callback(tmp_path):
+    """Filed callback with different path after completion reports conflicting_replay."""
     service, ledger, capture = _make_service_with_capture(tmp_path)
     now = _NOW
     lease = now + timedelta(seconds=60)
     ledger.claim_due_deliveries(now=now, lease_until=lease, batch_size=10)
     ledger.mark_forwarded(capture_id=capture.capture_id, delivery_attempt=1, lease_until=lease)
-    ledger.mark_filed(
+
+    await service.acknowledge_delivery_filed(
         capture_id=capture.capture_id, delivery_attempt=1, derived_note_path="a.md"
     )
-    conflict = ledger.mark_filed(
+    conflict = await service.acknowledge_delivery_filed(
         capture_id=capture.capture_id, delivery_attempt=1, derived_note_path="b.md"
     )
-    assert conflict is False
+    assert conflict.changed is False
+    assert conflict.outcome == "conflicting_replay"
     ledger.close()
 
 
@@ -649,14 +655,15 @@ def test_capture_only_mode_inserts_as_pending_forward(tmp_path):
     ledger.close()
 
 
-def test_schedule_delivery_retry_returns_retry_disposition(tmp_path):
+@pytest.mark.asyncio
+async def test_schedule_delivery_retry_returns_retry_disposition(tmp_path):
     """schedule_delivery_retry wires through settings correctly."""
     service, ledger, capture = _make_service_with_capture(tmp_path)
     now = _NOW
     lease = now + timedelta(seconds=60)
     ledger.claim_due_deliveries(now=now, lease_until=lease, batch_size=10)
 
-    disposition = service.schedule_delivery_retry(
+    disposition = await service.schedule_delivery_retry(
         capture_id=capture.capture_id,
         delivery_attempt=1,
         error_type="TimeoutError",
@@ -667,7 +674,8 @@ def test_schedule_delivery_retry_returns_retry_disposition(tmp_path):
     ledger.close()
 
 
-def test_acknowledge_delivery_failed_marks_capture_terminally_failed(tmp_path):
+@pytest.mark.asyncio
+async def test_acknowledge_delivery_failed_marks_capture_terminally_failed(tmp_path):
     """acknowledge_delivery_failed sets delivery_status to FAILED."""
     service, ledger, capture = _make_service_with_capture(tmp_path)
     now = _NOW
@@ -675,12 +683,116 @@ def test_acknowledge_delivery_failed_marks_capture_terminally_failed(tmp_path):
     ledger.claim_due_deliveries(now=now, lease_until=lease, batch_size=10)
     ledger.mark_forwarded(capture_id=capture.capture_id, delivery_attempt=1, lease_until=lease)
 
-    changed = service.acknowledge_delivery_failed(
+    changed = await service.acknowledge_delivery_failed(
         capture_id=capture.capture_id,
         delivery_attempt=1,
-        reason="unrecoverable downstream error",
+        reason_type="writer_failure",
     )
     assert changed is True
     updated = ledger.get_capture(capture.capture_id)
     assert updated.delivery_status == DELIVERY_FAILED
+    ledger.close()
+
+
+# ===========================================================================
+# SB-107 audit 2 — Local vs downstream isolation
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_local_worker_filed_capture_is_not_pending_forward(tmp_path):
+    """Local-full filing must normalize delivery_status to NOT_APPLICABLE."""
+    from types import SimpleNamespace as NS
+    from secondbrain.models import Classification
+    settings = make_delivery_settings(tmp_path, capture_processing_mode="local-full")
+    ledger = Ledger(settings.ledger_path)
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    # Insert with default initial_delivery_status (will be NOT_APPLICABLE)
+    result = ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="local note",
+        initial_delivery_status=service._initial_delivery_status,
+        received_at=_NOW,
+    )
+    capture = result.capture
+    # Manually put it through local worker flow
+    ledger.mark_classifying(capture.capture_id)
+    classification = Classification(
+        folder="projects",
+        project="test",
+        note_type="reference",
+        title="Test Note",
+        tags=["test"],
+        body="Body content.",
+        actions=[],
+        needs_clarification=False,
+        clarifying_question=None,
+        confidence=0.9,
+    )
+    service.mark_filed(
+        capture_id=capture.capture_id,
+        note_path="20_projects/local.md",
+        classification=classification,
+    )
+    updated = ledger.get_capture(capture.capture_id)
+    assert updated.delivery_status == NOT_APPLICABLE
+    ledger.close()
+
+
+def test_dispatcher_never_claims_terminal_note_with_pending_forward_state(tmp_path):
+    """Dispatcher claim query restricts to status=RECEIVED; terminal notes are not claimed."""
+    import sqlite3
+    db_path = tmp_path / "ledger.sqlite3"
+    ledger = Ledger(db_path)
+    # Insert a capture in normal RECEIVED / PENDING_FORWARD state
+    result = ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="local note",
+        received_at=_NOW,
+    )
+    cid = result.capture.capture_id
+    # Force the capture to FILED while keeping delivery_status = PENDING_FORWARD
+    # (simulates a migration edge case where local filing happened before SB-107)
+    raw_conn = sqlite3.connect(str(db_path))
+    raw_conn.execute(
+        "UPDATE captures SET status = 'FILED' WHERE capture_id = ?", (cid,)
+    )
+    raw_conn.commit()
+    raw_conn.close()
+    # Dispatcher must not claim this
+    claimed = ledger.claim_due_deliveries(now=_NOW, lease_until=_NOW + timedelta(seconds=60), batch_size=10)
+    assert len(claimed) == 0
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_local_full_startup_normalizes_migrated_received_rows(tmp_path):
+    """enqueue_unfinished_captures normalizes PENDING_FORWARD rows in local-full mode."""
+    settings = make_delivery_settings(tmp_path, capture_processing_mode="local-full")
+    ledger = Ledger(settings.ledger_path)
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    # Insert a row as if migrated from MVP (will use NOT_APPLICABLE from service._initial_delivery_status)
+    # But simulate the old PENDING_FORWARD state by inserting directly
+    result = ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="migrated note",
+        initial_delivery_status=PENDING_FORWARD,  # simulating migration 002 output
+        received_at=_NOW,
+    )
+    assert result.capture.delivery_status == PENDING_FORWARD
+
+    # Startup normalization must convert it
+    await service.enqueue_unfinished_captures()
+    updated = ledger.get_capture(result.capture.capture_id)
+    assert updated.delivery_status == NOT_APPLICABLE
     ledger.close()

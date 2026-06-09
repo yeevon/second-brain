@@ -12,11 +12,10 @@ from secondbrain.api_models import (
     AcknowledgeForwardedRequest,
     AcknowledgeInboxRequest,
     CaptureResponse,
+    DeliveryTransitionResponse,
     EditReceiptRequest,
     HealthResponse,
     MarkFailedRequest,
-    MarkFiledRequest,
-    MarkInboxRequest,
     ReceiptDeliveryResponse,
     RenewLeaseRequest,
     ScheduleRetryRequest,
@@ -29,7 +28,7 @@ from secondbrain.capture_service import (
     InvalidCaptureTransitionError,
     ReceiptDeliveryError,
 )
-from secondbrain.capture_models import CaptureRecord, TransitionResult
+from secondbrain.capture_models import CaptureRecord, DeliveryMutationResult, TransitionResult
 
 
 INTERNAL_TOKEN_HEADER = "X-Second-Brain-Internal-Token"
@@ -71,70 +70,6 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
         return _capture_response(_get_capture(capture_service, capture_id))
 
     @app.post(
-        "/internal/captures/{capture_id}/mark-forwarded",
-        response_model=TransitionResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def mark_forwarded(capture_id: str):
-        return _transition_response(_transition(lambda: capture_service.mark_forwarded(capture_id)))
-
-    @app.post(
-        "/internal/captures/{capture_id}/mark-classifying",
-        response_model=TransitionResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def mark_classifying(capture_id: str):
-        return _transition_response(_transition(lambda: capture_service.mark_classifying(capture_id)))
-
-    @app.post(
-        "/internal/captures/{capture_id}/mark-filed",
-        response_model=TransitionResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def mark_filed(capture_id: str, request: MarkFiledRequest):
-        return _transition_response(
-            _transition(
-                lambda: capture_service.mark_filed(
-                    capture_id=capture_id,
-                    note_path=request.note_path,
-                    classification=request.classification,
-                )
-            )
-        )
-
-    @app.post(
-        "/internal/captures/{capture_id}/mark-inbox",
-        response_model=TransitionResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def mark_inbox(capture_id: str, request: MarkInboxRequest):
-        return _transition_response(
-            _transition(
-                lambda: capture_service.mark_inbox(
-                    capture_id=capture_id,
-                    note_path=request.note_path,
-                    classification=request.classification,
-                    reason=request.reason,
-                )
-            )
-        )
-
-    @app.post(
-        "/internal/captures/{capture_id}/mark-failed",
-        response_model=TransitionResponse,
-        dependencies=[Depends(require_internal_token)],
-    )
-    async def mark_failed(capture_id: str, request: MarkFailedRequest):
-        return _transition_response(
-            _transition(
-                lambda: capture_service.mark_failed(
-                    capture_id=capture_id,
-                    reason=request.reason,
-                )
-            )
-        )
-
-    @app.post(
         "/internal/captures/{capture_id}/retry",
         response_model=TransitionResponse,
         dependencies=[Depends(require_internal_token)],
@@ -149,86 +84,83 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
 
     @app.post(
         "/internal/captures/{capture_id}/delivery/acknowledge-forwarded",
-        response_model=TransitionResponse,
+        response_model=DeliveryTransitionResponse,
         dependencies=[Depends(require_internal_token)],
     )
     async def acknowledge_delivery_forwarded(capture_id: str, request: AcknowledgeForwardedRequest):
-        capture = _get_capture(capture_service, capture_id)
         changed = capture_service.acknowledge_delivery_forwarded(
             capture_id=capture_id,
             delivery_attempt=request.delivery_attempt,
         )
-        return _delivery_ack_response(capture_id, changed)
+        return _delivery_response(capture_service, capture_id, changed=changed,
+                                  outcome="changed" if changed else "stale_attempt")
 
     @app.post(
         "/internal/captures/{capture_id}/delivery/acknowledge-classifying",
-        response_model=TransitionResponse,
+        response_model=DeliveryTransitionResponse,
         dependencies=[Depends(require_internal_token)],
     )
     async def acknowledge_delivery_classifying(capture_id: str, request: AcknowledgeClassifyingRequest):
-        capture = _get_capture(capture_service, capture_id)
         changed = capture_service.acknowledge_delivery_classifying(
             capture_id=capture_id,
             delivery_attempt=request.delivery_attempt,
         )
-        return _delivery_ack_response(capture_id, changed)
+        return _delivery_response(capture_service, capture_id, changed=changed,
+                                  outcome="changed" if changed else "stale_attempt")
 
     @app.post(
         "/internal/captures/{capture_id}/delivery/renew-lease",
-        response_model=TransitionResponse,
+        response_model=DeliveryTransitionResponse,
         dependencies=[Depends(require_internal_token)],
     )
     async def renew_delivery_lease(capture_id: str, request: RenewLeaseRequest):
-        capture = _get_capture(capture_service, capture_id)
         changed = capture_service.renew_delivery_lease(
             capture_id=capture_id,
             delivery_attempt=request.delivery_attempt,
         )
-        return _delivery_ack_response(capture_id, changed)
+        return _delivery_response(capture_service, capture_id, changed=changed,
+                                  outcome="changed" if changed else "stale_attempt")
 
     @app.post(
         "/internal/captures/{capture_id}/delivery/acknowledge-filed",
-        response_model=TransitionResponse,
+        response_model=DeliveryTransitionResponse,
         dependencies=[Depends(require_internal_token)],
     )
     async def acknowledge_delivery_filed(capture_id: str, request: AcknowledgeFiledRequest):
         _get_capture(capture_service, capture_id)
-        changed = await capture_service.acknowledge_delivery_filed(
+        result = await capture_service.acknowledge_delivery_filed(
             capture_id=capture_id,
             delivery_attempt=request.delivery_attempt,
             derived_note_path=request.note_path,
             git_commit_hash=request.git_commit_hash,
         )
-        if changed is False and _get_capture(capture_service, capture_id).delivery_status != "COMPLETE":
-            raise HTTPException(status_code=409, detail="stale or conflicting delivery attempt")
-        return _delivery_ack_response(capture_id, changed)
+        return _delivery_mutation_response(capture_service, capture_id, result)
 
     @app.post(
         "/internal/captures/{capture_id}/delivery/acknowledge-inbox",
-        response_model=TransitionResponse,
+        response_model=DeliveryTransitionResponse,
         dependencies=[Depends(require_internal_token)],
     )
     async def acknowledge_delivery_inbox(capture_id: str, request: AcknowledgeInboxRequest):
         _get_capture(capture_service, capture_id)
-        changed = await capture_service.acknowledge_delivery_inbox(
+        result = await capture_service.acknowledge_delivery_inbox(
             capture_id=capture_id,
             delivery_attempt=request.delivery_attempt,
             derived_note_path=request.note_path,
             git_commit_hash=request.git_commit_hash,
             reason_type=request.reason_type,
         )
-        if changed is False and _get_capture(capture_service, capture_id).delivery_status != "COMPLETE":
-            raise HTTPException(status_code=409, detail="stale or conflicting delivery attempt")
-        return _delivery_ack_response(capture_id, changed)
+        return _delivery_mutation_response(capture_service, capture_id, result)
 
     @app.post(
         "/internal/captures/{capture_id}/delivery/schedule-retry",
+        response_model=DeliveryTransitionResponse,
         dependencies=[Depends(require_internal_token)],
     )
     async def schedule_delivery_retry(capture_id: str, request: ScheduleRetryRequest):
         _get_capture(capture_service, capture_id)
         try:
-            disposition = capture_service.schedule_delivery_retry(
+            disposition = await capture_service.schedule_delivery_retry(
                 capture_id=capture_id,
                 delivery_attempt=request.delivery_attempt,
                 error_type=request.error_type,
@@ -236,27 +168,29 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail="stale delivery attempt") from exc
-        return {
-            "capture_id": capture_id,
-            "delivery_status": disposition.delivery_status,
-            "delivery_attempts": disposition.delivery_attempts,
-            "retry_scheduled": disposition.retry_scheduled,
-            "failed_terminally": disposition.failed_terminally,
-        }
+        capture = _get_capture(capture_service, capture_id)
+        return DeliveryTransitionResponse(
+            capture_id=capture_id,
+            delivery_status=capture.delivery_status,
+            delivery_attempts=capture.delivery_attempts,
+            changed=True,
+            outcome="retry_scheduled" if disposition.retry_scheduled else "terminal_failure",
+        )
 
     @app.post(
         "/internal/captures/{capture_id}/delivery/acknowledge-failed",
-        response_model=TransitionResponse,
+        response_model=DeliveryTransitionResponse,
         dependencies=[Depends(require_internal_token)],
     )
     async def acknowledge_delivery_failed(capture_id: str, request: AcknowledgeDeliveryFailedRequest):
         _get_capture(capture_service, capture_id)
-        changed = capture_service.acknowledge_delivery_failed(
+        changed = await capture_service.acknowledge_delivery_failed(
             capture_id=capture_id,
             delivery_attempt=request.delivery_attempt,
-            reason=request.reason,
+            reason_type=request.reason_type,
         )
-        return _delivery_ack_response(capture_id, changed)
+        return _delivery_response(capture_service, capture_id, changed=changed,
+                                  outcome="changed" if changed else "stale_attempt")
 
     @app.post(
         "/internal/receipts/{capture_id}/edit",
@@ -323,12 +257,42 @@ def _capture_response(capture: CaptureRecord) -> CaptureResponse:
     )
 
 
-def _delivery_ack_response(capture_id: str, changed: bool) -> TransitionResponse:
-    return TransitionResponse(
+def _delivery_response(
+    capture_service: CaptureService,
+    capture_id: str,
+    *,
+    changed: bool,
+    outcome: str,
+    ignored_reason: str | None = None,
+) -> DeliveryTransitionResponse:
+    capture = _get_capture(capture_service, capture_id)
+    return DeliveryTransitionResponse(
         capture_id=capture_id,
-        previous_status="",
-        status="",
+        delivery_status=capture.delivery_status,
+        delivery_attempts=capture.delivery_attempts,
         changed=changed,
+        outcome=outcome,
+        ignored_reason=ignored_reason,
+    )
+
+
+def _delivery_mutation_response(
+    capture_service: CaptureService,
+    capture_id: str,
+    result: DeliveryMutationResult,
+) -> DeliveryTransitionResponse:
+    if result.outcome == "conflicting_replay":
+        raise HTTPException(status_code=409, detail="conflicting terminal callback")
+    if result.outcome == "invalid_state":
+        raise HTTPException(status_code=409, detail="capture not in valid state for terminal callback")
+    capture = _get_capture(capture_service, capture_id)
+    return DeliveryTransitionResponse(
+        capture_id=capture_id,
+        delivery_status=capture.delivery_status,
+        delivery_attempts=capture.delivery_attempts,
+        changed=result.changed,
+        outcome=result.outcome,
+        ignored_reason="stale_attempt" if result.outcome == "stale_attempt" else None,
     )
 
 

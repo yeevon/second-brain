@@ -1154,12 +1154,13 @@ def test_mark_filed_moves_capture_to_terminal_complete(tmp_path):
     _accepted(ledger, "1001")
     ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
     ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
-    ok = ledger.mark_filed(
+    result = ledger.mark_filed(
         capture_id="SB-20260609-0001",
         delivery_attempt=1,
         derived_note_path="20_projects/note.md",
     )
-    assert ok is True
+    assert result.changed is True
+    assert result.outcome == "changed"
     capture = ledger.get_capture("SB-20260609-0001")
     assert capture.status == FILED
     assert capture.delivery_status == COMPLETE
@@ -1173,13 +1174,14 @@ def test_mark_inbox_moves_capture_to_terminal_complete(tmp_path):
     _accepted(ledger, "1001")
     ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
     ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
-    ok = ledger.mark_inbox(
+    result = ledger.mark_inbox(
         capture_id="SB-20260609-0001",
         delivery_attempt=1,
         derived_note_path="00_inbox/note.md",
         reason_type="needs_context",
     )
-    assert ok is True
+    assert result.changed is True
+    assert result.outcome == "changed"
     capture = ledger.get_capture("SB-20260609-0001")
     assert capture.status == INBOX
     assert capture.delivery_status == COMPLETE
@@ -1197,7 +1199,8 @@ def test_duplicate_identical_terminal_callback_is_idempotent(tmp_path):
     ok2 = ledger.mark_filed(
         capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="path/note.md"
     )
-    assert ok2 is True  # idempotent
+    assert ok2.changed is False
+    assert ok2.outcome == "idempotent_replay"
     ledger.close()
 
 
@@ -1212,7 +1215,8 @@ def test_conflicting_terminal_callback_is_rejected(tmp_path):
     conflict = ledger.mark_inbox(
         capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="path/note2.md"
     )
-    assert conflict is False
+    assert conflict.changed is False
+    assert conflict.outcome == "conflicting_replay"
     ledger.close()
 
 
@@ -1383,147 +1387,6 @@ def test_retry_cap_appends_retry_limit_exceeded_event(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Stale-lease reaper
-# ---------------------------------------------------------------------------
-
-def _claim_and_forward(ledger, capture_id, attempt=1):
-    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
-    ledger.mark_forwarded(capture_id=capture_id, delivery_attempt=attempt, lease_until=_LEASE)
-
-
-def test_reaper_requeues_expired_forwarding_lease(tmp_path):
-    ledger = make_ledger(tmp_path)
-    _accepted(ledger, "1001")
-    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
-    result = ledger.requeue_expired_leases(
-        now=_LATER, batch_size=10, max_attempts=5,
-        base_delay_seconds=10, max_delay_seconds=300,
-    )
-    assert result.requeued == 1
-    assert result.terminal_failures == 0
-    capture = ledger.get_capture("SB-20260609-0001")
-    assert capture.delivery_status == RETRY_WAIT
-    assert capture.processing_lease_until is None
-    assert capture.next_attempt_at is not None
-    ledger.close()
-
-
-def test_reaper_requeues_expired_forwarded_lease(tmp_path):
-    ledger = make_ledger(tmp_path)
-    _accepted(ledger, "1001")
-    _claim_and_forward(ledger, "SB-20260609-0001")
-    result = ledger.requeue_expired_leases(
-        now=_LATER, batch_size=10, max_attempts=5,
-        base_delay_seconds=10, max_delay_seconds=300,
-    )
-    assert result.requeued == 1
-    ledger.close()
-
-
-def test_reaper_requeues_expired_classifying_lease(tmp_path):
-    ledger = make_ledger(tmp_path)
-    _accepted(ledger, "1001")
-    _claim_and_forward(ledger, "SB-20260609-0001")
-    ledger.mark_classifying_delivery(
-        capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LEASE
-    )
-    result = ledger.requeue_expired_leases(
-        now=_LATER, batch_size=10, max_attempts=5,
-        base_delay_seconds=10, max_delay_seconds=300,
-    )
-    assert result.requeued == 1
-    ledger.close()
-
-
-def test_reaper_ignores_unexpired_lease(tmp_path):
-    ledger = make_ledger(tmp_path)
-    _accepted(ledger, "1001")
-    ledger.claim_due_deliveries(now=_NOW, lease_until=_LATER, batch_size=10)
-    result = ledger.requeue_expired_leases(
-        now=_NOW, batch_size=10, max_attempts=5,
-        base_delay_seconds=10, max_delay_seconds=300,
-    )
-    assert result.requeued == 0
-    ledger.close()
-
-
-def test_reaper_ignores_terminal_capture(tmp_path):
-    ledger = make_ledger(tmp_path)
-    _accepted(ledger, "1001")
-    _claim_and_forward(ledger, "SB-20260609-0001")
-    ledger.mark_filed(
-        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="path.md"
-    )
-    result = ledger.requeue_expired_leases(
-        now=_LATER, batch_size=10, max_attempts=5,
-        base_delay_seconds=10, max_delay_seconds=300,
-    )
-    assert result.requeued == 0
-    assert result.terminal_failures == 0
-    ledger.close()
-
-
-def test_reaper_processes_bounded_batch(tmp_path):
-    ledger = make_ledger(tmp_path)
-    for i in range(5):
-        _accepted(ledger, str(1001 + i))
-    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
-    result = ledger.requeue_expired_leases(
-        now=_LATER, batch_size=3, max_attempts=5,
-        base_delay_seconds=10, max_delay_seconds=300,
-    )
-    assert result.requeued == 3
-    ledger.close()
-
-
-def test_reaper_does_not_increment_attempt_count_until_dispatcher_claims_retry(tmp_path):
-    ledger = make_ledger(tmp_path)
-    _accepted(ledger, "1001")
-    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
-    # After claim: attempts = 1
-    result = ledger.requeue_expired_leases(
-        now=_LATER, batch_size=10, max_attempts=5,
-        base_delay_seconds=10, max_delay_seconds=300,
-    )
-    capture = ledger.get_capture("SB-20260609-0001")
-    assert capture.delivery_attempts == 1  # reaper did NOT increment
-    assert capture.delivery_status == RETRY_WAIT
-    # Now dispatcher claims again after retry window — attempts becomes 2
-    _MUCH_LATER = _LATER + timedelta(minutes=5)
-    claimed = ledger.claim_due_deliveries(now=_MUCH_LATER, lease_until=_MUCH_LATER, batch_size=10)
-    assert claimed[0].delivery_attempts == 2
-    ledger.close()
-
-
-def test_reaper_marks_failed_when_retry_cap_exceeded(tmp_path):
-    ledger = make_ledger(tmp_path)
-    _accepted(ledger, "1001")
-    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
-    result = ledger.requeue_expired_leases(
-        now=_LATER, batch_size=10, max_attempts=1,
-        base_delay_seconds=10, max_delay_seconds=300,
-    )
-    assert result.terminal_failures == 1
-    assert result.requeued == 0
-    capture = ledger.get_capture("SB-20260609-0001")
-    assert capture.status == FAILED
-    assert capture.delivery_status == DELIVERY_FAILED
-    ledger.close()
-
-
-def test_reaper_returns_capture_ids_requiring_visible_alert(tmp_path):
-    ledger = make_ledger(tmp_path)
-    _accepted(ledger, "1001")
-    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
-    result = ledger.requeue_expired_leases(
-        now=_LATER, batch_size=10, max_attempts=1,
-        base_delay_seconds=10, max_delay_seconds=300,
-    )
-    assert "SB-20260609-0001" in result.failed_capture_ids
-    ledger.close()
-
-
-# ---------------------------------------------------------------------------
 # Backoff helper
 # ---------------------------------------------------------------------------
 
@@ -1551,11 +1414,12 @@ def test_duplicate_terminal_callback_with_different_path_is_rejected(tmp_path):
     ok1 = ledger.mark_filed(
         capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="a.md"
     )
-    assert ok1 is True
+    assert ok1.changed is True
     conflict = ledger.mark_filed(
         capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="b.md"
     )
-    assert conflict is False
+    assert conflict.changed is False
+    assert conflict.outcome == "conflicting_replay"
     ledger.close()
 
 
@@ -1570,7 +1434,8 @@ def test_duplicate_terminal_callback_with_same_path_is_idempotent(tmp_path):
     ok2 = ledger.mark_filed(
         capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="a.md"
     )
-    assert ok2 is True  # same path → idempotent
+    assert ok2.changed is False
+    assert ok2.outcome == "idempotent_replay"
     ledger.close()
 
 
@@ -1583,12 +1448,13 @@ def test_duplicate_terminal_callback_with_different_git_hash_is_rejected(tmp_pat
         capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="a.md",
         git_commit_hash="abc123",
     )
-    assert ok1 is True
+    assert ok1.changed is True
     conflict = ledger.mark_filed(
         capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="a.md",
         git_commit_hash="def456",
     )
-    assert conflict is False
+    assert conflict.changed is False
+    assert conflict.outcome == "conflicting_replay"
     ledger.close()
 
 
@@ -1602,12 +1468,54 @@ def test_duplicate_inbox_callback_with_different_reason_is_rejected(tmp_path):
         capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="inbox.md",
         reason_type="low_confidence",
     )
-    assert ok1 is True
+    assert ok1.changed is True
     conflict = ledger.mark_inbox(
         capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="inbox.md",
         reason_type="needs_clarification",
     )
-    assert conflict is False
+    assert conflict.changed is False
+    assert conflict.outcome == "conflicting_replay"
+    ledger.close()
+
+
+def test_terminal_replay_missing_original_git_hash_is_rejected(tmp_path):
+    """Replay without git_commit_hash when original had one is rejected (exact equality)."""
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="a.md",
+        git_commit_hash="abc123",
+    )
+    # Replay omits git_commit_hash — must not be treated as idempotent
+    conflict = ledger.mark_filed(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="a.md",
+        git_commit_hash=None,
+    )
+    assert conflict.changed is False
+    assert conflict.outcome == "conflicting_replay"
+    ledger.close()
+
+
+def test_inbox_replay_missing_original_reason_type_is_rejected(tmp_path):
+    """Replay without reason_type when original had one is rejected."""
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.mark_forwarded(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ledger.mark_classifying_delivery(capture_id="SB-20260609-0001", delivery_attempt=1, lease_until=_LATER)
+    ledger.mark_inbox(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="inbox.md",
+        reason_type="low_confidence",
+    )
+    # Replay omits reason_type — stored value "low_confidence" != None → conflict
+    conflict = ledger.mark_inbox(
+        capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="inbox.md",
+        reason_type="",
+    )
+    assert conflict.changed is False
+    assert conflict.outcome == "conflicting_replay"
     ledger.close()
 
 

@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from secondbrain.models import Classification
+
+
+_SAFE_SLUG_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
+
+
+def _validate_safe_slug(value: str) -> str:
+    if not _SAFE_SLUG_RE.match(value):
+        raise ValueError(
+            "value must match ^[A-Za-z0-9_.:-]{1,100}$ "
+            "(safe category identifiers only, no free-form messages)"
+        )
+    return value
 
 
 class HealthResponse(BaseModel):
@@ -40,6 +53,15 @@ class TransitionResponse(BaseModel):
     previous_status: str
     status: str
     changed: bool
+
+
+class DeliveryTransitionResponse(BaseModel):
+    capture_id: str
+    delivery_status: str
+    delivery_attempts: int
+    changed: bool
+    outcome: str
+    ignored_reason: str | None = None
 
 
 class MarkFiledRequest(BaseModel):
@@ -81,16 +103,35 @@ class AcknowledgeInboxRequest(BaseModel):
     git_commit_hash: str | None = Field(default=None, max_length=100)
     reason_type: str = Field(default="", max_length=100)
 
+    @field_validator("reason_type")
+    @classmethod
+    def validate_reason_type(cls, v: str) -> str:
+        if v:
+            return _validate_safe_slug(v)
+        return v
+
 
 class ScheduleRetryRequest(BaseModel):
     delivery_attempt: int = Field(ge=1)
-    error_type: str = Field(min_length=1, max_length=200)
+    error_type: str = Field(min_length=1, max_length=100)
     reason_type: str = Field(default="webhook_failure", max_length=100)
+
+    @field_validator("error_type", "reason_type")
+    @classmethod
+    def validate_safe_slugs(cls, v: str) -> str:
+        return _validate_safe_slug(v)
 
 
 class AcknowledgeDeliveryFailedRequest(BaseModel):
     delivery_attempt: int = Field(ge=1)
-    reason: str = Field(default="", max_length=500)
+    reason_type: str = Field(default="", max_length=100)
+
+    @field_validator("reason_type")
+    @classmethod
+    def validate_reason_type(cls, v: str) -> str:
+        if v:
+            return _validate_safe_slug(v)
+        return v
 
 
 class EditReceiptRequest(BaseModel):
