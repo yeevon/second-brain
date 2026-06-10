@@ -14,16 +14,16 @@ This document is the completion gate for Milestone 2. Every item must pass befor
 | --- | --- | --- |
 | Full automated suite | Automated | `uv run pytest -q` |
 | Status-command validation | Automated + Manual | `tests/unit/test_status.py`, `tests/unit/test_heartbeat.py`, live container exec |
-| Discord capture tests | Manual | Steps 3b, 4 |
+| Discord capture tests | Manual | Steps 3c, 4 |
+| Sensitive-input rejection | Automated + Manual | `test_secret_like_input_stores_redacted_rejection_only` and friends, Step 3d |
+| Offline reconciliation | Automated + Manual | `test_capture_only_reconciliation_failure_allows_retry` and friends, Step 3g |
 | Duplicate suppression | Automated | `test_duplicate_discord_event_is_idempotent` and friends |
-| Sensitive-input rejection | Automated | `test_secret_like_input_stores_redacted_rejection_only` and friends |
-| Offline reconciliation | Automated | `test_capture_only_reconciliation_failure_allows_retry` and friends |
 | Periodic skipped-Gateway recovery | Automated | `test_skipped_gateway_event_is_recovered_by_periodic_reconciliation` |
 | Retry and lease recovery | Automated | `test_schedule_retry_makes_capture_reclaimable` and friends |
-| Clean shutdown | Automated + Manual | `test_sigterm_style_shutdown_closes_service_cleanly`, Step 3g |
-| Live SQLite monitoring | Manual proxy | Steps 3c (three terminal watches) |
-| Container recreation | Manual | Step 3e |
-| Missing-volume fail-closed | Manual | Step 3f |
+| Clean shutdown | Automated + Manual | `test_sigterm_style_shutdown_closes_service_cleanly`, Step 3i |
+| Live SQLite monitoring | Manual | Steps 3b (three terminal watches) |
+| Container recreation | Manual | Step 3f |
+| Missing-volume fail-closed | Manual | Step 3h |
 | EC2 reboot persistence | Manual | Step 4 |
 | Downstream delivery (retry, n8n) | Deferred | Automated reaper tests; no live n8n adapter exists yet |
 
@@ -70,6 +70,7 @@ export HOST_LEDGER=$CAPTURE_DATA_DIR/ledger.sqlite3
 
 mkdir -p "$CAPTURE_DATA_DIR"
 cp deploy/capture-service.env.example "$CAPTURE_SERVICE_ENV_FILE"
+chmod 600 "$CAPTURE_SERVICE_ENV_FILE"
 ```
 
 Edit `$CAPTURE_SERVICE_ENV_FILE` and fill in the required values:
@@ -104,14 +105,58 @@ docker compose ps
 
 Expected: `second-brain-capture-service` shows `Up`.
 
-### 3b — Open three monitoring terminals
-
-Open three separate terminals with `CAPTURE_DATA_DIR` and `HOST_LEDGER` exported, then run one watch in each.
-
-**Terminal 1 — captures:**
+Check the internal health endpoint from inside the container:
 
 ```bash
-watch -n 5 "sqlite3 '$HOST_LEDGER' 'SELECT id, status, discord_message_id, substr(raw_text,1,40) FROM captures ORDER BY id DESC LIMIT 10;'"
+docker compose exec -T capture-service \
+  /app/.venv/bin/python -c \
+  "import urllib.request; print(
+      urllib.request.urlopen(
+          'http://127.0.0.1:8000/health',
+          timeout=2,
+      ).read().decode()
+  )"
+```
+
+Expected: `{"status":"ok","service":"capture-service"}`
+
+Confirm port 8000 is not published to the host:
+
+```bash
+docker inspect \
+  --format '{{json .NetworkSettings.Ports}}' \
+  second-brain-capture-service
+```
+
+Expected: `{"8000/tcp":null}`
+
+### 3b — Open three monitoring terminals
+
+Open three separate terminals with `CAPTURE_DATA_DIR` and `HOST_LEDGER` exported, then run one watch in each. Do not print note text.
+
+**Terminal 1 — captures (metadata only):**
+
+```bash
+watch -n 5 "
+sqlite3 '$HOST_LEDGER' \"
+.headers on
+.mode column
+
+SELECT
+  capture_id,
+  discord_message_id,
+  status,
+  delivery_status,
+  delivery_attempts,
+  retry_attempts,
+  is_sensitive,
+  receipt_message_id,
+  updated_at
+FROM captures
+ORDER BY id DESC
+LIMIT 10;
+\"
+"
 ```
 
 **Terminal 2 — capture_events:**
@@ -146,10 +191,63 @@ Expected: `{"event":"capture_received",...}` log line, no error events.
 Confirm in the monitoring terminals:
 
 - Terminal 1: a new row appears with `status = RECEIVED`.
-- Terminal 2: a `capture_accepted` event appears.
+- Terminal 2: a `CAPTURE_RECEIVED` event appears.
 - Terminal 3: `capture_service_last_heartbeat_at` advances.
 
-### 3d — Live SQLite monitoring via status command
+### 3d — Sensitive-input rejection
+
+Post this disposable test-only value from Discord in the capture channel:
+
+```text
+password=TEST_ONLY_FAKE_SECRET_123456
+```
+
+Query the ledger to confirm the capture was rejected cleanly:
+
+```bash
+sqlite3 "$HOST_LEDGER" "
+SELECT
+  capture_id,
+  status,
+  is_sensitive,
+  raw_text IS NULL AS raw_text_is_null,
+  instr(redacted_text, '[REDACTED]') > 0 AS redaction_present
+FROM captures
+ORDER BY id DESC
+LIMIT 1;
+"
+```
+
+Expected:
+
+```text
+status = REJECTED_SENSITIVE
+is_sensitive = 1
+raw_text_is_null = 1
+redaction_present = 1
+```
+
+Confirm the fake value is absent from container logs:
+
+```bash
+docker compose logs capture-service | \
+  grep -F "TEST_ONLY_FAKE_SECRET_123456" && \
+  echo "FAIL: plaintext found in logs" || \
+  echo "PASS: plaintext absent from logs"
+```
+
+Confirm it is absent from all mounted database files (including WAL):
+
+```bash
+grep -R -a -F "TEST_ONLY_FAKE_SECRET_123456" \
+  "$CAPTURE_DATA_DIR" && \
+  echo "FAIL: plaintext found in data directory" || \
+  echo "PASS: plaintext absent from data directory"
+```
+
+Expected: both checks print `PASS`.
+
+### 3e — Live SQLite monitoring via status command
 
 Run the status command from inside the running container:
 
@@ -167,7 +265,7 @@ Expected exit codes:
 - `1` — any non-HEALTHY capture-service state (STARTING, STOPPED, STALE, UNKNOWN) or operational anomaly
 - `2` — ledger cannot be read safely
 
-### 3e — Container recreation
+### 3f — Container recreation
 
 Record the current capture count:
 
@@ -204,25 +302,93 @@ Confirm after restart:
    sqlite3 "$HOST_LEDGER" "SELECT COUNT(*) FROM captures;"
    ```
 
-### 3f — Missing-volume fail-closed behavior
+### 3g — Offline reconciliation
 
-Run the image without the data volume mounted so the EBS sentinel is absent:
+Stop the running container:
 
 ```bash
-docker run --rm \
-  --env-file "$CAPTURE_SERVICE_ENV_FILE" \
-  second-brain-capture-service:local
+docker compose stop capture-service
 ```
 
-Expected: container exits immediately (within a few seconds) with exit code `1` and the message:
+Post one normal Discord thought from your phone while the container is stopped.
+
+Note the Discord message ID of that message.
+
+Restart the container:
+
+```bash
+docker compose up -d capture-service
+```
+
+Wait until the service is healthy:
+
+```bash
+docker compose ps
+```
+
+Verify exactly one row for the offline message:
+
+```bash
+sqlite3 "$HOST_LEDGER" "
+SELECT COUNT(*)
+FROM captures
+WHERE discord_message_id = '<offline-message-id>';
+"
+```
+
+Expected: `1`
+
+Confirm in logs that startup reconciliation processed it:
+
+```bash
+docker compose logs --tail=50 capture-service | grep reconcil
+```
+
+Expected: a log line showing `handled: 1` for the startup reconciliation pass. No duplicate receipt in Discord.
+
+### 3h — Missing-volume fail-closed behavior
+
+Create a clean directory that has no sentinel file:
+
+```bash
+rm -rf /tmp/sb-local-docker/invalid-data
+mkdir -p /tmp/sb-local-docker/invalid-data
+```
+
+Run the image with that directory mounted:
+
+```bash
+set +e
+
+docker run --rm \
+  --mount type=bind,src=/tmp/sb-local-docker/invalid-data,dst=/var/lib/second-brain \
+  --env-file "$CAPTURE_SERVICE_ENV_FILE" \
+  second-brain-capture-service:local
+
+exit_code=$?
+
+set -e
+
+echo "exit code: $exit_code"
+```
+
+Expected: `exit code: 1`, with the message:
 
 ```text
 persistent EBS volume marker missing: /var/lib/second-brain/.second-brain-ebs-volume
 ```
 
-No silent data loss. No service startup.
+Confirm no SQLite database was created in the invalid directory:
 
-### 3g — Clean shutdown
+```bash
+test ! -e /tmp/sb-local-docker/invalid-data/ledger.sqlite3 && \
+  echo "PASS: no ledger created" || \
+  echo "FAIL: ledger found in invalid directory"
+```
+
+Expected: `PASS: no ledger created`
+
+### 3i — Clean shutdown
 
 Send SIGTERM to the container:
 
@@ -242,7 +408,15 @@ Expected log events include:
 {"event":"capture_service_stopped",...}
 ```
 
-Expected: container exits with code `0`.
+Inspect the container exit code:
+
+```bash
+docker inspect \
+  --format '{{.State.ExitCode}}' \
+  second-brain-capture-service
+```
+
+Expected: `0`
 
 Confirm the ledger shows `STOPPED` state:
 
@@ -251,9 +425,11 @@ sqlite3 "$HOST_LEDGER" \
   "SELECT value FROM system_state WHERE key='capture_service_state';"
 ```
 
-Expected: `STOPPED`.
+Expected: `STOPPED`
 
-### 3h — Tear down the local environment
+### 3j — Tear down the local environment
+
+Only delete the disposable directory after evidence has been recorded. If any step above failed, preserve it temporarily for diagnosis.
 
 ```bash
 docker compose down
@@ -321,7 +497,7 @@ git pull
 deploy/deploy.sh
 ```
 
-`deploy/deploy.sh` verifies the EBS mount and sentinel before building and starting the container. It will exit with an error if either check fails.
+`deploy/deploy.sh` verifies the EBS mount and sentinel before building and starting the container. It exits with an error if either check fails.
 
 Run the post-deploy verification:
 
@@ -412,13 +588,15 @@ Primary tests:
 
 - [ ] Step 1 — full automated suite passes (`uv run pytest -q`)
 - [ ] Step 2 — status-command slice passes
-- [ ] Step 3a — local Docker environment prepared, container starts
+- [ ] Step 3a — local Docker environment prepared, container starts, health endpoint ok, port 8000 not published
 - [ ] Step 3b — three monitoring terminals open and showing live data
-- [ ] Step 3c — Discord capture test passes (live receipt in Discord)
-- [ ] Step 3d — status command inside container exits 0, health `HEALTHY`
-- [ ] Step 3e — container recreation preserves all rows
-- [ ] Step 3f — missing-volume fail-closed: exits 1 with correct message
-- [ ] Step 3g — clean shutdown writes `STOPPED` state, container exits 0
+- [ ] Step 3c — Discord capture test passes (live receipt in Discord, `CAPTURE_RECEIVED` event in Terminal 2)
+- [ ] Step 3d — sensitive-input rejection: `REJECTED_SENSITIVE`, plaintext absent from logs and data directory
+- [ ] Step 3e — status command inside container exits 0, health `HEALTHY`
+- [ ] Step 3f — container recreation preserves all rows
+- [ ] Step 3g — offline reconciliation: offline message persisted exactly once, no duplicate receipt
+- [ ] Step 3h — missing-volume fail-closed: exits 1 with correct message, no ledger created
+- [ ] Step 3i — clean shutdown: exit code 0, `STOPPED` state in ledger
 - [ ] Step 4a — EC2 security pre-checks pass
 - [ ] Step 4b — `deploy/deploy.sh` and `deploy/verify.sh` pass
 - [ ] Step 4c/4d — EC2 reboot persistence: row count preserved, service restarts
@@ -429,10 +607,16 @@ Milestone 2 is closed when all boxes are checked and evidence is recorded at `do
 
 ## Evidence record
 
-Create one file per execution at `docs/Milestones/002/evidence/SB-110-YYYY-MM-DD.md` using the template below. Fill in each field before closing the milestone.
+Create one file per execution at `docs/Milestones/002/evidence/SB-110-YYYY-MM-DD.md` using the template below. Fill in each field before closing the milestone. Never record real token values or the text of personal captures.
 
 ```markdown
 # SB-110 Evidence — YYYY-MM-DD
+
+## Environment
+
+- Docker version: <output of: docker version --format '{{.Server.Version}}'>
+- Docker Compose version: <output of: docker compose version>
+- Image ID: <output of: docker inspect --format '{{.Id}}' second-brain-capture-service>
 
 ## Automated suite
 
@@ -444,18 +628,28 @@ Create one file per execution at `docs/Milestones/002/evidence/SB-110-YYYY-MM-DD
 
 - Image built from commit: <git sha>
 - CAPTURE_DATA_DIR: /tmp/sb-local-docker/data
+- Step 3a: internal health endpoint: passed
+- Step 3a: internal API host publication: `{"8000/tcp":null}`
 - Step 3c: Discord capture received — message ID: <id>, capture ID: <SB-xxx>
-- Step 3d: status exit code: 0, health: HEALTHY
-- Step 3e: row count before recreation: <N>, row count after: <N>
-- Step 3f: container exited code 1 with message "persistent EBS volume marker missing"
-- Step 3g: container exited code 0, system_state shows STOPPED
+- Step 3d: sensitive test rejection: plaintext absent from logs and mounted data directory
+- Step 3e: status exit code: 0, health: HEALTHY
+- Step 3f: row count before recreation: <N>, row count after: <N>
+- Step 3g: offline message ID: <id>, persisted exactly once
+- Step 3h: container exited code 1 with message "persistent EBS volume marker missing", no ledger created
+- Step 3i: container exit code after SIGTERM: 0, capture_service_state: STOPPED
 
 ## EC2 reboot persistence
 
 - Instance ID: <EC2 instance ID>
-- deploy/verify.sh: passed
+- EBS volume ID: <id>
+- EBS DeleteOnTermination: false
+- Security group ID: <id>
+- IMDSv2: required
+- SSH password authentication: disabled
+- deploy/verify.sh before reboot: passed
 - Row count before reboot: <N>
 - Row count after reboot: <N>
+- deploy/verify.sh after reboot: passed
 - Post-reboot Discord capture: <message ID>
 
 ## Deferred criteria
