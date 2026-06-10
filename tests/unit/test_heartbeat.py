@@ -206,3 +206,46 @@ async def test_run_capture_service_heartbeat_swallows_exceptions():
 
     # Task should still be alive after errors (loop doesn't crash)
     assert error_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_loop_exits_when_instance_is_superseded():
+    calls = []
+
+    class FakeLedger:
+        def record_capture_service_heartbeat(self, *, instance_id, now):
+            calls.append(instance_id)
+            return False  # superseded by a newer instance
+
+    task = asyncio.create_task(
+        run_capture_service_heartbeat(
+            ledger=FakeLedger(),
+            instance_id=_INSTANCE_A,
+            interval_seconds=0,
+        )
+    )
+    await task  # must complete cleanly, not hang
+
+    assert len(calls) == 1  # called once then exited
+    assert task.done()
+    assert not task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_loop_logs_superseded_instance_safely(capsys):
+    class FakeLedger:
+        def record_capture_service_heartbeat(self, *, instance_id, now):
+            return False  # superseded
+
+    task = asyncio.create_task(
+        run_capture_service_heartbeat(
+            ledger=FakeLedger(),
+            instance_id=_INSTANCE_A,
+            interval_seconds=0,
+        )
+    )
+    await task
+
+    output = capsys.readouterr().out
+    assert "capture_service_heartbeat_superseded" in output
+    assert _INSTANCE_A in output

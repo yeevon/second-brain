@@ -116,16 +116,23 @@ class CaptureService:
         self._ledger.record_capture_service_start(instance_id=instance_id, now=now)
         log_metadata("capture_service_starting", instance_id=instance_id)
 
-    def record_capture_service_ready(self, *, instance_id: str, now: datetime) -> None:
-        self._ledger.record_capture_service_ready(instance_id=instance_id, now=now)
-        log_metadata("capture_service_ready", instance_id=instance_id)
+    def record_capture_service_ready(self, *, instance_id: str, now: datetime) -> bool:
+        updated = self._ledger.record_capture_service_ready(instance_id=instance_id, now=now)
+        if updated:
+            log_metadata("capture_service_ready", instance_id=instance_id)
+        else:
+            log_metadata("capture_service_ready_ignored", instance_id=instance_id, reason="superseded_instance")
+        return updated
 
     def record_capture_service_heartbeat(self, *, instance_id: str, now: datetime) -> bool:
         return self._ledger.record_capture_service_heartbeat(instance_id=instance_id, now=now)
 
     def record_capture_service_stop(self, *, instance_id: str, now: datetime) -> bool:
         updated = self._ledger.record_capture_service_stop(instance_id=instance_id, now=now)
-        log_metadata("capture_service_stopped", instance_id=instance_id)
+        if updated:
+            log_metadata("capture_service_stopped", instance_id=instance_id)
+        else:
+            log_metadata("capture_service_stop_ignored", instance_id=instance_id, reason="superseded_instance")
         return updated
 
     def make_capture_handler(self, *, notify_downstream: bool):

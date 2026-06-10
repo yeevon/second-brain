@@ -139,6 +139,26 @@ def ensure_heartbeat_task(
     )
 
 
+def initialize_capture_service_lifecycle(
+    *,
+    startup,
+    capture_service: CaptureService,
+    heartbeat_interval_seconds: int,
+) -> str:
+    instance_id = str(uuid.uuid4())
+    capture_service.record_capture_service_start(
+        instance_id=instance_id,
+        now=datetime.now(UTC),
+    )
+    ensure_heartbeat_task(
+        startup=startup,
+        capture_service=capture_service,
+        instance_id=instance_id,
+        interval_seconds=heartbeat_interval_seconds,
+    )
+    return instance_id
+
+
 def ensure_periodic_reconciliation_task(
     *,
     startup,
@@ -177,6 +197,11 @@ async def run_local_full_runtime(settings: Settings) -> None:
         queue=queue,
         vault_writer=vault_writer,
     )
+    instance_id = initialize_capture_service_lifecycle(
+        startup=startup,
+        capture_service=capture_service,
+        heartbeat_interval_seconds=settings.capture_service_heartbeat_interval_seconds,
+    )
     api = create_capture_api(
         capture_service=capture_service,
         internal_token=settings.capture_service_internal_token,
@@ -206,6 +231,10 @@ async def run_local_full_runtime(settings: Settings) -> None:
             capture_service=capture_service,
         )
         if startup_result is not None:
+            capture_service.record_capture_service_ready(
+                instance_id=instance_id,
+                now=datetime.now(UTC),
+            )
             print(f"  periodic reconciliation started (interval: {settings.periodic_reconcile_interval_seconds}s)")
 
     client = create_discord_client(
@@ -235,15 +264,18 @@ async def run_local_full_runtime(settings: Settings) -> None:
         client=client,
         startup=startup,
         capture_service=capture_service,
+        instance_id=instance_id,
     )
 
 
 async def run_capture_only_runtime(settings: Settings) -> None:
     capture_service = CaptureService.open(settings, notify_capture=None)
-    instance_id = str(uuid.uuid4())
-    capture_service.record_capture_service_start(instance_id=instance_id, now=datetime.now(UTC))
-
     startup = CaptureOnlyStartup(capture_service=capture_service, settings=settings)
+    instance_id = initialize_capture_service_lifecycle(
+        startup=startup,
+        capture_service=capture_service,
+        heartbeat_interval_seconds=settings.capture_service_heartbeat_interval_seconds,
+    )
     api = create_capture_api(
         capture_service=capture_service,
         internal_token=settings.capture_service_internal_token,
@@ -257,7 +289,6 @@ async def run_capture_only_runtime(settings: Settings) -> None:
     async def reconcile_once() -> None:
         reconcile_result = await startup.start_once(client)
         if reconcile_result is not None:
-            capture_service.record_capture_service_ready(instance_id=instance_id, now=datetime.now(UTC))
             print("startup Discord history reconciliation complete")
             print(f"  messages seen: {reconcile_result.seen}")
             print(f"  captures handled: {reconcile_result.handled}")
@@ -275,6 +306,10 @@ async def run_capture_only_runtime(settings: Settings) -> None:
             capture_service=capture_service,
         )
         if reconcile_result is not None:
+            capture_service.record_capture_service_ready(
+                instance_id=instance_id,
+                now=datetime.now(UTC),
+            )
             print(f"  periodic reconciliation started (interval: {settings.periodic_reconcile_interval_seconds}s)")
 
     client = create_discord_client(
@@ -285,12 +320,6 @@ async def run_capture_only_runtime(settings: Settings) -> None:
     ensure_stale_lease_reaper_task(
         startup=startup,
         capture_service=capture_service,
-    )
-    ensure_heartbeat_task(
-        startup=startup,
-        capture_service=capture_service,
-        instance_id=instance_id,
-        interval_seconds=settings.capture_service_heartbeat_interval_seconds,
     )
     print("capture-service runtime mode: capture-only")
     print("downstream processing: disabled")
@@ -384,7 +413,7 @@ def run_status() -> int:
         return 2
     print(format_operational_status(snapshot))
     if (
-        snapshot.capture_service_health in {"STALE", "UNKNOWN"}
+        snapshot.capture_service_health != "HEALTHY"
         or snapshot.stale_leases > 0
         or snapshot.captures_failed > 0
     ):

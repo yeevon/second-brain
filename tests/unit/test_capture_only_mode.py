@@ -15,6 +15,11 @@ from secondbrain.receipts import ATTACHMENT_WARNING, format_saved_receipt
 from secondbrain.reconcile import ReconcileResult
 
 
+_NOW = datetime(2026, 6, 9, 15, 0, 0, tzinfo=UTC)
+_INSTANCE_A = "instance-a-uuid"
+_INSTANCE_B = "instance-b-uuid"
+
+
 BASE_ENV = {
     "CAPTURE_PROCESSING_MODE": "capture-only",
     "DISCORD_BOT_TOKEN": "discord-token",
@@ -327,7 +332,7 @@ async def test_capture_only_runtime_invokes_reaper_start_before_discord_task_cre
         run_stale_lease_reaper_loop=noop_reaper_loop,
         run_periodic_reconciliation_loop=noop_periodic_loop,
         record_capture_service_start=lambda **kw: None,
-        record_capture_service_ready=lambda **kw: None,
+        record_capture_service_ready=lambda **kw: True,
         record_capture_service_heartbeat=lambda **kw: True,
         record_capture_service_stop=lambda **kw: True,
     )
@@ -447,3 +452,174 @@ async def test_startup_reconciliation_failure_does_not_prevent_reaper_start(tmp_
         await startup.reaper_task
 
     ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle ordering: RUNNING is set only after background tasks are ready
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_capture_only_records_running_only_after_background_tasks_are_initialized(
+    monkeypatch,
+):
+    """
+    record_capture_service_ready (which sets state=RUNNING) must be called only
+    after ensure_periodic_reconciliation_task and ensure_stale_lease_reaper_task
+    have both run inside reconcile_once.
+    """
+    import secondbrain.app as app_module
+
+    ready_state = {}
+    startup_ref = [None]
+    ready_event = asyncio.Event()
+
+    async def noop_reaper_loop():
+        await asyncio.sleep(10)
+
+    async def noop_periodic_loop(client):
+        await asyncio.sleep(10)
+
+    def recording_ready(**kw):
+        s = startup_ref[0]
+        if s is not None:
+            ready_state["periodic_task_set"] = s.periodic_task is not None
+            ready_state["reaper_task_set"] = s.reaper_task is not None
+        ready_event.set()
+        return True
+
+    fake_reconcile_result = ReconcileResult(seen=0, handled=0, ignored=0, warning=None)
+
+    service = SimpleNamespace(
+        attach_receipt_client=lambda c: None,
+        close=lambda: None,
+        handle_gateway_message=AsyncMock(),
+        run_stale_lease_reaper_loop=noop_reaper_loop,
+        run_periodic_reconciliation_loop=noop_periodic_loop,
+        startup_reconcile=AsyncMock(return_value=fake_reconcile_result),
+        record_capture_service_start=lambda **kw: None,
+        record_capture_service_ready=recording_ready,
+        record_capture_service_heartbeat=lambda **kw: True,
+        record_capture_service_stop=lambda **kw: True,
+    )
+
+    monkeypatch.setattr(app_module.CaptureService, "open", lambda *a, **kw: service)
+
+    original_startup_init = app_module.CaptureOnlyStartup.__init__
+
+    def spy_startup_init(self, **kw):
+        original_startup_init(self, **kw)
+        startup_ref[0] = self
+
+    monkeypatch.setattr(app_module.CaptureOnlyStartup, "__init__", spy_startup_init)
+
+    class FakeClient:
+        def __init__(self):
+            self.on_ready_callback = None
+
+        async def start(self, token):
+            if self.on_ready_callback:
+                await self.on_ready_callback()
+            await asyncio.sleep(10)
+
+        async def close(self):
+            pass
+
+    fake_client = FakeClient()
+
+    def fake_create_discord_client(handle, on_ready_callback=None):
+        fake_client.on_ready_callback = on_ready_callback
+        return fake_client
+
+    monkeypatch.setattr(app_module, "create_discord_client", fake_create_discord_client)
+
+    class FakeServer:
+        async def serve(self):
+            await asyncio.sleep(10)
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(app_module, "InternalApiServer", lambda *a, **kw: FakeServer())
+
+    async def spy_run_service_runtime(*, api_task, discord_task, **kw):
+        await ready_event.wait()
+        api_task.cancel()
+        discord_task.cancel()
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(app_module, "run_service_runtime", spy_run_service_runtime)
+
+    _set_env(monkeypatch, BASE_ENV)
+    from secondbrain.config import Settings as _Settings
+
+    settings = _Settings()
+
+    with suppress(asyncio.CancelledError):
+        await app_module.run_capture_only_runtime(settings)
+
+    assert ready_state.get("periodic_task_set") is True, "periodic task must exist when RUNNING is set"
+    assert ready_state.get("reaper_task_set") is True, "reaper task must exist when RUNNING is set"
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle log accuracy: ignored operations are logged with honest event names
+# ---------------------------------------------------------------------------
+
+def test_old_instance_ready_logs_ignored_not_ready(tmp_path, capsys):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    ledger.record_capture_service_start(instance_id=_INSTANCE_B, now=_NOW)
+    ledger.close()
+
+    settings = SimpleNamespace(
+        discord_guild_id=100,
+        discord_capture_channel_id=200,
+        discord_allowed_user_id=300,
+        startup_reconcile_limit=10,
+        ledger_path=tmp_path / "ledger.sqlite3",
+        stale_lease_reaper_interval_seconds=30,
+        stale_lease_reaper_batch_size=100,
+        delivery_retry_max_attempts=5,
+        delivery_retry_base_delay_seconds=10,
+        delivery_retry_max_delay_seconds=300,
+    )
+    service = CaptureService(settings=settings, ledger=Ledger(tmp_path / "ledger.sqlite3"))
+
+    result = service.record_capture_service_ready(instance_id=_INSTANCE_A, now=_NOW)
+
+    output = capsys.readouterr().out
+    assert result is False
+    assert "capture_service_ready_ignored" in output
+    assert "superseded_instance" in output
+    assert "capture_service_ready" not in output.replace("capture_service_ready_ignored", "")
+
+    service.close()
+
+
+def test_old_instance_stop_logs_ignored_not_stopped(tmp_path, capsys):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    ledger.record_capture_service_start(instance_id=_INSTANCE_B, now=_NOW)
+    ledger.record_capture_service_ready(instance_id=_INSTANCE_B, now=_NOW + timedelta(seconds=2))
+    ledger.close()
+
+    settings = SimpleNamespace(
+        discord_guild_id=100,
+        discord_capture_channel_id=200,
+        discord_allowed_user_id=300,
+        startup_reconcile_limit=10,
+        ledger_path=tmp_path / "ledger.sqlite3",
+        stale_lease_reaper_interval_seconds=30,
+        stale_lease_reaper_batch_size=100,
+        delivery_retry_max_attempts=5,
+        delivery_retry_base_delay_seconds=10,
+        delivery_retry_max_delay_seconds=300,
+    )
+    service = CaptureService(settings=settings, ledger=Ledger(tmp_path / "ledger.sqlite3"))
+
+    result = service.record_capture_service_stop(instance_id=_INSTANCE_A, now=_NOW)
+
+    output = capsys.readouterr().out
+    assert result is False
+    assert "capture_service_stop_ignored" in output
+    assert "superseded_instance" in output
+
+    service.close()

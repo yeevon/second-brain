@@ -278,3 +278,54 @@ def test_delivery_settings_reject_non_numeric_values_cleanly(monkeypatch):
     monkeypatch.setenv("DELIVERY_RETRY_MAX_ATTEMPTS", "not-a-number")
     with pytest.raises(RuntimeError, match="DELIVERY_RETRY_MAX_ATTEMPTS"):
         Settings()
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat / health-stale settings
+# ---------------------------------------------------------------------------
+
+def test_heartbeat_settings_use_safe_defaults(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("CAPTURE_SERVICE_HEARTBEAT_INTERVAL_SECONDS", raising=False)
+    monkeypatch.delenv("CAPTURE_SERVICE_HEALTH_STALE_AFTER_SECONDS", raising=False)
+
+    s = Settings()
+
+    assert s.capture_service_heartbeat_interval_seconds == 15
+    assert s.capture_service_health_stale_after_seconds == 60
+
+
+def test_heartbeat_settings_accept_valid_overrides(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("CAPTURE_SERVICE_HEARTBEAT_INTERVAL_SECONDS", "30")
+    monkeypatch.setenv("CAPTURE_SERVICE_HEALTH_STALE_AFTER_SECONDS", "120")
+
+    s = Settings()
+
+    assert s.capture_service_heartbeat_interval_seconds == 30
+    assert s.capture_service_health_stale_after_seconds == 120
+
+
+def test_heartbeat_interval_rejects_zero(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("CAPTURE_SERVICE_HEARTBEAT_INTERVAL_SECONDS", "0")
+
+    with pytest.raises(RuntimeError, match="CAPTURE_SERVICE_HEARTBEAT_INTERVAL_SECONDS"):
+        Settings()
+
+
+def test_health_stale_threshold_must_exceed_heartbeat_interval(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("CAPTURE_SERVICE_HEARTBEAT_INTERVAL_SECONDS", "60")
+    monkeypatch.setenv("CAPTURE_SERVICE_HEALTH_STALE_AFTER_SECONDS", "60")
+
+    with pytest.raises(RuntimeError, match="CAPTURE_SERVICE_HEALTH_STALE_AFTER_SECONDS"):
+        Settings()
+
+
+def test_heartbeat_settings_reject_non_numeric_values_cleanly(monkeypatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("CAPTURE_SERVICE_HEARTBEAT_INTERVAL_SECONDS", "not-a-number")
+
+    with pytest.raises(RuntimeError, match="CAPTURE_SERVICE_HEARTBEAT_INTERVAL_SECONDS"):
+        Settings()

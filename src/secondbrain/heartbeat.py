@@ -14,10 +14,16 @@ async def run_capture_service_heartbeat(
 ) -> None:
     while True:
         try:
-            ledger.record_capture_service_heartbeat(
+            updated = ledger.record_capture_service_heartbeat(
                 instance_id=instance_id,
                 now=datetime.now(UTC),
             )
+            if not updated:
+                log_metadata(
+                    "capture_service_heartbeat_superseded",
+                    instance_id=instance_id,
+                )
+                return
         except Exception as exc:
             log_metadata(
                 "capture_service_heartbeat_failed",

@@ -462,9 +462,9 @@ class Ledger:
             lambda conn: self._record_capture_service_start(conn, instance_id=instance_id, now_iso=now_iso),
         )
 
-    def record_capture_service_ready(self, *, instance_id: str, now: datetime) -> None:
+    def record_capture_service_ready(self, *, instance_id: str, now: datetime) -> bool:
         now_iso = _iso(now)
-        self._write(
+        return self._write(
             "record_capture_service_ready",
             lambda conn: self._record_capture_service_ready(conn, instance_id=instance_id, now_iso=now_iso),
         )
@@ -1323,10 +1323,10 @@ class Ledger:
 
     def _record_capture_service_ready(
         self, conn: sqlite3.Connection, *, instance_id: str, now_iso: str
-    ) -> None:
+    ) -> bool:
         current_id = self._get_system_state(conn, "capture_service_instance_id")
         if current_id != instance_id:
-            return
+            return False
         for key, value in {
             "capture_service_state": "RUNNING",
             "capture_service_last_heartbeat_at": now_iso,
@@ -1341,6 +1341,7 @@ class Ledger:
                 """,
                 (key, value, now_iso),
             )
+        return True
 
     def _record_capture_service_heartbeat(
         self, conn: sqlite3.Connection, *, instance_id: str, now_iso: str

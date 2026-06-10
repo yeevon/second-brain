@@ -854,6 +854,263 @@ def test_run_status_via_main_cli(tmp_path, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
+# local-full runtime lifecycle — STARTING → RUNNING → STOPPED
+# ---------------------------------------------------------------------------
+
+_LOCAL_FULL_ENV = {
+    "CAPTURE_PROCESSING_MODE": "local-full",
+    "DISCORD_BOT_TOKEN": "discord-token",
+    "DISCORD_GUILD_ID": "100",
+    "DISCORD_CAPTURE_CHANNEL_ID": "200",
+    "DISCORD_ALLOWED_USER_ID": "300",
+    "GEMINI_API_KEY": "gemini-key",
+    "GEMINI_MODEL": "gemini-test",
+    "CLASSIFICATION_CONFIDENCE_THRESHOLD": "0.75",
+    "CLASSIFIER_WORKER_COUNT": "1",
+    "CLASSIFIER_QUEUE_MAXSIZE": "100",
+    "VAULT_PATH": "/tmp/test-vault",
+    "LEDGER_PATH": "",           # overridden per-test
+    "STARTUP_RECONCILE_LIMIT": "100",
+    "CAPTURE_SERVICE_INTERNAL_TOKEN": "x" * 32,
+    "CAPTURE_API_HOST": "127.0.0.1",
+    "CAPTURE_API_PORT": "8000",
+}
+
+
+def _set_local_full_env(monkeypatch, tmp_path):
+    for key in _LOCAL_FULL_ENV:
+        monkeypatch.delenv(key, raising=False)
+    for key, value in _LOCAL_FULL_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("LEDGER_PATH", str(tmp_path / "ledger.sqlite3"))
+
+
+async def _sleep_forever(*args, **kwargs):
+    await asyncio.sleep(10)
+
+
+async def _noop_async(*args, **kwargs):
+    pass
+
+
+def _make_local_full_stub(*, on_start=None, on_ready=None, on_stop=None):
+    from unittest.mock import AsyncMock
+
+    async def noop_periodic(client):
+        await asyncio.sleep(10)
+
+    return SimpleNamespace(
+        attach_receipt_client=lambda c: None,
+        close=lambda: None,
+        handle_gateway_message=AsyncMock(),
+        run_stale_lease_reaper_loop=_sleep_forever,
+        run_periodic_reconciliation_loop=noop_periodic,
+        startup_reconcile=AsyncMock(
+            return_value=SimpleNamespace(seen=0, handled=0, ignored=0, warning=None)
+        ),
+        enqueue_unfinished_captures=AsyncMock(return_value=[]),
+        record_capture_service_start=on_start or (lambda **kw: None),
+        record_capture_service_ready=on_ready or (lambda **kw: True),
+        record_capture_service_heartbeat=lambda **kw: True,
+        record_capture_service_stop=on_stop or (lambda **kw: True),
+    )
+
+
+def _wire_local_full_stubs(monkeypatch, tmp_path, stub, *, on_ready_callback=None):
+    import secondbrain.app as app_module
+
+    monkeypatch.setattr(app_module.CaptureService, "open", lambda *a, **kw: stub)
+    monkeypatch.setattr(app_module, "VaultWriter", lambda path: SimpleNamespace())
+    monkeypatch.setattr(
+        app_module, "InternalApiServer",
+        lambda *a, **kw: SimpleNamespace(serve=_sleep_forever, stop=_noop_async),
+    )
+    monkeypatch.setattr(app_module, "run_capture_worker", lambda **kw: _sleep_forever())
+
+    class FakeClient:
+        def __init__(self):
+            self._on_ready = on_ready_callback
+
+        async def start(self, token):
+            if self._on_ready:
+                await self._on_ready()
+            await asyncio.sleep(10)
+
+        async def close(self):
+            pass
+
+    fake_client = FakeClient()
+
+    def fake_create_discord_client(handle, on_ready_callback=None):
+        fake_client._on_ready = on_ready_callback
+        return fake_client
+
+    monkeypatch.setattr(app_module, "create_discord_client", fake_create_discord_client)
+
+    _set_local_full_env(monkeypatch, tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_local_full_runtime_records_starting_state(monkeypatch, tmp_path):
+    """initialize_capture_service_lifecycle is called before run_service_runtime, so
+    record_capture_service_start fires before Discord on_ready."""
+    import secondbrain.app as app_module
+    from contextlib import suppress
+
+    start_calls = []
+    stub = _make_local_full_stub(on_start=lambda **kw: start_calls.append(kw))
+
+    startup_holder = []
+
+    async def spy_run_service_runtime(*, startup, api_task, discord_task, **kw):
+        startup_holder.append(startup)
+        api_task.cancel()
+        discord_task.cancel()
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(app_module, "run_service_runtime", spy_run_service_runtime)
+    _wire_local_full_stubs(monkeypatch, tmp_path, stub)
+
+    from secondbrain.config import Settings as _Settings
+    settings = _Settings()
+
+    with suppress(asyncio.CancelledError):
+        await app_module.run_local_full_runtime(settings)
+
+    assert len(start_calls) == 1, "record_capture_service_start must fire exactly once"
+    assert "instance_id" in start_calls[0]
+
+
+@pytest.mark.asyncio
+async def test_local_full_runtime_starts_heartbeat_before_discord_ready(monkeypatch, tmp_path):
+    """Heartbeat task is created by initialize_capture_service_lifecycle, which runs
+    before the Discord client task is even created."""
+    import secondbrain.app as app_module
+    from contextlib import suppress
+
+    stub = _make_local_full_stub()
+    startup_holder = []
+
+    async def spy_run_service_runtime(*, startup, api_task, discord_task, **kw):
+        startup_holder.append(startup)
+        api_task.cancel()
+        discord_task.cancel()
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(app_module, "run_service_runtime", spy_run_service_runtime)
+    _wire_local_full_stubs(monkeypatch, tmp_path, stub)
+
+    from secondbrain.config import Settings as _Settings
+    settings = _Settings()
+
+    with suppress(asyncio.CancelledError):
+        await app_module.run_local_full_runtime(settings)
+
+    assert len(startup_holder) == 1
+    startup = startup_holder[0]
+    assert startup.heartbeat_task is not None, (
+        "heartbeat_task must be set before run_service_runtime is entered"
+    )
+
+    if not startup.heartbeat_task.done():
+        startup.heartbeat_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await startup.heartbeat_task
+
+
+@pytest.mark.asyncio
+async def test_local_full_runtime_records_running_after_worker_startup(monkeypatch, tmp_path):
+    """record_capture_service_ready (→ RUNNING) is called only after start_once completes,
+    which means the worker task is already running."""
+    import secondbrain.app as app_module
+    from contextlib import suppress
+
+    ready_event = asyncio.Event()
+    ready_calls = []
+
+    def recording_ready(**kw):
+        ready_calls.append(True)
+        ready_event.set()
+        return True
+
+    stub = _make_local_full_stub(on_ready=recording_ready)
+    _wire_local_full_stubs(monkeypatch, tmp_path, stub)
+
+    async def spy_run_service_runtime(*, startup, api_task, discord_task, **kw):
+        await ready_event.wait()
+        # Worker is set by start_once before ready fires
+        ready_calls.append(("worker_task_set", startup.worker_task is not None))
+        api_task.cancel()
+        discord_task.cancel()
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(app_module, "run_service_runtime", spy_run_service_runtime)
+
+    from secondbrain.config import Settings as _Settings
+    settings = _Settings()
+
+    with suppress(asyncio.CancelledError):
+        await app_module.run_local_full_runtime(settings)
+
+    assert True in ready_calls, "record_capture_service_ready must be called"
+    assert ("worker_task_set", True) in ready_calls, (
+        "worker_task must exist when record_capture_service_ready fires"
+    )
+
+
+@pytest.mark.asyncio
+async def test_local_full_runtime_records_stopped_state_on_shutdown(monkeypatch, tmp_path):
+    """record_capture_service_stop fires in run_service_runtime's finally block when
+    the discord task exits normally (client.start returns instead of sleeping)."""
+    import secondbrain.app as app_module
+    from contextlib import suppress
+
+    stop_calls = []
+
+    def recording_stop(**kw):
+        stop_calls.append(kw)
+        return True
+
+    stub = _make_local_full_stub(on_stop=recording_stop)
+
+    class TerminatingClient:
+        def __init__(self):
+            self._on_ready = None
+
+        async def start(self, token):
+            # Fire on_ready then return immediately — makes discord_task complete
+            if self._on_ready:
+                await self._on_ready()
+
+        async def close(self):
+            pass
+
+    fake_client = TerminatingClient()
+
+    def fake_create_discord_client(handle, on_ready_callback=None):
+        fake_client._on_ready = on_ready_callback
+        return fake_client
+
+    monkeypatch.setattr(app_module.CaptureService, "open", lambda *a, **kw: stub)
+    monkeypatch.setattr(app_module, "VaultWriter", lambda path: SimpleNamespace())
+    monkeypatch.setattr(
+        app_module, "InternalApiServer",
+        lambda *a, **kw: SimpleNamespace(serve=_sleep_forever, stop=_noop_async),
+    )
+    monkeypatch.setattr(app_module, "run_capture_worker", lambda **kw: _sleep_forever())
+    monkeypatch.setattr(app_module, "create_discord_client", fake_create_discord_client)
+
+    _set_local_full_env(monkeypatch, tmp_path)
+    from secondbrain.config import Settings as _Settings
+    settings = _Settings()
+
+    await app_module.run_local_full_runtime(settings)
+
+    assert len(stop_calls) == 1, "record_capture_service_stop must fire exactly once on shutdown"
+    assert "instance_id" in stop_calls[0]
+
+
+# ---------------------------------------------------------------------------
 # run_manual_retry CLI path
 # ---------------------------------------------------------------------------
 

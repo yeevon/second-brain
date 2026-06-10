@@ -115,13 +115,11 @@ def read_operational_status(
     settings: StatusSettings,
     now: datetime | None = None,
 ) -> OperationalStatusSnapshot:
-    if now is None:
-        now = datetime.now(UTC)
-
-    if not settings.ledger_path.exists():
-        raise OperationalStatusUnavailable("database file does not exist")
-
+    conn = None
     try:
+        if not settings.ledger_path.exists():
+            raise OperationalStatusUnavailable("database file does not exist")
+
         conn = sqlite3.connect(
             f"file:{settings.ledger_path}?mode=ro",
             uri=True,
@@ -129,15 +127,22 @@ def read_operational_status(
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only = ON")
         conn.execute("PRAGMA busy_timeout = 1000")
-    except sqlite3.OperationalError as exc:
-        raise OperationalStatusUnavailable(f"cannot open database: {type(exc).__name__}") from exc
 
-    try:
-        return _query_snapshot(conn, settings=settings, now=now)
-    except sqlite3.OperationalError as exc:
-        raise OperationalStatusUnavailable(f"database query failed: {type(exc).__name__}") from exc
+        return _query_snapshot(conn, settings=settings, now=now or datetime.now(UTC))
+
+    except OperationalStatusUnavailable:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise OperationalStatusUnavailable(
+            f"database query failed: {type(exc).__name__}"
+        ) from exc
+    except (ValueError, TypeError) as exc:
+        raise OperationalStatusUnavailable(
+            f"stored status metadata is invalid: {type(exc).__name__}"
+        ) from exc
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def _query_snapshot(

@@ -696,6 +696,46 @@ def test_status_command_does_not_fail_for_inbox_only(tmp_path, monkeypatch):
     assert exit_code == 0
 
 
+def test_status_command_returns_one_for_starting_service(tmp_path, monkeypatch):
+    ledger = _make_run_status_env(tmp_path, monkeypatch)
+    real_now = datetime.now(UTC)
+    instance_id = "starting-instance"
+    ledger.record_capture_service_start(instance_id=instance_id, now=real_now - timedelta(seconds=10))
+    # Heartbeat without marking ready keeps state as STARTING
+    ledger.record_capture_service_heartbeat(instance_id=instance_id, now=real_now - timedelta(seconds=5))
+    ledger.close()
+
+    exit_code = run_status()
+
+    assert exit_code == 1
+
+
+def test_status_command_returns_one_for_stopped_service(tmp_path, monkeypatch):
+    ledger = _make_run_status_env(tmp_path, monkeypatch)
+    real_now = datetime.now(UTC)
+    instance_id = "stopped-instance"
+    ledger.record_capture_service_start(instance_id=instance_id, now=real_now - timedelta(minutes=10))
+    ledger.record_capture_service_ready(instance_id=instance_id, now=real_now - timedelta(minutes=9))
+    ledger.record_capture_service_stop(instance_id=instance_id, now=real_now - timedelta(minutes=5))
+    ledger.close()
+
+    exit_code = run_status()
+
+    assert exit_code == 1
+
+
+def test_status_command_returns_two_for_corrupt_sqlite_file(tmp_path, monkeypatch):
+    db_path = tmp_path / "corrupted.sqlite3"
+    db_path.write_bytes(b"this is not a valid SQLite database file")
+    monkeypatch.setenv("LEDGER_PATH", str(db_path))
+    monkeypatch.setenv("STATUS_TIMEZONE", "UTC")
+    monkeypatch.setenv("CAPTURE_SERVICE_HEALTH_STALE_AFTER_SECONDS", "60")
+
+    exit_code = run_status()
+
+    assert exit_code == 2
+
+
 def test_status_command_returns_two_when_database_is_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("LEDGER_PATH", str(tmp_path / "missing.sqlite3"))
     monkeypatch.setenv("STATUS_TIMEZONE", "UTC")
@@ -765,3 +805,124 @@ def test_status_output_includes_all_section_headers(tmp_path):
     assert "Delivery backlog" in output
     assert "Discord reconciliation" in output
     assert "Capture service" in output
+
+
+# ---------------------------------------------------------------------------
+# Corrupt / malformed database — safe error handling
+# ---------------------------------------------------------------------------
+
+def test_status_reader_returns_safe_failure_for_malformed_heartbeat_timestamp(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    ledger.set_system_state("capture_service_last_heartbeat_at", "not-a-timestamp")
+    ledger.close()
+
+    settings = make_settings(tmp_path / "ledger.sqlite3")
+    with pytest.raises(OperationalStatusUnavailable, match="invalid"):
+        read_operational_status(settings=settings)
+
+
+def test_status_reader_returns_safe_failure_for_malformed_reconciliation_timestamp(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    ledger.set_system_state("last_successful_reconciliation_at", "not-a-timestamp")
+    ledger.close()
+
+    settings = make_settings(tmp_path / "ledger.sqlite3")
+    with pytest.raises(OperationalStatusUnavailable, match="invalid"):
+        read_operational_status(settings=settings)
+
+
+def test_status_failure_output_does_not_include_raw_database_error_message(
+    tmp_path, monkeypatch, capsys
+):
+    db_path = tmp_path / "corrupted.sqlite3"
+    db_path.write_bytes(b"this is not a valid SQLite database file")
+    monkeypatch.setenv("LEDGER_PATH", str(db_path))
+    monkeypatch.setenv("STATUS_TIMEZONE", "UTC")
+    monkeypatch.setenv("CAPTURE_SERVICE_HEALTH_STALE_AFTER_SECONDS", "60")
+
+    exit_code = run_status()
+    output = capsys.readouterr().out
+
+    assert exit_code == 2
+    # The safe_reason must NOT expose raw SQLite error text
+    assert "file is not a database" not in output.lower()
+    assert "malformed" not in output.lower()
+    # But it must confirm the failure so operators know to investigate
+    assert "unavailable" in output.lower()
+
+
+# ---------------------------------------------------------------------------
+# Timezone-boundary tests
+# ---------------------------------------------------------------------------
+
+def test_received_today_uses_configured_timezone_when_utc_date_differs(tmp_path):
+    # 00:30 UTC = 20:30 the previous evening in EDT (America/New_York, UTC-4).
+    # With UTC timezone the capture is "today"; with New_York it is "yesterday".
+    query_now = datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC)
+    capture_ts = datetime(2026, 6, 10, 0, 30, 0, tzinfo=UTC)
+
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    _insert(ledger, received_at=capture_ts)
+    ledger.close()
+
+    db_path = tmp_path / "ledger.sqlite3"
+
+    snapshot_utc = read_operational_status(
+        settings=make_settings(db_path, timezone="UTC"),
+        now=query_now,
+    )
+    assert snapshot_utc.captures_received_today == 1
+
+    snapshot_ny = read_operational_status(
+        settings=make_settings(db_path, timezone="America/New_York"),
+        now=query_now,
+    )
+    assert snapshot_ny.captures_received_today == 0
+
+
+def test_filed_today_uses_configured_timezone_when_utc_date_differs(tmp_path):
+    query_now = datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC)
+    event_ts = datetime(2026, 6, 10, 0, 30, 0, tzinfo=UTC).isoformat()
+
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture_id = _insert(ledger, received_at=datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC))
+    ledger.close()
+
+    _insert_filed_event(tmp_path / "ledger.sqlite3", capture_id, event_ts)
+
+    db_path = tmp_path / "ledger.sqlite3"
+
+    snapshot_utc = read_operational_status(
+        settings=make_settings(db_path, timezone="UTC"),
+        now=query_now,
+    )
+    assert snapshot_utc.captures_filed_today == 1
+
+    snapshot_ny = read_operational_status(
+        settings=make_settings(db_path, timezone="America/New_York"),
+        now=query_now,
+    )
+    assert snapshot_ny.captures_filed_today == 0
+
+
+# ---------------------------------------------------------------------------
+# Read-only guarantee — file hash must not change after status query
+# ---------------------------------------------------------------------------
+
+def test_status_command_does_not_change_database_file_hash(tmp_path, monkeypatch):
+    import hashlib
+
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    ledger.close()
+
+    db_path = tmp_path / "ledger.sqlite3"
+    hash_before = hashlib.sha256(db_path.read_bytes()).hexdigest()
+
+    monkeypatch.setenv("LEDGER_PATH", str(db_path))
+    monkeypatch.setenv("STATUS_TIMEZONE", "UTC")
+    monkeypatch.setenv("CAPTURE_SERVICE_HEALTH_STALE_AFTER_SECONDS", "60")
+
+    run_status()
+
+    hash_after = hashlib.sha256(db_path.read_bytes()).hexdigest()
+    assert hash_before == hash_after
