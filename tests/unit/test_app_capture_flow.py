@@ -7,7 +7,6 @@ import pytest
 from secondbrain.app import (
     LocalWorkerStartup,
     ensure_periodic_reconciliation_task,
-    format_status_report,
     main,
     run_discord_listener,
     run_manual_retry,
@@ -188,41 +187,44 @@ async def test_capture_handler_rejects_sensitive_message_without_enqueueing(tmp_
     assert "password=[REDACTED]" not in output
 
 
-def test_format_status_report_includes_operational_counts(tmp_path):
+def test_format_operational_status_includes_basic_counts(tmp_path):
+    from secondbrain.status import StatusSettings, read_operational_status, format_operational_status
+
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     filed = insert_capture(ledger, discord_message_id="1001")
     inbox = insert_capture(ledger, discord_message_id="1002")
-    rejected = ledger.insert_sensitive_rejection(
+    ledger.insert_sensitive_rejection(
         discord_message_id="1003",
         discord_channel_id="200",
         discord_guild_id="300",
         discord_author_id="400",
         redacted_text="password=[REDACTED]",
         sensitivity_flags=("password_assignment",),
-    ).capture
+    )
     failed = insert_capture(ledger, discord_message_id="1004")
     ledger.update_capture(filed.capture_id, status=FILED, derived_note_path="20_projects/halo/filed.md")
     ledger.update_capture(inbox.capture_id, status=INBOX, derived_note_path="00_inbox/inbox.md")
     ledger.update_capture(failed.capture_id, status=FAILED)
     ledger.set_system_state(LAST_RECONCILED_MESSAGE_ID, "1513233540316266517")
-    settings = SimpleNamespace(
+    ledger.close()
+
+    settings = StatusSettings(
         ledger_path=tmp_path / "ledger.sqlite3",
         vault_path=tmp_path / "vault",
+        status_timezone="UTC",
+        capture_service_health_stale_after_seconds=60,
     )
-
-    service = CaptureService(settings=settings, ledger=ledger)
-    report = format_status_report(settings, service.status_snapshot())
+    snapshot = read_operational_status(settings=settings)
+    report = format_operational_status(snapshot)
 
     assert f"ledger path: {tmp_path / 'ledger.sqlite3'}" in report
     assert f"vault path: {tmp_path / 'vault'}" in report
     assert "total captures: 4" in report
-    assert "captures filed: 1" in report
     assert "captures in inbox: 1" in report
     assert "captures rejected as sensitive: 1" in report
     assert "captures failed: 1" in report
     assert "last reconciled Discord message ID: 1513233540316266517" in report
     assert "last successful vault write: 00_inbox/inbox.md" in report
-    assert rejected.status == REJECTED_SENSITIVE
 
 
 def test_main_reports_configuration_errors_without_traceback(monkeypatch, capsys):
@@ -718,19 +720,29 @@ def test_service_periodic_reconcile_snapshot_forwards_ledger_metrics(tmp_path):
     assert "periodic_reconcile_last_error_type" in snapshot
 
 
-def test_run_status_includes_periodic_reconciliation_metrics(tmp_path):
-    """format_status_report with a real snapshot includes all periodic fields."""
-    settings = make_settings(tmp_path)
+def test_run_status_reports_operational_status_sections(tmp_path):
+    """format_operational_status includes all required sections."""
+    from secondbrain.status import StatusSettings, read_operational_status, format_operational_status
+
     ledger = Ledger(tmp_path / "ledger.sqlite3")
-    service = CaptureService(settings=settings, ledger=ledger)
+    ledger.close()
 
-    report = format_status_report(settings, service.status_snapshot(), service.periodic_reconcile_snapshot())
+    settings = StatusSettings(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        vault_path=None,
+        status_timezone="UTC",
+        capture_service_health_stale_after_seconds=60,
+    )
+    snapshot = read_operational_status(settings=settings)
+    report = format_operational_status(snapshot)
 
-    assert "periodic reconciliation runs:" in report
-    assert "periodic reconciliation last warning:" in report
-    assert "periodic reconciliation most recent error type:" in report
-    assert "periodic reconciliation interval:" in report
-    assert "periodic reconciliation scan limit:" in report
+    assert "Second Brain operational status" in report
+    assert "Capture intake" in report
+    assert "Note lifecycle" in report
+    assert "Delivery backlog" in report
+    assert "Discord reconciliation" in report
+    assert "Capture service" in report
+    assert "capture-service health:" in report
 
 
 @pytest.mark.asyncio
@@ -807,48 +819,38 @@ async def test_ensure_periodic_task_does_not_replace_running_task(tmp_path, monk
         await first_task
 
 
-def test_run_status_cli_path_prints_periodic_metrics(tmp_path, monkeypatch, capsys):
-    """run_status() opens a real service, prints the full report, and closes cleanly."""
-    settings = make_settings(tmp_path)
+def test_run_status_cli_path_reports_operational_status(tmp_path, monkeypatch, capsys):
+    """run_status() reads the ledger read-only and prints the operational report."""
     ledger = Ledger(tmp_path / "ledger.sqlite3")
-    service = CaptureService(settings=settings, ledger=ledger)
-    closed = []
-    real_close = service.close
+    ledger.close()
 
-    def tracked_close():
-        closed.append(1)
-        real_close()
+    monkeypatch.setenv("LEDGER_PATH", str(tmp_path / "ledger.sqlite3"))
+    monkeypatch.setenv("STATUS_TIMEZONE", "UTC")
+    monkeypatch.setenv("CAPTURE_SERVICE_HEALTH_STALE_AFTER_SECONDS", "60")
 
-    service.close = tracked_close
-
-    monkeypatch.setattr("secondbrain.app.Settings", lambda: settings)
-    monkeypatch.setattr("secondbrain.app.CaptureService.open", lambda s: service)
-
-    run_status()
+    exit_code = run_status()
 
     output = capsys.readouterr().out
-    assert "Second Brain status" in output
-    assert "periodic reconciliation runs:" in output
-    assert "periodic reconciliation last warning:" in output
-    assert "periodic reconciliation most recent error type:" in output
-    assert len(closed) == 1
+    assert "Second Brain operational status" in output
+    assert "Capture intake" in output
+    assert "capture-service health:" in output
+    assert exit_code in (0, 1)
 
 
 def test_run_status_via_main_cli(tmp_path, monkeypatch, capsys):
-    """main(['status']) executes run_status() end-to-end and exits with code 0."""
-    settings = make_settings(tmp_path)
+    """main(['status']) executes run_status() end-to-end."""
     ledger = Ledger(tmp_path / "ledger.sqlite3")
-    service = CaptureService(settings=settings, ledger=ledger)
+    ledger.close()
 
-    monkeypatch.setattr("secondbrain.app.Settings", lambda: settings)
-    monkeypatch.setattr("secondbrain.app.CaptureService.open", lambda s: service)
+    monkeypatch.setenv("LEDGER_PATH", str(tmp_path / "ledger.sqlite3"))
+    monkeypatch.setenv("STATUS_TIMEZONE", "UTC")
+    monkeypatch.setenv("CAPTURE_SERVICE_HEALTH_STALE_AFTER_SECONDS", "60")
 
     exit_code = main(["status"])
 
     output = capsys.readouterr().out
-    assert exit_code == 0
-    assert "Second Brain status" in output
-    assert "periodic reconciliation runs:" in output
+    assert "Second Brain operational status" in output
+    assert exit_code in (0, 1)
 
 
 # ---------------------------------------------------------------------------

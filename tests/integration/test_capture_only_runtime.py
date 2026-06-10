@@ -27,6 +27,12 @@ def make_settings(tmp_path):
         capture_service_internal_token="x" * 32,
         capture_api_host="127.0.0.1",
         capture_api_port=8000,
+        stale_lease_reaper_interval_seconds=30,
+        stale_lease_reaper_batch_size=100,
+        delivery_retry_max_attempts=5,
+        delivery_retry_base_delay_seconds=10,
+        delivery_retry_max_delay_seconds=300,
+        capture_service_heartbeat_interval_seconds=15,
     )
 
 

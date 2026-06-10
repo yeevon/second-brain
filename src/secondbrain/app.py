@@ -4,14 +4,16 @@ import argparse
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import sys
+import uuid
 
 from secondbrain.api_server import InternalApiServer
-from secondbrain.capture_models import CaptureStatusSnapshot
 from secondbrain.capture_api import create_capture_api
 from secondbrain.capture_service import CaptureService
 from secondbrain.config import Settings
 from secondbrain.discord_capture import create_discord_client
+from secondbrain.heartbeat import run_capture_service_heartbeat
 from secondbrain.reconcile import ReconcileResult
 from secondbrain.vault_writer import VaultWriter
 from secondbrain.worker import CaptureQueue, run_capture_worker
@@ -65,6 +67,7 @@ class LocalWorkerStartup:
         self._startup_lock = asyncio.Lock()
         self.worker_task: asyncio.Task | None = None
         self.periodic_task: asyncio.Task | None = None
+        self.heartbeat_task: asyncio.Task | None = None
 
     async def start_once(self, client) -> LocalWorkerStartupResult | None:
         async with self._startup_lock:
@@ -94,6 +97,7 @@ class CaptureOnlyStartup:
         self.worker_task: asyncio.Task | None = None
         self.periodic_task: asyncio.Task | None = None
         self.reaper_task: asyncio.Task | None = None
+        self.heartbeat_task: asyncio.Task | None = None
 
     async def start_once(self, client) -> ReconcileResult | None:
         async with self._startup_lock:
@@ -114,6 +118,24 @@ def ensure_stale_lease_reaper_task(
         return
     startup.reaper_task = asyncio.create_task(
         capture_service.run_stale_lease_reaper_loop()
+    )
+
+
+def ensure_heartbeat_task(
+    *,
+    startup,
+    capture_service: CaptureService,
+    instance_id: str,
+    interval_seconds: int,
+) -> None:
+    if startup.heartbeat_task is not None:
+        return
+    startup.heartbeat_task = asyncio.create_task(
+        run_capture_service_heartbeat(
+            ledger=capture_service,
+            instance_id=instance_id,
+            interval_seconds=interval_seconds,
+        )
     )
 
 
@@ -218,6 +240,9 @@ async def run_local_full_runtime(settings: Settings) -> None:
 
 async def run_capture_only_runtime(settings: Settings) -> None:
     capture_service = CaptureService.open(settings, notify_capture=None)
+    instance_id = str(uuid.uuid4())
+    capture_service.record_capture_service_start(instance_id=instance_id, now=datetime.now(UTC))
+
     startup = CaptureOnlyStartup(capture_service=capture_service, settings=settings)
     api = create_capture_api(
         capture_service=capture_service,
@@ -232,6 +257,7 @@ async def run_capture_only_runtime(settings: Settings) -> None:
     async def reconcile_once() -> None:
         reconcile_result = await startup.start_once(client)
         if reconcile_result is not None:
+            capture_service.record_capture_service_ready(instance_id=instance_id, now=datetime.now(UTC))
             print("startup Discord history reconciliation complete")
             print(f"  messages seen: {reconcile_result.seen}")
             print(f"  captures handled: {reconcile_result.handled}")
@@ -260,6 +286,12 @@ async def run_capture_only_runtime(settings: Settings) -> None:
         startup=startup,
         capture_service=capture_service,
     )
+    ensure_heartbeat_task(
+        startup=startup,
+        capture_service=capture_service,
+        instance_id=instance_id,
+        interval_seconds=settings.capture_service_heartbeat_interval_seconds,
+    )
     print("capture-service runtime mode: capture-only")
     print("downstream processing: disabled")
     print("starting Discord listener")
@@ -281,6 +313,7 @@ async def run_capture_only_runtime(settings: Settings) -> None:
         client=client,
         startup=startup,
         capture_service=capture_service,
+        instance_id=instance_id,
     )
 
 
@@ -292,6 +325,7 @@ async def run_service_runtime(
     client,
     startup,
     capture_service: CaptureService,
+    instance_id: str | None = None,
 ) -> None:
     tasks = (api_task, discord_task)
     try:
@@ -302,12 +336,21 @@ async def run_service_runtime(
         await api_server.stop()
         await client.close()
 
-        for attr in ("periodic_task", "worker_task", "reaper_task"):
+        for attr in ("periodic_task", "worker_task", "reaper_task", "heartbeat_task"):
             task = getattr(startup, attr, None)
             if task is not None and not task.done():
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
+
+        if instance_id is not None:
+            try:
+                capture_service.record_capture_service_stop(
+                    instance_id=instance_id,
+                    now=datetime.now(UTC),
+                )
+            except Exception:
+                pass
 
         for task in tasks:
             if not task.done():
@@ -325,80 +368,28 @@ def run_discord_listener() -> None:
         print("shutdown complete")
 
 
-def format_status_report(
-    settings: Settings,
-    snapshot: CaptureStatusSnapshot,
-    periodic_snapshot: dict | None = None,
-    delivery_snapshot: dict | None = None,
-) -> str:
-    last_reconciled = snapshot.last_reconciled_discord_message_id or "none"
-    last_successful_vault_write = snapshot.last_successful_vault_write or "none"
-    lines = [
-        "Second Brain status",
-        f"ledger path: {settings.ledger_path}",
-        f"vault path: {settings.vault_path}",
-        f"total captures: {snapshot.total_captures}",
-        f"captures filed: {snapshot.filed}",
-        f"captures in inbox: {snapshot.inbox}",
-        f"captures rejected as sensitive: {snapshot.rejected_sensitive}",
-        f"captures failed: {snapshot.failed}",
-        f"last reconciled Discord message ID: {last_reconciled}",
-        f"last successful vault write: {last_successful_vault_write}",
-    ]
-    if periodic_snapshot is not None:
-        p = periodic_snapshot
-        interval = getattr(settings, "periodic_reconcile_interval_seconds", "?")
-        limit = getattr(settings, "periodic_reconcile_limit", "?")
-        lines += [
-            f"periodic reconciliation interval: {interval} seconds",
-            f"periodic reconciliation scan limit: {limit}",
-            f"periodic reconciliation runs: {p.get('periodic_reconcile_runs_total') or '0'}",
-            f"periodic reconciliation recovered total: {p.get('periodic_reconcile_recovered_total') or '0'}",
-            f"periodic reconciliation duplicate total: {p.get('periodic_reconcile_duplicates_total') or '0'}",
-            f"periodic reconciliation failures: {p.get('periodic_reconcile_failures_total') or '0'}",
-            f"periodic reconciliation limit exceeded count: {p.get('periodic_reconcile_limit_exceeded_total') or '0'}",
-            f"periodic reconciliation last run: {p.get('periodic_reconcile_last_run_at') or 'never'}",
-            f"periodic reconciliation last success: {p.get('periodic_reconcile_last_success_at') or 'never'}",
-            f"periodic reconciliation last recovered count: {p.get('periodic_reconcile_last_recovered_count') or '0'}",
-            f"periodic reconciliation last warning: {p.get('periodic_reconcile_last_warning') or 'none'}",
-            f"periodic reconciliation most recent error type: {p.get('periodic_reconcile_last_error_type') or 'none'}",
-        ]
-    if delivery_snapshot is not None:
-        d = delivery_snapshot
-        interval = getattr(settings, "stale_lease_reaper_interval_seconds", "?")
-        batch = getattr(settings, "stale_lease_reaper_batch_size", "?")
-        lines += [
-            f"stale lease reaper interval: {interval} seconds",
-            f"stale lease reaper batch size: {batch}",
-            f"active processing leases: {d.get('active_processing_leases', 0)}",
-            f"expired processing leases: {d.get('expired_leases', 0)}",
-            f"delivery pending forward: {d.get('pending_forward', 0)}",
-            f"delivery forwarding: {d.get('forwarding', 0)}",
-            f"delivery forwarded awaiting callback: {d.get('forwarded', 0)}",
-            f"delivery classifying: {d.get('classifying', 0)}",
-            f"delivery waiting for retry: {d.get('retry_wait', 0)}",
-            f"delivery failed after retry cap: {d.get('failed', 0)}",
-            f"total downstream delivery attempts: {d.get('total_delivery_attempts', 0)}",
-            f"current accumulated retry attempts across captures: {d.get('total_retry_attempts', 0)}",
-            f"next scheduled retry: {d.get('next_attempt_at') or 'none'}",
-        ]
-    return "\n".join(lines)
-
-
-def run_status() -> None:
-    settings = Settings()
-    capture_service = CaptureService.open(settings)
+def run_status() -> int:
+    from secondbrain.status import (
+        StatusSettings,
+        OperationalStatusUnavailable,
+        read_operational_status,
+        format_operational_status,
+    )
+    settings = StatusSettings.from_env()
     try:
-        periodic_snapshot = capture_service.periodic_reconcile_snapshot()
-        delivery_snapshot = capture_service.delivery_snapshot()
-        print(format_status_report(
-            settings,
-            capture_service.status_snapshot(),
-            periodic_snapshot,
-            delivery_snapshot,
-        ))
-    finally:
-        capture_service.close()
+        snapshot = read_operational_status(settings=settings)
+    except OperationalStatusUnavailable as exc:
+        print("Second Brain operational status unavailable")
+        print(f"reason: {exc.safe_reason}")
+        return 2
+    print(format_operational_status(snapshot))
+    if (
+        snapshot.capture_service_health in {"STALE", "UNKNOWN"}
+        or snapshot.stale_leases > 0
+        or snapshot.captures_failed > 0
+    ):
+        return 1
+    return 0
 
 
 def run_manual_retry(capture_id: str) -> bool:
@@ -434,8 +425,7 @@ def main(argv: list[str] | None = None) -> int:
             run_discord_listener()
             return 0
         if args.command == "status":
-            run_status()
-            return 0
+            return run_status()
         if args.command == "retry":
             return 0 if run_manual_retry(args.capture_id) else 1
     except RuntimeError as exc:

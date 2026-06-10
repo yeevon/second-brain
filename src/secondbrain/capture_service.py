@@ -101,7 +101,7 @@ class CaptureService:
         await self._capture_if_allowed(message, notify_downstream=True)
 
     async def startup_reconcile(self, client: Any) -> ReconcileResult:
-        return await reconcile_discord_history(
+        result = await reconcile_discord_history(
             client=client,
             settings=self.settings,
             ledger=self._ledger,
@@ -109,6 +109,24 @@ class CaptureService:
             mode="startup",
             scan_limit=self.settings.startup_reconcile_limit,
         )
+        self._ledger.record_successful_reconciliation(mode="startup", now=datetime.now(UTC))
+        return result
+
+    def record_capture_service_start(self, *, instance_id: str, now: datetime) -> None:
+        self._ledger.record_capture_service_start(instance_id=instance_id, now=now)
+        log_metadata("capture_service_starting", instance_id=instance_id)
+
+    def record_capture_service_ready(self, *, instance_id: str, now: datetime) -> None:
+        self._ledger.record_capture_service_ready(instance_id=instance_id, now=now)
+        log_metadata("capture_service_ready", instance_id=instance_id)
+
+    def record_capture_service_heartbeat(self, *, instance_id: str, now: datetime) -> bool:
+        return self._ledger.record_capture_service_heartbeat(instance_id=instance_id, now=now)
+
+    def record_capture_service_stop(self, *, instance_id: str, now: datetime) -> bool:
+        updated = self._ledger.record_capture_service_stop(instance_id=instance_id, now=now)
+        log_metadata("capture_service_stopped", instance_id=instance_id)
+        return updated
 
     def make_capture_handler(self, *, notify_downstream: bool):
         async def handle(message):

@@ -211,9 +211,11 @@ async def _run_one_periodic_pass(
     ledger.increment_system_counter("periodic_reconcile_duplicates_total", result.duplicates)
     ledger.increment_system_counter("periodic_reconcile_ignored_total", result.ignored)
 
-    success_now = datetime.now(UTC).isoformat()
-    ledger.set_system_state("periodic_reconcile_last_success_at", success_now)
+    success_now = datetime.now(UTC)
+    success_now_iso = success_now.isoformat()
+    ledger.set_system_state("periodic_reconcile_last_success_at", success_now_iso)
     ledger.set_system_state("periodic_reconcile_last_recovered_count", str(result.recovered))
+    ledger.record_successful_reconciliation(mode="periodic", now=success_now)
 
     if result.limit_exceeded:
         ledger.increment_system_counter("periodic_reconcile_limit_exceeded_total")

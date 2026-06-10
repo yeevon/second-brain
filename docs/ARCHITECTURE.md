@@ -1736,26 +1736,49 @@ writer-service  GET /health
 n8n health endpoint
 ```
 
-## 11.3 Required status view
+## 11.3 Operational status command
 
-Provide a small operational status command or report:
+The `secondbrain status` command reads the local ledger and prints a structured status report. It does not require Discord or Gemini credentials.
+
+```bash
+secondbrain status
+```
+
+Exit codes:
+
+| Code | Meaning                                                                                       |
+|------|-----------------------------------------------------------------------------------------------|
+| `0`  | Healthy — no operator attention needed                                                        |
+| `1`  | Operator attention — stale/unknown capture-service health, stale leases, or failed captures   |
+| `2`  | Database unavailable — ledger file does not exist or cannot be opened                         |
+
+Inbox-only captures do not trigger exit code 1; they are a normal operating state.
+
+**Read-only guarantee.** The status reader opens SQLite with `mode=ro` and `PRAGMA query_only = ON`. It never runs migrations, writes to `system_state`, or modifies any row.
+
+Output sections:
 
 ```text
-captures received today
-captures filed today
-captures in inbox
-captures awaiting clarification
-captures rejected as sensitive
-captures failed
-captures waiting for retry
-stale leases
-last successful Git push
-last successful backup
-last successful digest
-capture-service health
-writer-service health
-n8n health
+Capture intake         — ledger path, vault path, total captures, received today, sensitive rejections
+Note lifecycle         — filed today, in inbox, failed, last vault write
+Delivery backlog       — waiting for retry, stale leases
+Discord reconciliation — last message ID, last reconciliation timestamp and mode
+Capture service        — health, state, instance ID, started at, last heartbeat, stopped at
 ```
+
+Capture-service health values:
+
+| Value      | Meaning                                                               |
+|------------|-----------------------------------------------------------------------|
+| `HEALTHY`  | State is `RUNNING` and heartbeat arrived within the stale threshold   |
+| `STARTING` | State is `STARTING` and heartbeat is recent                           |
+| `STOPPED`  | State is `STOPPED` (graceful shutdown)                                |
+| `STALE`    | State is `RUNNING` or `STARTING` but heartbeat is old or missing      |
+| `UNKNOWN`  | No state has ever been written                                        |
+
+**Heartbeat lifecycle.** The capture-service writes an instance ID and `STARTING` state at boot, transitions to `RUNNING` after startup reconciliation completes, then loops a heartbeat write on `CAPTURE_SERVICE_HEARTBEAT_INTERVAL_SECONDS` (default 15 s). On shutdown the `STOPPED` state is written. All writes are conditional on the current instance ID to prevent a shutting-down process from overwriting a freshly started replacement.
+
+Future fields (not yet implemented): writer-service health, n8n health, last successful Git push, last successful backup.
 
 ## 11.4 Human-readable vault audit log
 

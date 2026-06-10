@@ -326,6 +326,10 @@ async def test_capture_only_runtime_invokes_reaper_start_before_discord_task_cre
         handle_gateway_message=AsyncMock(),
         run_stale_lease_reaper_loop=noop_reaper_loop,
         run_periodic_reconciliation_loop=noop_periodic_loop,
+        record_capture_service_start=lambda **kw: None,
+        record_capture_service_ready=lambda **kw: None,
+        record_capture_service_heartbeat=lambda **kw: True,
+        record_capture_service_stop=lambda **kw: True,
     )
     monkeypatch.setattr(app_module.CaptureService, "open", lambda *a, **kw: service)
 

@@ -107,6 +107,13 @@ class Settings:
         self.stale_lease_reaper_interval_seconds = _parse_int_env("STALE_LEASE_REAPER_INTERVAL_SECONDS", "30")
         self.stale_lease_reaper_batch_size       = _parse_int_env("STALE_LEASE_REAPER_BATCH_SIZE", "100")
 
+        # Heartbeat
+        self.capture_service_heartbeat_interval_seconds  = _parse_int_env("CAPTURE_SERVICE_HEARTBEAT_INTERVAL_SECONDS", "15")
+        self.capture_service_health_stale_after_seconds  = _parse_int_env("CAPTURE_SERVICE_HEALTH_STALE_AFTER_SECONDS", "60")
+
+        # Status command
+        self.status_timezone = os.getenv("STATUS_TIMEZONE", "UTC")
+
         self.ledger_path = Path(self.ledger_path)
 
         if self.capture_processing_mode == "local-full":
@@ -155,6 +162,13 @@ class Settings:
             raise RuntimeError("STALE_LEASE_REAPER_INTERVAL_SECONDS must be >= 1")
         if self.stale_lease_reaper_batch_size < 1:
             raise RuntimeError("STALE_LEASE_REAPER_BATCH_SIZE must be >= 1")
+
+        if self.capture_service_heartbeat_interval_seconds < 1:
+            raise RuntimeError("CAPTURE_SERVICE_HEARTBEAT_INTERVAL_SECONDS must be >= 1")
+        if self.capture_service_health_stale_after_seconds <= self.capture_service_heartbeat_interval_seconds:
+            raise RuntimeError(
+                "CAPTURE_SERVICE_HEALTH_STALE_AFTER_SECONDS must be > CAPTURE_SERVICE_HEARTBEAT_INTERVAL_SECONDS"
+            )
 
         if self.sqlite_busy_timeout_ms < 0:
             raise RuntimeError("SQLITE_BUSY_TIMEOUT_MS must be >= 0")

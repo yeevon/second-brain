@@ -452,6 +452,47 @@ class Ledger:
             lambda conn: self._increment_system_counter(conn, key, amount),
         )
 
+    def set_system_states(self, values: dict[str, str]) -> None:
+        self._write("set_system_states", lambda conn: self._set_system_states(conn, values))
+
+    def record_capture_service_start(self, *, instance_id: str, now: datetime) -> None:
+        now_iso = _iso(now)
+        self._write(
+            "record_capture_service_start",
+            lambda conn: self._record_capture_service_start(conn, instance_id=instance_id, now_iso=now_iso),
+        )
+
+    def record_capture_service_ready(self, *, instance_id: str, now: datetime) -> None:
+        now_iso = _iso(now)
+        self._write(
+            "record_capture_service_ready",
+            lambda conn: self._record_capture_service_ready(conn, instance_id=instance_id, now_iso=now_iso),
+        )
+
+    def record_capture_service_heartbeat(self, *, instance_id: str, now: datetime) -> bool:
+        now_iso = _iso(now)
+        return self._write(
+            "record_capture_service_heartbeat",
+            lambda conn: self._record_capture_service_heartbeat(conn, instance_id=instance_id, now_iso=now_iso),
+        )
+
+    def record_capture_service_stop(self, *, instance_id: str, now: datetime) -> bool:
+        now_iso = _iso(now)
+        return self._write(
+            "record_capture_service_stop",
+            lambda conn: self._record_capture_service_stop(conn, instance_id=instance_id, now_iso=now_iso),
+        )
+
+    def record_successful_reconciliation(self, *, mode: str, now: datetime) -> None:
+        now_iso = _iso(now)
+        self._write(
+            "record_successful_reconciliation",
+            lambda conn: self._set_system_states(conn, {
+                "last_successful_reconciliation_at": now_iso,
+                "last_successful_reconciliation_mode": mode,
+            }),
+        )
+
     def periodic_reconcile_snapshot(self) -> dict:
         keys = [
             "periodic_reconcile_runs_total",
@@ -1245,6 +1286,101 @@ class Ledger:
             """,
             (key, value, _iso(_now())),
         )
+
+    def _set_system_states(self, conn: sqlite3.Connection, values: dict[str, str]) -> None:
+        now_iso = _iso(_now())
+        for key, value in values.items():
+            conn.execute(
+                """
+                INSERT INTO system_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (key, value, now_iso),
+            )
+
+    def _record_capture_service_start(
+        self, conn: sqlite3.Connection, *, instance_id: str, now_iso: str
+    ) -> None:
+        for key, value in {
+            "capture_service_instance_id": instance_id,
+            "capture_service_state": "STARTING",
+            "capture_service_started_at": now_iso,
+            "capture_service_stopped_at": "",
+        }.items():
+            conn.execute(
+                """
+                INSERT INTO system_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (key, value, now_iso),
+            )
+
+    def _record_capture_service_ready(
+        self, conn: sqlite3.Connection, *, instance_id: str, now_iso: str
+    ) -> None:
+        current_id = self._get_system_state(conn, "capture_service_instance_id")
+        if current_id != instance_id:
+            return
+        for key, value in {
+            "capture_service_state": "RUNNING",
+            "capture_service_last_heartbeat_at": now_iso,
+        }.items():
+            conn.execute(
+                """
+                INSERT INTO system_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (key, value, now_iso),
+            )
+
+    def _record_capture_service_heartbeat(
+        self, conn: sqlite3.Connection, *, instance_id: str, now_iso: str
+    ) -> bool:
+        current_id = self._get_system_state(conn, "capture_service_instance_id")
+        if current_id != instance_id:
+            return False
+        conn.execute(
+            """
+            INSERT INTO system_state (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            ("capture_service_last_heartbeat_at", now_iso, now_iso),
+        )
+        return True
+
+    def _record_capture_service_stop(
+        self, conn: sqlite3.Connection, *, instance_id: str, now_iso: str
+    ) -> bool:
+        current_id = self._get_system_state(conn, "capture_service_instance_id")
+        if current_id != instance_id:
+            return False
+        for key, value in {
+            "capture_service_state": "STOPPED",
+            "capture_service_stopped_at": now_iso,
+        }.items():
+            conn.execute(
+                """
+                INSERT INTO system_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (key, value, now_iso),
+            )
+        return True
 
     def _increment_system_counter(
         self, conn: sqlite3.Connection, key: str, amount: int
