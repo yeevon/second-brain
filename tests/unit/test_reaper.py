@@ -548,30 +548,45 @@ async def test_reaper_run_once_skips_when_pass_is_already_running(tmp_path, caps
 
 
 @pytest.mark.asyncio
-async def test_on_ready_starts_only_one_reaper_task(tmp_path):
-    """Calling start_once twice should not start a second reaper task."""
-    from secondbrain.app import CaptureOnlyStartup
-    from secondbrain.capture_service import CaptureService
-    from secondbrain.config import Settings
-    # We test at the logic level: the guard checks task is None or done
-    # Use a fake startup with a pre-existing non-done task
-    startup = CaptureOnlyStartup.__new__(CaptureOnlyStartup)
-    startup._started = True  # already started
-    startup.settings = make_settings()
-    startup.reaper_task = asyncio.create_task(asyncio.sleep(9999))
+async def test_reaper_sequential_loop_does_not_overlap_passes(tmp_path, monkeypatch):
+    """run_stale_lease_reaper never starts a second pass while the first is still running."""
+    from secondbrain.capture_models import LeaseReaperResult
+    from secondbrain.reaper import run_stale_lease_reaper
 
-    class FakeClient:
-        pass
+    current_passes = 0
+    max_concurrent_passes = 0
+    total_passes = 0
 
-    # start_once returns None if already started — reaper_task not replaced
-    existing_task = startup.reaper_task
-    # Cannot call start_once without full CaptureService, but verify guard logic
-    assert not startup.reaper_task.done()
-    existing_task.cancel()
+    async def tracked_reaper_once(*, settings, ledger, receipt_client=None, _now=None):
+        nonlocal current_passes, max_concurrent_passes, total_passes
+        current_passes += 1
+        total_passes += 1
+        max_concurrent_passes = max(max_concurrent_passes, current_passes)
+        await asyncio.sleep(0)  # yield mid-pass to allow any concurrent start
+        current_passes -= 1
+        return LeaseReaperResult(scanned=0, requeued=(), failed=())
+
+    monkeypatch.setattr("secondbrain.reaper.run_stale_lease_reaper_once", tracked_reaper_once)
+
+    settings = make_settings(stale_lease_reaper_interval_seconds=0)
+    ledger = make_ledger(tmp_path)
+
+    task = asyncio.create_task(run_stale_lease_reaper(settings=settings, ledger=ledger))
+
+    await asyncio.sleep(0.02)
+
+    task.cancel()
     try:
-        await existing_task
+        await task
     except asyncio.CancelledError:
         pass
+
+    assert total_passes >= 2, f"Loop must run multiple passes; got {total_passes}"
+    assert max_concurrent_passes == 1, (
+        f"Passes must never overlap; max_concurrent={max_concurrent_passes}"
+    )
+
+    ledger.close()
 
 
 # ---------------------------------------------------------------------------

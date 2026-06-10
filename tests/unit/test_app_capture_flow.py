@@ -867,10 +867,10 @@ def test_manual_retry_unknown_capture_reports_not_found_without_traceback(
 
     run_manual_retry("SB-20260609-9999")
 
-    output = capsys.readouterr().out
-    assert "manual retry rejected: capture not found" in output
-    assert "Traceback" not in output
-    assert "CaptureNotFoundError" not in output
+    captured = capsys.readouterr()
+    assert "manual retry rejected: capture not found" in captured.err
+    assert "Traceback" not in captured.err
+    assert "CaptureNotFoundError" not in captured.err
 
 
 def test_manual_retry_known_nonfailed_capture_reports_invalid_state(
@@ -898,8 +898,8 @@ def test_manual_retry_known_nonfailed_capture_reports_invalid_state(
 
     run_manual_retry(capture_id)
 
-    output = capsys.readouterr().out
-    assert "manual retry rejected: capture is not in terminal FAILED state" in output
+    captured = capsys.readouterr()
+    assert "manual retry rejected: capture is not in terminal FAILED state" in captured.err
 
 
 def test_manual_retry_success_cli_path(tmp_path, monkeypatch, capsys):
@@ -935,7 +935,94 @@ def test_manual_retry_success_cli_path(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("secondbrain.app.Settings", lambda: settings)
     monkeypatch.setattr("secondbrain.app.CaptureService.open", lambda s: service)
 
-    run_manual_retry(capture_id)
+    result = run_manual_retry(capture_id)
 
     output = capsys.readouterr().out
+    assert result is True
     assert f"manual retry queued: {capture_id}" in output
+
+
+# ---------------------------------------------------------------------------
+# main() exit codes for retry command
+# ---------------------------------------------------------------------------
+
+def _make_failed_capture(ledger, tmp_path):
+    now = datetime.now(UTC)
+    ledger.insert_accepted_capture(
+        discord_message_id="2001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="test note",
+        received_at=now,
+    )
+    claimed = ledger.claim_due_deliveries(
+        now=now, lease_until=now + timedelta(minutes=1), batch_size=10
+    )
+    capture_id = claimed[0].capture_id
+    ledger.schedule_retry(
+        capture_id=capture_id,
+        delivery_attempt=1,
+        now=now,
+        error_type="TimeoutError",
+        reason_type="webhook_failure",
+        max_attempts=1,
+        base_delay_seconds=10,
+        max_delay_seconds=300,
+    )
+    return capture_id
+
+
+def test_main_retry_success_returns_zero(tmp_path, monkeypatch, capsys):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    service = CaptureService(settings=settings, ledger=ledger)
+    capture_id = _make_failed_capture(ledger, tmp_path)
+
+    monkeypatch.setattr("secondbrain.app.Settings", lambda: settings)
+    monkeypatch.setattr("secondbrain.app.CaptureService.open", lambda s: service)
+
+    exit_code = main(["retry", capture_id])
+
+    assert exit_code == 0
+    assert f"manual retry queued: {capture_id}" in capsys.readouterr().out
+
+
+def test_main_retry_unknown_capture_returns_nonzero(tmp_path, monkeypatch, capsys):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    monkeypatch.setattr("secondbrain.app.Settings", lambda: settings)
+    monkeypatch.setattr("secondbrain.app.CaptureService.open", lambda s: service)
+
+    exit_code = main(["retry", "SB-DOES-NOT-EXIST"])
+
+    assert exit_code == 1
+    assert "capture not found" in capsys.readouterr().err
+
+
+def test_main_retry_known_nonfailed_capture_returns_nonzero(tmp_path, monkeypatch, capsys):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    now = datetime.now(UTC)
+    ledger.insert_accepted_capture(
+        discord_message_id="3001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="non-failed note",
+        received_at=now,
+    )
+    captures = ledger.captures_by_status("RECEIVED")
+    capture_id = captures[0].capture_id
+
+    monkeypatch.setattr("secondbrain.app.Settings", lambda: settings)
+    monkeypatch.setattr("secondbrain.app.CaptureService.open", lambda s: service)
+
+    exit_code = main(["retry", capture_id])
+
+    assert exit_code == 1
+    assert "not in terminal FAILED state" in capsys.readouterr().err

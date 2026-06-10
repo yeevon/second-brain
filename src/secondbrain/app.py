@@ -256,6 +256,10 @@ async def run_capture_only_runtime(settings: Settings) -> None:
         reconcile_once,
     )
     capture_service.attach_receipt_client(client)
+    ensure_stale_lease_reaper_task(
+        startup=startup,
+        capture_service=capture_service,
+    )
     print("capture-service runtime mode: capture-only")
     print("downstream processing: disabled")
     print("starting Discord listener")
@@ -397,7 +401,7 @@ def run_status() -> None:
         capture_service.close()
 
 
-def run_manual_retry(capture_id: str) -> None:
+def run_manual_retry(capture_id: str) -> bool:
     from secondbrain.capture_service import CaptureNotFoundError
     settings = Settings()
     capture_service = CaptureService.open(settings)
@@ -405,10 +409,13 @@ def run_manual_retry(capture_id: str) -> None:
         changed = capture_service.manual_retry_capture(capture_id=capture_id)
         if changed:
             print(f"manual retry queued: {capture_id}")
+            return True
         else:
-            print(f"manual retry rejected: capture is not in terminal FAILED state")
+            print(f"manual retry rejected: capture is not in terminal FAILED state", file=sys.stderr)
+            return False
     except CaptureNotFoundError:
-        print(f"manual retry rejected: capture not found")
+        print(f"manual retry rejected: capture not found", file=sys.stderr)
+        return False
     finally:
         capture_service.close()
 
@@ -430,8 +437,7 @@ def main(argv: list[str] | None = None) -> int:
             run_status()
             return 0
         if args.command == "retry":
-            run_manual_retry(args.capture_id)
-            return 0
+            return 0 if run_manual_retry(args.capture_id) else 1
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

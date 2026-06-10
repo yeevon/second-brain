@@ -1,11 +1,16 @@
 import asyncio
+from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from secondbrain.app import CaptureOnlyStartup, ensure_stale_lease_reaper_task
+from secondbrain.capture_models import DELIVERY_FAILED, RETRY_WAIT
+from secondbrain.capture_service import CaptureService
 from secondbrain.config import Settings
+from secondbrain.ledger import Ledger
 from secondbrain.receipts import ATTACHMENT_WARNING, format_saved_receipt
 from secondbrain.reconcile import ReconcileResult
 
@@ -263,3 +268,103 @@ async def test_capture_only_ready_callback_restarts_dead_reaper_task():
 
     assert second_task is not first_task
     assert reaper_call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Reaper independence from Discord connectivity
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_capture_only_runtime_starts_reaper_before_discord_ready():
+    """Reaper task is created at service init, before Discord on_ready fires."""
+    reaper_running = asyncio.Event()
+
+    async def fake_reaper_loop():
+        reaper_running.set()
+        await asyncio.sleep(10)
+
+    startup = CaptureOnlyStartup(
+        capture_service=SimpleNamespace(run_stale_lease_reaper_loop=fake_reaper_loop)
+    )
+
+    # This call happens in run_capture_only_runtime before the Discord task is created
+    ensure_stale_lease_reaper_task(startup=startup, capture_service=startup.capture_service)
+
+    await asyncio.sleep(0)  # yield to let the task start
+
+    assert reaper_running.is_set(), "Reaper must start immediately, before Discord on_ready"
+    assert startup.reaper_task is not None
+    assert not startup.reaper_task.done()
+
+    startup.reaper_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await startup.reaper_task
+
+
+@pytest.mark.asyncio
+async def test_startup_reconciliation_failure_does_not_prevent_reaper_start(tmp_path):
+    """Stale leases are recovered even when startup reconciliation raises."""
+    from secondbrain.reaper import run_stale_lease_reaper_once
+
+    now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
+    stale_now = now + timedelta(minutes=5)
+
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    settings = SimpleNamespace(
+        discord_guild_id=100,
+        discord_capture_channel_id=200,
+        discord_allowed_user_id=300,
+        startup_reconcile_limit=10,
+        ledger_path=tmp_path / "ledger.sqlite3",
+        stale_lease_reaper_interval_seconds=0,
+        stale_lease_reaper_batch_size=100,
+        delivery_retry_max_attempts=5,
+        delivery_retry_base_delay_seconds=10,
+        delivery_retry_max_delay_seconds=300,
+    )
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    # Insert a capture and let its lease expire
+    ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="test",
+        received_at=now,
+    )
+    claimed = ledger.claim_due_deliveries(
+        now=now, lease_until=now + timedelta(minutes=1), batch_size=10
+    )
+    capture_id = claimed[0].capture_id
+
+    # Simulate the fixed startup: reaper starts before Discord
+    startup = CaptureOnlyStartup(capture_service=service)
+    ensure_stale_lease_reaper_task(startup=startup, capture_service=service)
+    assert startup.reaper_task is not None
+
+    # Simulate reconciliation failure (what would have gated the reaper in the old code)
+    failing_service = SimpleNamespace(
+        startup_reconcile=AsyncMock(side_effect=RuntimeError("Discord timeout"))
+    )
+    failing_startup = CaptureOnlyStartup(capture_service=failing_service)
+    with pytest.raises(RuntimeError, match="Discord timeout"):
+        await failing_startup.start_once(object())
+
+    # Despite the reconcile failure, the reaper (started early) still processes stale leases
+    result = await run_stale_lease_reaper_once(
+        settings=settings,
+        ledger=ledger,
+        _now=stale_now,
+    )
+    assert result.requeued or result.failed, (
+        "Reaper must process the stale row regardless of reconcile outcome"
+    )
+    capture = ledger.get_capture(capture_id)
+    assert capture.delivery_status in (RETRY_WAIT, DELIVERY_FAILED)
+
+    startup.reaper_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await startup.reaper_task
+
+    ledger.close()

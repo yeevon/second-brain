@@ -419,9 +419,9 @@ wait until previous pass finishes
 open short SQLite transaction
     ↓
 claim expired FORWARDED or CLASSIFYING rows conditionally
-increment delivery_attempts
+increment retry_attempts (shared counter across both failure paths)
 clear expired lease
-calculate next_attempt_at
+calculate next_attempt_at using capped exponential backoff
 append REQUEUED_STALE_LEASE event
     ↓
 if retry cap exceeded:
@@ -431,12 +431,77 @@ if retry cap exceeded:
     ↓
 commit transaction
     ↓
-perform HTTP forwarding and Discord alert calls outside the transaction
+perform Discord alert calls outside the transaction
     ↓
 sleep 30–60 seconds
 ```
 
 The reaper must never use a naive `setInterval` loop that can start a second pass before the first pass finishes. It must also never retry a permanently stuck capture forever.
+
+#### Retry counters
+
+Two independent counters track delivery history:
+
+| Counter | Meaning | When incremented |
+| --- | --- | --- |
+| `delivery_attempts` | Number of times the dispatcher claimed a delivery generation | On every successful `claim_due_deliveries` |
+| `retry_attempts` | Accumulated retry events across both failure paths | On every `schedule_retry` (webhook failure) or stale-lease reap |
+
+`retry_attempts` is the authoritative counter for cap checks and backoff calculations. Both the webhook-failure path and the stale-lease reaper increment the same counter so that mixed failure modes reach one consistent cap.
+
+Example: one webhook failure followed by one stale-lease reap produces `retry_attempts == 2`, regardless of how many `delivery_attempts` exist.
+
+#### Startup independence from Discord connectivity
+
+The reaper watchdog is a SQLite-only background loop. It must start at `capture-service` initialization, not inside the Discord `on_ready` callback.
+
+Correct startup sequence:
+
+```text
+CaptureService opens SQLite
+    ↓
+capture-service API starts
+    ↓
+stale-lease reaper task created (ensure_stale_lease_reaper_task)
+    ↓
+Discord client starts (may connect, fail, or reconnect)
+    ↓
+on_ready fires (eventually or never)
+    ↓
+startup reconciliation runs inside on_ready callback
+    ↓
+ensure_stale_lease_reaper_task called again as a dead-task restart guard
+```
+
+The reaper must keep running if:
+
+- Discord is unavailable at startup
+- `on_ready` never fires
+- Startup reconciliation raises an exception
+
+Discord receipt edits (after requeue or terminal failure) are always best-effort: they happen outside the SQLite transaction and after the transaction commits. A receipt-edit failure must not roll back, abort, or prevent the reaper from continuing.
+
+#### Manual retry CLI
+
+Operators can manually re-queue a terminally failed capture:
+
+```bash
+secondbrain retry SB-YYYYMMDD-NNNN
+```
+
+Exit codes:
+
+- `0` — retry was queued; capture moved from `FAILED` to `RETRY_WAIT`
+- `1` — rejected; either the capture ID does not exist or the capture is not in terminal `FAILED` state
+
+Rejection messages go to `stderr`. The queued confirmation goes to `stdout`.
+
+Metadata log events emitted:
+
+- `manual_retry_requested` — capture was successfully re-queued
+- `manual_retry_rejected` with `reason=capture_not_found` or `reason=invalid_state`
+
+The manual retry resets `retry_attempts` to zero so the capture gets a full fresh retry budget.
 
 ### Internal API
 

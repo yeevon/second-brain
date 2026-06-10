@@ -574,7 +574,11 @@ class CaptureService:
 
     def manual_retry_capture(self, *, capture_id: str) -> bool:
         from datetime import UTC, datetime
-        self.get_capture(capture_id)
+        try:
+            self.get_capture(capture_id)
+        except CaptureNotFoundError:
+            log_metadata("manual_retry_rejected", capture_id=capture_id, reason="capture_not_found")
+            raise
         changed = self._ledger.manual_retry_capture(
             capture_id=capture_id,
             now=datetime.now(UTC),
@@ -582,7 +586,7 @@ class CaptureService:
         if changed:
             log_metadata("manual_retry_requested", capture_id=capture_id)
         else:
-            log_metadata("manual_retry_rejected", capture_id=capture_id)
+            log_metadata("manual_retry_rejected", capture_id=capture_id, reason="invalid_state")
         return changed
 
     async def run_stale_lease_reaper_loop(self) -> None:
