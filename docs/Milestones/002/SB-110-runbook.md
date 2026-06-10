@@ -2,8 +2,30 @@
 
 This document is the completion gate for Milestone 2. Every item must pass before the milestone is closed.
 
-**Automated** items have permanent test coverage and must pass on every commit.
-**Manual** items require infrastructure (Docker, EC2) and must be re-run at release time.
+**Automated** items have permanent test coverage; the suite is the proof.
+**Manual** items require infrastructure (Docker, EC2) and must be executed at release time.
+**Deferred** items have no live adapter yet; the automated proof is the accepted substitute.
+
+---
+
+## Coverage table
+
+| Exit criterion | Classification | Evidence |
+| --- | --- | --- |
+| Full automated suite | Automated | `uv run pytest -q` |
+| Status-command validation | Automated + Manual | `tests/unit/test_status.py`, `tests/unit/test_heartbeat.py`, live container exec |
+| Discord capture tests | Manual | Steps 3b, 4 |
+| Duplicate suppression | Automated | `test_duplicate_discord_event_is_idempotent` and friends |
+| Sensitive-input rejection | Automated | `test_secret_like_input_stores_redacted_rejection_only` and friends |
+| Offline reconciliation | Automated | `test_capture_only_reconciliation_failure_allows_retry` and friends |
+| Periodic skipped-Gateway recovery | Automated | `test_skipped_gateway_event_is_recovered_by_periodic_reconciliation` |
+| Retry and lease recovery | Automated | `test_schedule_retry_makes_capture_reclaimable` and friends |
+| Clean shutdown | Automated + Manual | `test_sigterm_style_shutdown_closes_service_cleanly`, Step 3g |
+| Live SQLite monitoring | Manual proxy | Steps 3c (three terminal watches) |
+| Container recreation | Manual | Step 3e |
+| Missing-volume fail-closed | Manual | Step 3f |
+| EC2 reboot persistence | Manual | Step 4 |
+| Downstream delivery (retry, n8n) | Deferred | Automated reaper tests; no live n8n adapter exists yet |
 
 ---
 
@@ -15,26 +37,9 @@ uv run pytest -q
 
 Expected: all tests pass, zero failures, zero errors.
 
-The suite covers the following exit criteria automatically:
-
-| Criterion | Primary test coverage |
-|---|---|
-| Duplicate suppression | `test_duplicate_discord_event_is_idempotent`<br>`test_capture_only_mode_duplicate_gateway_event_does_not_duplicate_row_or_receipt`<br>`test_duplicate_event_after_filing_does_not_refile_or_resend` |
-| Sensitive-input rejection | `test_secret_like_input_stores_redacted_rejection_only`<br>`test_capture_only_mode_rejects_sensitive_message_before_plaintext_persistence`<br>`test_retry_api_rejects_free_form_error_message`<br>`test_terminal_failure_api_rejects_secret_like_reason` |
-| Offline reconciliation | `test_capture_only_reconciliation_failure_allows_retry`<br>`test_startup_reconciliation_failure_does_not_prevent_reaper_start` |
-| Periodic skipped-Gateway recovery | `test_skipped_gateway_event_is_recovered_by_periodic_reconciliation` |
-| Retry and lease recovery | `test_schedule_retry_makes_capture_reclaimable`<br>`test_schedule_retry_reaches_terminal_failure_at_cap`<br>`test_repeated_fake_downstream_crashes_eventually_fail_visibly`<br>`test_manual_retry_requeues_capture_after_retry_cap_failure`<br>`test_reaper_receipt_alert_runs_only_after_database_commit` |
-| Missing-volume fail-closed | `test_local_full_mode_requires_vault_path`<br>`test_local_full_mode_requires_gemini_api_key` |
-| Status-command validation | `tests/unit/test_status.py` (49 tests)<br>`tests/unit/test_heartbeat.py` (12 tests)<br>`tests/integration/test_capture_only_runtime.py` status tests |
-| Clean shutdown | `test_sigterm_style_shutdown_closes_service_cleanly`<br>`test_local_full_runtime_records_stopped_state_on_shutdown` |
-| Discord capture (fake) | `test_capture_only_mode_persists_normal_message_as_received`<br>`test_capture_only_mode_sends_durable_capture_receipt`<br>`test_happy_path_capture_to_vault_edits_original_receipt` |
-| EC2 reboot persistence (startup recovery) | `test_startup_catchup_recovers_missed_message_once`<br>`test_crash_before_sqlite_commit_is_recovered_by_next_catchup` |
-
 ---
 
 ## Step 2 — SB-109 status-command slice
-
-Run the focused operational-status test slice to confirm the status command is fully wired:
 
 ```bash
 uv run pytest \
@@ -48,22 +53,43 @@ uv run pytest \
   -q
 ```
 
-Then run the command against the live ledger and confirm it exits cleanly:
-
-```bash
-uv run python -m secondbrain status
-echo "exit code: $?"
-```
-
-Expected output contains all sections (`Capture intake`, `Note lifecycle`, `Delivery backlog`, `Discord reconciliation`, `Capture service`).
-
-Expected exit code: `0` if service is running with a fresh heartbeat, `1` if no service is running (`UNKNOWN` health), `2` only if the ledger file is missing.
+Expected: all tests pass.
 
 ---
 
 ## Step 3 — Local Docker regression
 
-### 3a — Build and start the container
+### 3a — Prepare a disposable local environment
+
+Create a temporary data directory and set the three shell variables used throughout the Docker steps:
+
+```bash
+export CAPTURE_DATA_DIR=/tmp/sb-local-docker/data
+export CAPTURE_SERVICE_ENV_FILE=/tmp/sb-local-docker/capture-service.env
+export HOST_LEDGER=$CAPTURE_DATA_DIR/ledger.sqlite3
+
+mkdir -p "$CAPTURE_DATA_DIR"
+cp deploy/capture-service.env.example "$CAPTURE_SERVICE_ENV_FILE"
+```
+
+Edit `$CAPTURE_SERVICE_ENV_FILE` and fill in the required values:
+
+```text
+DISCORD_BOT_TOKEN=<real bot token>
+DISCORD_GUILD_ID=<real guild ID>
+DISCORD_CAPTURE_CHANNEL_ID=<real channel ID>
+DISCORD_ALLOWED_USER_ID=<real user ID>
+CAPTURE_SERVICE_INTERNAL_TOKEN=<output of: openssl rand -hex 32>
+```
+
+Create the EBS sentinel marker and set container-user ownership:
+
+```bash
+touch "$CAPTURE_DATA_DIR/.second-brain-ebs-volume"
+sudo chown -R 10001:10001 "$CAPTURE_DATA_DIR"
+```
+
+Build the image and start the container:
 
 ```bash
 docker compose build
@@ -76,9 +102,31 @@ Confirm the container starts and does not exit within 30 seconds:
 docker compose ps
 ```
 
-Expected: `capture-service` is `Up`.
+Expected: `second-brain-capture-service` shows `Up`.
 
-### 3b — Discord capture test
+### 3b — Open three monitoring terminals
+
+Open three separate terminals with `CAPTURE_DATA_DIR` and `HOST_LEDGER` exported, then run one watch in each.
+
+**Terminal 1 — captures:**
+
+```bash
+watch -n 5 "sqlite3 '$HOST_LEDGER' 'SELECT id, status, discord_message_id, substr(raw_text,1,40) FROM captures ORDER BY id DESC LIMIT 10;'"
+```
+
+**Terminal 2 — capture_events:**
+
+```bash
+watch -n 5 "sqlite3 '$HOST_LEDGER' 'SELECT id, capture_id, event_type, created_at FROM capture_events ORDER BY id DESC LIMIT 10;'"
+```
+
+**Terminal 3 — system_state:**
+
+```bash
+watch -n 5 "sqlite3 '$HOST_LEDGER' 'SELECT key, value, updated_at FROM system_state;'"
+```
+
+### 3c — Discord capture test
 
 Send a test message in the configured Discord channel from the allowed user account.
 
@@ -86,7 +134,6 @@ Confirm within 60 seconds:
 
 1. A durable receipt appears in Discord (bot reply with `⏳ SB-…`).
 2. In capture-only mode, no vault write occurs.
-3. In local-full mode, the vault note is created and the receipt is edited to `✅`.
 
 Confirm in logs:
 
@@ -96,39 +143,39 @@ docker compose logs --tail=50 capture-service
 
 Expected: `{"event":"capture_received",...}` log line, no error events.
 
-### 3c — Live SQLite monitoring
+Confirm in the monitoring terminals:
 
-While the container is running, check the ledger:
+- Terminal 1: a new row appears with `status = RECEIVED`.
+- Terminal 2: a `capture_accepted` event appears.
+- Terminal 3: `capture_service_last_heartbeat_at` advances.
 
-```bash
-uv run python -m secondbrain status
-```
+### 3d — Live SQLite monitoring via status command
 
-Expected: health `HEALTHY`, heartbeat within the last 60 seconds.
-
-Run the status command continuously:
+Run the status command from inside the running container:
 
 ```bash
-watch -n 15 'uv run python -m secondbrain status | tail -8'
+docker compose exec -T capture-service \
+  /app/.venv/bin/python -m secondbrain status
+echo "exit code: $?"
 ```
 
-Confirm the `capture-service last heartbeat` timestamp advances every ~15 seconds.
+Expected: output contains all sections (`Capture intake`, `Note lifecycle`, `Delivery backlog`, `Discord reconciliation`, `Capture service`). Health shows `HEALTHY`, heartbeat within the last 60 seconds.
 
-### 3d — Duplicate suppression (live)
+Expected exit codes:
 
-Send the exact same Discord message ID twice (e.g., edit a message to trigger a re-delivery if your test harness supports it, or send two identical messages rapidly).
-
-Confirm the ledger shows exactly one capture row:
-
-```bash
-sqlite3 .runtime/ledger.sqlite3 "SELECT COUNT(*) FROM captures WHERE discord_message_id = '<id>';"
-```
-
-Expected: `1`.
+- `0` — service running with a fresh heartbeat (HEALTHY)
+- `1` — any non-HEALTHY capture-service state (STARTING, STOPPED, STALE, UNKNOWN) or operational anomaly
+- `2` — ledger cannot be read safely
 
 ### 3e — Container recreation
 
-Stop and remove the container while keeping the named volume:
+Record the current capture count:
+
+```bash
+sqlite3 "$HOST_LEDGER" "SELECT COUNT(*) FROM captures;"
+```
+
+Stop and remove the container while keeping the bind-mounted data directory:
 
 ```bash
 docker compose stop capture-service
@@ -138,161 +185,280 @@ docker compose up -d capture-service
 
 Confirm after restart:
 
-1. The service starts without errors.
-2. `uv run python -m secondbrain status` shows the new instance ID but no lost rows.
-3. `total captures` matches the count before recreation.
-
-### 3f — Missing-volume fail-closed behavior
-
-Start the container without the ledger volume mounted:
-
-```bash
-docker run --rm \
-  -e CAPTURE_PROCESSING_MODE=capture-only \
-  -e DISCORD_BOT_TOKEN=fake \
-  -e DISCORD_GUILD_ID=1 \
-  -e DISCORD_CAPTURE_CHANNEL_ID=2 \
-  -e DISCORD_ALLOWED_USER_ID=3 \
-  -e LEDGER_PATH=/nonexistent/path/ledger.sqlite3 \
-  -e CAPTURE_SERVICE_INTERNAL_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(16))") \
-  -e STARTUP_RECONCILE_LIMIT=100 \
-  -e CAPTURE_API_HOST=127.0.0.1 \
-  -e CAPTURE_API_PORT=8000 \
-  <image_name>
-```
-
-Expected: container exits with a clear error message referencing the missing path (or parent directory). No silent data loss.
-
-### 3g — Clean shutdown (container)
-
-Send SIGTERM to the container:
-
-```bash
-docker compose stop --timeout 15 capture-service
-docker compose logs --tail=20 capture-service
-```
-
-Expected log events:
-
-```text
-{"event":"capture_service_stopped",...}
-shutdown complete
-```
-
-Expected: container exits with code `0`. No `{"event":"capture_service_heartbeat_superseded",...}` or dangling tasks logged.
-
-Confirm the ledger shows `STOPPED` state:
-
-```bash
-sqlite3 .runtime/ledger.sqlite3 \
-  "SELECT value FROM system_state WHERE key='capture_service_state';"
-```
-
-Expected: `STOPPED`.
-
----
-
-## Step 4 — EC2 reboot persistence
-
-### 4a — Deploy to EC2
-
-Push the current branch to the EC2 instance and start the service:
-
-```bash
-# On EC2
-git pull
-docker compose up -d
-```
-
-Send a test capture and confirm it is durably saved.
-
-### 4b — Reboot the instance
-
-```bash
-sudo reboot
-```
-
-### 4c — Post-reboot verification
-
-After the instance restarts and the container comes back up (typically 1–3 minutes):
-
-1. Confirm the service is running:
+1. Container is `Up`:
 
    ```bash
    docker compose ps
    ```
 
-2. Check the status command:
+2. Status command returns HEALTHY with a new instance ID:
 
    ```bash
-   uv run python -m secondbrain status
+   docker compose exec -T capture-service \
+     /app/.venv/bin/python -m secondbrain status
    ```
 
-   Expected: health `HEALTHY`, new instance ID, total captures unchanged from before reboot.
-
-3. Confirm no captures were lost:
+3. Total captures matches the count before recreation:
 
    ```bash
-   sqlite3 .runtime/ledger.sqlite3 "SELECT COUNT(*) FROM captures;"
+   sqlite3 "$HOST_LEDGER" "SELECT COUNT(*) FROM captures;"
    ```
 
-4. Confirm the capture sent before reboot is present:
+### 3f — Missing-volume fail-closed behavior
 
-   ```bash
-   sqlite3 .runtime/ledger.sqlite3 \
-     "SELECT capture_id, status FROM captures ORDER BY id DESC LIMIT 5;"
-   ```
+Run the image without the data volume mounted so the EBS sentinel is absent:
+
+```bash
+docker run --rm \
+  --env-file "$CAPTURE_SERVICE_ENV_FILE" \
+  second-brain-capture-service:local
+```
+
+Expected: container exits immediately (within a few seconds) with exit code `1` and the message:
+
+```text
+persistent EBS volume marker missing: /var/lib/second-brain/.second-brain-ebs-volume
+```
+
+No silent data loss. No service startup.
+
+### 3g — Clean shutdown
+
+Send SIGTERM to the container:
+
+```bash
+docker compose stop --timeout 15 capture-service
+```
+
+Inspect the final log lines:
+
+```bash
+docker compose logs --tail=20 capture-service
+```
+
+Expected log events include:
+
+```text
+{"event":"capture_service_stopped",...}
+```
+
+Expected: container exits with code `0`.
+
+Confirm the ledger shows `STOPPED` state:
+
+```bash
+sqlite3 "$HOST_LEDGER" \
+  "SELECT value FROM system_state WHERE key='capture_service_state';"
+```
+
+Expected: `STOPPED`.
+
+### 3h — Tear down the local environment
+
+```bash
+docker compose down
+sudo rm -rf /tmp/sb-local-docker
+```
 
 ---
 
-## Step 5 — Periodic skipped-Gateway recovery (live confirmation)
+## Step 4 — EC2 reboot persistence
 
-This is covered by the automated integration test `test_skipped_gateway_event_is_recovered_by_periodic_reconciliation`.
+### 4a — Security pre-checks
 
-For a live confirmation:
+Before deploying, verify the instance configuration matches the deployment requirements documented in `deploy/README.md`.
 
-1. Note the current `last_reconciled_discord_message_id` from `uv run python -m secondbrain status`.
-2. Send a Discord message and confirm it is captured normally.
-3. Manually delete the row from the ledger (test environment only):
-   ```bash
-   sqlite3 .runtime/ledger.sqlite3 \
-     "DELETE FROM captures WHERE discord_message_id = '<id>';"
-   ```
-4. Wait for the next periodic reconciliation pass (default 60 seconds).
-5. Confirm the row is re-inserted.
+Confirm EBS `DeleteOnTermination=false`:
+
+```bash
+aws ec2 describe-instances \
+  --instance-ids <INSTANCE_ID> \
+  --query "Reservations[].Instances[].BlockDeviceMappings[?DeviceName=='<DATA_ATTACHMENT_DEVICE>'].Ebs.DeleteOnTermination"
+```
+
+Expected: `false`.
+
+Confirm IMDSv2 enforcement:
+
+```bash
+aws ec2 describe-instances \
+  --instance-ids <INSTANCE_ID> \
+  --query 'Reservations[].Instances[].MetadataOptions.HttpTokens'
+```
+
+Expected: `"required"`.
+
+Confirm SSH hardening on the host:
+
+```bash
+sudo sshd -T | grep -E '^(passwordauthentication|pubkeyauthentication|permitrootlogin) '
+```
+
+Expected:
+
+```text
+passwordauthentication no
+pubkeyauthentication yes
+permitrootlogin no
+```
+
+Confirm security group allows only SSH from the intended `/32` source:
+
+```bash
+aws ec2 describe-security-groups \
+  --group-ids <SG_ID> \
+  --query 'SecurityGroups[].IpPermissions'
+```
+
+Expected: one rule — TCP port 22 from your `/32` IP. No rules for ports 8000, 5678, 80, or 443.
+
+### 4b — Deploy to EC2
+
+On the EC2 host, from `/opt/second-brain/app`:
+
+```bash
+git pull
+deploy/deploy.sh
+```
+
+`deploy/deploy.sh` verifies the EBS mount and sentinel before building and starting the container. It will exit with an error if either check fails.
+
+Run the post-deploy verification:
+
+```bash
+deploy/verify.sh
+```
+
+`deploy/verify.sh` checks: container running, `unless-stopped` restart policy, non-root user, port 8000 not published, sentinel present, ledger exists, container health `healthy`.
+
+Expected output: `capture-service deployment checks passed`.
+
+Send a test capture and confirm it is durably saved:
+
+```bash
+docker compose exec -T capture-service \
+  /app/.venv/bin/python -m secondbrain status
+```
+
+Expected: health `HEALTHY`, `total captures` incremented.
+
+Record the capture count before rebooting:
+
+```bash
+sqlite3 /opt/second-brain/data/ledger.sqlite3 "SELECT COUNT(*) FROM captures;"
+```
+
+### 4c — Reboot the instance
+
+```bash
+sudo reboot
+```
+
+### 4d — Post-reboot verification
+
+After the instance restarts and the container comes back up (typically 1–3 minutes):
+
+Run the post-deploy verification again:
+
+```bash
+deploy/verify.sh
+```
+
+Check the status command:
+
+```bash
+docker compose exec -T capture-service \
+  /app/.venv/bin/python -m secondbrain status
+```
+
+Expected: health `HEALTHY`, new instance ID, total captures unchanged from before reboot.
+
+Confirm no captures were lost:
+
+```bash
+sqlite3 /opt/second-brain/data/ledger.sqlite3 "SELECT COUNT(*) FROM captures;"
+```
+
+Send a second test capture post-reboot and confirm the receipt appears in Discord.
 
 ---
 
-## Step 6 — Retry and lease recovery (live confirmation)
+## Step 5 — Periodic skipped-Gateway recovery (automated)
 
-This is covered by the automated tests `test_schedule_retry_makes_capture_reclaimable`, `test_repeated_fake_downstream_crashes_eventually_fail_visibly`, and `test_manual_retry_requeues_capture_after_retry_cap_failure`.
+This criterion is fully covered by the automated suite.
 
-For a live confirmation with the downstream webhook deliberately broken:
+Primary test: `test_skipped_gateway_event_is_recovered_by_periodic_reconciliation`
 
-1. Point `N8N_WEBHOOK_URL` at a non-existent endpoint.
-2. Send a Discord message.
-3. Wait for the stale-lease reaper to run (default 30-second interval).
-4. Confirm the capture moves through `RETRY_WAIT` states via `uv run python -m secondbrain status`.
-5. After the retry cap, confirm `captures failed: 1` and a Discord alert.
-6. Run `uv run python -m secondbrain retry <capture-id>` and confirm the capture re-enters the delivery queue.
+No live procedure is required. The test exercises the full recovery path: missed message in channel history → periodic reconciliation → `RECEIVED` row inserted.
+
+---
+
+## Step 6 — Retry and lease recovery (automated)
+
+This criterion is fully covered by the automated suite. No live n8n adapter is wired; the deferred classification applies.
+
+Primary tests:
+
+- `test_schedule_retry_makes_capture_reclaimable`
+- `test_schedule_retry_reaches_terminal_failure_at_cap`
+- `test_repeated_fake_downstream_crashes_eventually_fail_visibly`
+- `test_manual_retry_requeues_capture_after_retry_cap_failure`
+- `test_reaper_receipt_alert_runs_only_after_database_commit`
+- `test_status_reports_retry_backlog_without_manual_sqlite_query` (integration — real reaper)
 
 ---
 
 ## Completion checklist
 
-Mark each item when verified:
-
 - [ ] Step 1 — full automated suite passes (`uv run pytest -q`)
-- [ ] Step 2 — status-command slice passes and live command exits correctly
-- [ ] Step 3a — Docker container builds and starts
-- [ ] Step 3b — Discord capture test (live)
-- [ ] Step 3c — live SQLite monitoring shows fresh heartbeat
-- [ ] Step 3d — duplicate suppression (live)
+- [ ] Step 2 — status-command slice passes
+- [ ] Step 3a — local Docker environment prepared, container starts
+- [ ] Step 3b — three monitoring terminals open and showing live data
+- [ ] Step 3c — Discord capture test passes (live receipt in Discord)
+- [ ] Step 3d — status command inside container exits 0, health `HEALTHY`
 - [ ] Step 3e — container recreation preserves all rows
-- [ ] Step 3f — missing-volume fail-closed behavior
-- [ ] Step 3g — clean shutdown writes STOPPED state
-- [ ] Step 4a–4c — EC2 reboot persistence
-- [ ] Step 5 — periodic skipped-Gateway recovery confirmed
-- [ ] Step 6 — retry and lease recovery confirmed
+- [ ] Step 3f — missing-volume fail-closed: exits 1 with correct message
+- [ ] Step 3g — clean shutdown writes `STOPPED` state, container exits 0
+- [ ] Step 4a — EC2 security pre-checks pass
+- [ ] Step 4b — `deploy/deploy.sh` and `deploy/verify.sh` pass
+- [ ] Step 4c/4d — EC2 reboot persistence: row count preserved, service restarts
 
-Milestone 2 is closed when all boxes are checked.
+Milestone 2 is closed when all boxes are checked and evidence is recorded at `docs/Milestones/002/evidence/SB-110-YYYY-MM-DD.md`.
+
+---
+
+## Evidence record
+
+Create one file per execution at `docs/Milestones/002/evidence/SB-110-YYYY-MM-DD.md` using the template below. Fill in each field before closing the milestone.
+
+```markdown
+# SB-110 Evidence — YYYY-MM-DD
+
+## Automated suite
+
+- Commit: <git sha>
+- Command: `uv run pytest -q`
+- Result: <N> passed, 0 failed, 0 errors
+
+## Local Docker regression
+
+- Image built from commit: <git sha>
+- CAPTURE_DATA_DIR: /tmp/sb-local-docker/data
+- Step 3c: Discord capture received — message ID: <id>, capture ID: <SB-xxx>
+- Step 3d: status exit code: 0, health: HEALTHY
+- Step 3e: row count before recreation: <N>, row count after: <N>
+- Step 3f: container exited code 1 with message "persistent EBS volume marker missing"
+- Step 3g: container exited code 0, system_state shows STOPPED
+
+## EC2 reboot persistence
+
+- Instance ID: <EC2 instance ID>
+- deploy/verify.sh: passed
+- Row count before reboot: <N>
+- Row count after reboot: <N>
+- Post-reboot Discord capture: <message ID>
+
+## Deferred criteria
+
+- Downstream delivery (retry, n8n): no live adapter; covered by automated reaper tests
+```
