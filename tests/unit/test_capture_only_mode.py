@@ -302,6 +302,81 @@ async def test_capture_only_runtime_starts_reaper_before_discord_ready():
 
 
 @pytest.mark.asyncio
+async def test_capture_only_runtime_invokes_reaper_start_before_discord_task_creation(monkeypatch):
+    """
+    Calls run_capture_only_runtime with all I/O stubs. Verifies that startup.reaper_task
+    is already set by the time run_service_runtime is entered — meaning the watchdog was
+    created before the Discord client task, independent of on_ready.
+
+    Would fail if ensure_stale_lease_reaper_task were moved back inside reconcile_once().
+    """
+    import secondbrain.app as app_module
+
+    captured = {}
+
+    async def noop_reaper_loop():
+        await asyncio.sleep(10)
+
+    async def noop_periodic_loop(client):
+        await asyncio.sleep(10)
+
+    service = SimpleNamespace(
+        attach_receipt_client=lambda c: None,
+        close=lambda: None,
+        handle_gateway_message=AsyncMock(),
+        run_stale_lease_reaper_loop=noop_reaper_loop,
+        run_periodic_reconciliation_loop=noop_periodic_loop,
+    )
+    monkeypatch.setattr(app_module.CaptureService, "open", lambda *a, **kw: service)
+
+    class FakeClient:
+        async def start(self, token):
+            await asyncio.sleep(10)  # Discord never fires on_ready
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(app_module, "create_discord_client", lambda *a, **kw: FakeClient())
+
+    class FakeServer:
+        async def serve(self):
+            await asyncio.sleep(10)
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(app_module, "InternalApiServer", lambda *a, **kw: FakeServer())
+
+    async def spy_run_service_runtime(*, startup, api_task, discord_task, **kw):
+        captured["startup"] = startup
+        api_task.cancel()
+        discord_task.cancel()
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(app_module, "run_service_runtime", spy_run_service_runtime)
+
+    _set_env(monkeypatch, BASE_ENV)
+    from secondbrain.config import Settings as _Settings
+
+    settings = _Settings()
+
+    with suppress(asyncio.CancelledError):
+        await app_module.run_capture_only_runtime(settings)
+
+    startup = captured.get("startup")
+    assert startup is not None, "spy was never reached"
+    assert startup.reaper_task is not None, (
+        "Reaper task must be created before Discord task; "
+        "ensure_stale_lease_reaper_task was not called at service init"
+    )
+
+    if startup.reaper_task and not startup.reaper_task.done():
+        startup.reaper_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await startup.reaper_task
+
+
+@pytest.mark.asyncio
 async def test_startup_reconciliation_failure_does_not_prevent_reaper_start(tmp_path):
     """Stale leases are recovered even when startup reconciliation raises."""
     from secondbrain.reaper import run_stale_lease_reaper_once

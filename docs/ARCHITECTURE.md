@@ -418,7 +418,7 @@ wait until previous pass finishes
     ↓
 open short SQLite transaction
     ↓
-claim expired FORWARDED or CLASSIFYING rows conditionally
+claim expired FORWARDING, FORWARDED, or CLASSIFYING rows conditionally
 increment retry_attempts (shared counter across both failure paths)
 clear expired lease
 calculate next_attempt_at using capped exponential backoff
@@ -460,11 +460,13 @@ Correct startup sequence:
 ```text
 CaptureService opens SQLite
     ↓
-capture-service API starts
+Discord receipt client object attached
     ↓
-stale-lease reaper task created (ensure_stale_lease_reaper_task)
+stale-lease reaper task created
     ↓
-Discord client starts (may connect, fail, or reconnect)
+capture-service API task starts
+    ↓
+Discord client task starts
     ↓
 on_ready fires (eventually or never)
     ↓
@@ -510,18 +512,30 @@ Bind this API to localhost or the private Docker network only.
 ```text
 GET  /health
 GET  /internal/captures/:capture_id
-POST /internal/captures/:capture_id/mark-forwarded
-POST /internal/captures/:capture_id/mark-classifying
-POST /internal/captures/:capture_id/mark-filed
-POST /internal/captures/:capture_id/mark-inbox
-POST /internal/captures/:capture_id/mark-failed
-POST /internal/captures/:capture_id/mark-corrected
-POST /internal/captures/:capture_id/retry
+
+POST /internal/captures/:capture_id/delivery/acknowledge-forwarded
+POST /internal/captures/:capture_id/delivery/acknowledge-classifying
+POST /internal/captures/:capture_id/delivery/renew-lease
+POST /internal/captures/:capture_id/delivery/acknowledge-filed
+POST /internal/captures/:capture_id/delivery/acknowledge-inbox
+POST /internal/captures/:capture_id/delivery/schedule-retry
+POST /internal/captures/:capture_id/delivery/acknowledge-failed
+
 POST /internal/receipts/:capture_id/edit
-POST /internal/clarifications/:capture_id
 ```
 
-All state-changing endpoints require an internal shared-secret header.
+All internal routes except `/health` require the shared-secret header.
+
+Every downstream delivery callback carries the current `delivery_attempt` generation.
+Capture-service rejects stale or invalid callback generations without allowing state regression.
+
+Manual retry is intentionally exposed through the operator CLI:
+
+```bash
+uv run python -m secondbrain retry SB-YYYYMMDD-NNNN
+```
+
+It is not exposed through a legacy unaudited HTTP `/retry` route.
 
 ### Capture IDs
 
