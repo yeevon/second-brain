@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from secondbrain.app import CaptureOnlyStartup
+from secondbrain.app import CaptureOnlyStartup, ensure_stale_lease_reaper_task
 from secondbrain.config import Settings
 from secondbrain.receipts import ATTACHMENT_WARNING, format_saved_receipt
 from secondbrain.reconcile import ReconcileResult
@@ -162,3 +162,104 @@ def _set_env(monkeypatch, env):
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
+
+
+# ---------------------------------------------------------------------------
+# ensure_stale_lease_reaper_task lifecycle
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_ensure_reaper_task_creates_task_when_none_exists():
+    async def fake_reaper_loop():
+        await asyncio.sleep(10)
+
+    startup = SimpleNamespace(reaper_task=None)
+    capture_service = SimpleNamespace(run_stale_lease_reaper_loop=fake_reaper_loop)
+
+    ensure_stale_lease_reaper_task(startup=startup, capture_service=capture_service)
+
+    assert startup.reaper_task is not None
+    assert not startup.reaper_task.done()
+    startup.reaper_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await startup.reaper_task
+
+
+@pytest.mark.asyncio
+async def test_ensure_reaper_task_does_not_replace_running_task():
+    async def fake_reaper_loop():
+        await asyncio.sleep(10)
+
+    startup = SimpleNamespace(reaper_task=None)
+    capture_service = SimpleNamespace(run_stale_lease_reaper_loop=fake_reaper_loop)
+
+    ensure_stale_lease_reaper_task(startup=startup, capture_service=capture_service)
+    original_task = startup.reaper_task
+
+    ensure_stale_lease_reaper_task(startup=startup, capture_service=capture_service)
+
+    assert startup.reaper_task is original_task, "running task must not be replaced"
+    original_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await original_task
+
+
+@pytest.mark.asyncio
+async def test_ensure_reaper_task_restarts_completed_task():
+    call_count = 0
+
+    async def fake_reaper_loop():
+        nonlocal call_count
+        call_count += 1
+
+    startup = SimpleNamespace(reaper_task=None)
+    capture_service = SimpleNamespace(run_stale_lease_reaper_loop=fake_reaper_loop)
+
+    ensure_stale_lease_reaper_task(startup=startup, capture_service=capture_service)
+    original_task = startup.reaper_task
+    await original_task  # run to completion
+
+    assert original_task.done()
+
+    ensure_stale_lease_reaper_task(startup=startup, capture_service=capture_service)
+
+    assert startup.reaper_task is not original_task, "completed task must be replaced"
+    await startup.reaper_task
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_capture_only_ready_callback_restarts_dead_reaper_task():
+    """On reconnect, ensure_stale_lease_reaper_task restarts a task that already exited."""
+    reaper_call_count = 0
+
+    async def fake_reaper_loop():
+        nonlocal reaper_call_count
+        reaper_call_count += 1
+        # exits immediately — simulates a crashed reaper
+
+    fake_result = ReconcileResult(seen=0, handled=0, ignored=0, warning=None)
+    mock_service = SimpleNamespace(
+        startup_reconcile=AsyncMock(return_value=fake_result),
+        run_stale_lease_reaper_loop=fake_reaper_loop,
+    )
+    startup = CaptureOnlyStartup(capture_service=mock_service)
+    fake_client = object()
+
+    # First ready callback: reconcile + start reaper
+    await startup.start_once(fake_client)
+    ensure_stale_lease_reaper_task(startup=startup, capture_service=mock_service)
+    first_task = startup.reaper_task
+    await first_task  # reaper exits immediately
+
+    assert first_task.done()
+    assert reaper_call_count == 1
+
+    # Second ready callback (e.g. Discord reconnect): dead reaper must be restarted
+    await startup.start_once(fake_client)  # no-ops (already started)
+    ensure_stale_lease_reaper_task(startup=startup, capture_service=mock_service)
+    second_task = startup.reaper_task
+    await second_task
+
+    assert second_task is not first_task
+    assert reaper_call_count == 2

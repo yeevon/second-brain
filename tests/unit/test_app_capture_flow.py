@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,7 @@ from secondbrain.app import (
     format_status_report,
     main,
     run_discord_listener,
+    run_manual_retry,
     run_service_runtime,
     run_status,
     start_local_worker_and_enqueue_recovered,
@@ -847,3 +849,93 @@ def test_run_status_via_main_cli(tmp_path, monkeypatch, capsys):
     assert exit_code == 0
     assert "Second Brain status" in output
     assert "periodic reconciliation runs:" in output
+
+
+# ---------------------------------------------------------------------------
+# run_manual_retry CLI path
+# ---------------------------------------------------------------------------
+
+def test_manual_retry_unknown_capture_reports_not_found_without_traceback(
+    tmp_path, monkeypatch, capsys
+):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    monkeypatch.setattr("secondbrain.app.Settings", lambda: settings)
+    monkeypatch.setattr("secondbrain.app.CaptureService.open", lambda s: service)
+
+    run_manual_retry("SB-20260609-9999")
+
+    output = capsys.readouterr().out
+    assert "manual retry rejected: capture not found" in output
+    assert "Traceback" not in output
+    assert "CaptureNotFoundError" not in output
+
+
+def test_manual_retry_known_nonfailed_capture_reports_invalid_state(
+    tmp_path, monkeypatch, capsys
+):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    # Insert a capture — it starts in RECEIVED state, not FAILED
+    now = datetime.now(UTC)
+    ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="test note",
+        received_at=now,
+    )
+    captures = ledger.captures_by_status("RECEIVED")
+    capture_id = captures[0].capture_id
+
+    monkeypatch.setattr("secondbrain.app.Settings", lambda: settings)
+    monkeypatch.setattr("secondbrain.app.CaptureService.open", lambda s: service)
+
+    run_manual_retry(capture_id)
+
+    output = capsys.readouterr().out
+    assert "manual retry rejected: capture is not in terminal FAILED state" in output
+
+
+def test_manual_retry_success_cli_path(tmp_path, monkeypatch, capsys):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    service = CaptureService(settings=settings, ledger=ledger)
+
+    # Insert a capture and drive it to terminal FAILED
+    now = datetime.now(UTC)
+    ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="test note",
+        received_at=now,
+    )
+    claimed = ledger.claim_due_deliveries(
+        now=now, lease_until=now + timedelta(minutes=1), batch_size=10
+    )
+    capture_id = claimed[0].capture_id
+    ledger.schedule_retry(
+        capture_id=capture_id,
+        delivery_attempt=1,
+        now=now,
+        error_type="TimeoutError",
+        reason_type="webhook_failure",
+        max_attempts=1,
+        base_delay_seconds=10,
+        max_delay_seconds=300,
+    )
+
+    monkeypatch.setattr("secondbrain.app.Settings", lambda: settings)
+    monkeypatch.setattr("secondbrain.app.CaptureService.open", lambda s: service)
+
+    run_manual_retry(capture_id)
+
+    output = capsys.readouterr().out
+    assert f"manual retry queued: {capture_id}" in output

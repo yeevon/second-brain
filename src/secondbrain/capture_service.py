@@ -532,7 +532,7 @@ class CaptureService:
             now=datetime.now(UTC),
             error_type=error_type,
             reason_type=reason_type,
-            max_attempts=self.settings.delivery_max_attempts,
+            max_attempts=self.settings.delivery_retry_max_attempts,
             base_delay_seconds=self.settings.delivery_retry_base_delay_seconds,
             max_delay_seconds=self.settings.delivery_retry_max_delay_seconds,
         )
@@ -574,9 +574,23 @@ class CaptureService:
 
     def manual_retry_capture(self, *, capture_id: str) -> bool:
         from datetime import UTC, datetime
-        return self._ledger.manual_retry_capture(
+        self.get_capture(capture_id)
+        changed = self._ledger.manual_retry_capture(
             capture_id=capture_id,
             now=datetime.now(UTC),
+        )
+        if changed:
+            log_metadata("manual_retry_requested", capture_id=capture_id)
+        else:
+            log_metadata("manual_retry_rejected", capture_id=capture_id)
+        return changed
+
+    async def run_stale_lease_reaper_loop(self) -> None:
+        from secondbrain.reaper import run_stale_lease_reaper
+        await run_stale_lease_reaper(
+            settings=self.settings,
+            ledger=self._ledger,
+            receipt_client=self,
         )
 
     def status_snapshot(self) -> CaptureStatusSnapshot:

@@ -14,6 +14,7 @@ from secondbrain.sqlite_runtime import (
     SQLiteBusyError,
     SQLiteRuntime,
     _is_transient_lock_error,
+    _set_wal_mode,
 )
 
 
@@ -276,6 +277,51 @@ def test_is_transient_lock_error_message_fallback_schema_locked():
 def test_is_transient_lock_error_message_fallback_unrelated():
     exc = sqlite3.OperationalError("no such table: foo")
     assert not _is_transient_lock_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# _set_wal_mode retry behaviour
+# ---------------------------------------------------------------------------
+
+def test_set_wal_mode_retries_transient_lock_then_succeeds():
+    """_set_wal_mode retries on SQLITE_BUSY and returns once execute() succeeds."""
+    from unittest.mock import MagicMock
+
+    busy_exc = sqlite3.OperationalError("database is locked")
+    conn = MagicMock()
+    conn.execute.side_effect = [busy_exc, None]
+
+    _set_wal_mode(conn, retry_base_delay_ms=0, retry_attempts=3)
+
+    assert conn.execute.call_count == 2
+
+
+def test_set_wal_mode_stops_after_retry_budget():
+    """_set_wal_mode raises after exhausting all retry_attempts on persistent SQLITE_BUSY."""
+    from unittest.mock import MagicMock
+
+    busy_exc = sqlite3.OperationalError("database is locked")
+    conn = MagicMock()
+    conn.execute.side_effect = busy_exc
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        _set_wal_mode(conn, retry_base_delay_ms=0, retry_attempts=3)
+
+    assert conn.execute.call_count == 3
+
+
+def test_set_wal_mode_does_not_retry_unrelated_operational_error():
+    """_set_wal_mode must not retry an OperationalError that is not a lock error."""
+    from unittest.mock import MagicMock
+
+    unrelated_exc = sqlite3.OperationalError("no such table: foo")
+    conn = MagicMock()
+    conn.execute.side_effect = unrelated_exc
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        _set_wal_mode(conn, retry_base_delay_ms=0, retry_attempts=5)
+
+    assert conn.execute.call_count == 1
 
 
 # ---------------------------------------------------------------------------

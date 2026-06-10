@@ -454,7 +454,7 @@ async def test_skipped_gateway_event_is_recovered_by_periodic_reconciliation(tmp
 
 def make_delivery_settings(**overrides):
     data = dict(
-        delivery_max_attempts=5,
+        delivery_retry_max_attempts=5,
         delivery_retry_base_delay_seconds=10,
         delivery_retry_max_delay_seconds=300,
         delivery_forward_lease_seconds=60,
@@ -510,7 +510,7 @@ async def test_schedule_retry_makes_capture_reclaimable(tmp_path):
         now=expired,
         error_type="connection_timeout",
         reason_type="webhook_failure",
-        max_attempts=settings.delivery_max_attempts,
+        max_attempts=settings.delivery_retry_max_attempts,
         base_delay_seconds=settings.delivery_retry_base_delay_seconds,
         max_delay_seconds=settings.delivery_retry_max_delay_seconds,
     )
@@ -536,7 +536,7 @@ async def test_schedule_retry_makes_capture_reclaimable(tmp_path):
 async def test_schedule_retry_reaches_terminal_failure_at_cap(tmp_path):
     """After max_attempts retries, schedule_retry marks capture terminally FAILED."""
     ledger = Ledger(tmp_path / "ledger.sqlite3")
-    settings = make_delivery_settings(delivery_max_attempts=3)
+    settings = make_delivery_settings(delivery_retry_max_attempts=3)
     now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
 
     insert_result = ledger.insert_accepted_capture(
@@ -550,7 +550,7 @@ async def test_schedule_retry_reaches_terminal_failure_at_cap(tmp_path):
     capture_id = insert_result.capture.capture_id
 
     t = now
-    for cycle in range(settings.delivery_max_attempts):
+    for cycle in range(settings.delivery_retry_max_attempts):
         lease = t + timedelta(seconds=30)
         claimed = ledger.claim_due_deliveries(now=t, lease_until=lease, batch_size=10)
         assert claimed[0].delivery_attempts == cycle + 1
@@ -562,7 +562,7 @@ async def test_schedule_retry_reaches_terminal_failure_at_cap(tmp_path):
             now=expired,
             error_type="connection_timeout",
             reason_type="webhook_failure",
-            max_attempts=settings.delivery_max_attempts,
+            max_attempts=settings.delivery_retry_max_attempts,
             base_delay_seconds=settings.delivery_retry_base_delay_seconds,
             max_delay_seconds=settings.delivery_retry_max_delay_seconds,
         )
@@ -680,7 +680,7 @@ async def test_repeated_fake_downstream_crashes_eventually_fail_visibly(tmp_path
     """Repeated expired leases exhaust retry cap → FAILED with RETRY_LIMIT_EXCEEDED event."""
     from secondbrain.reaper import run_stale_lease_reaper_once
     ledger = Ledger(tmp_path / "ledger.sqlite3")
-    settings = make_delivery_settings(delivery_max_attempts=3)
+    settings = make_delivery_settings(delivery_retry_max_attempts=3)
     now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
 
     insert_result = ledger.insert_accepted_capture(
@@ -700,7 +700,7 @@ async def test_repeated_fake_downstream_crashes_eventually_fail_visibly(tmp_path
             receipt_edits.append({"capture_id": capture_id, "content": content})
 
     t = now
-    for cycle in range(settings.delivery_max_attempts + 1):
+    for cycle in range(settings.delivery_retry_max_attempts + 1):
         lease = t + timedelta(seconds=30)
         claimed = ledger.claim_due_deliveries(now=t, lease_until=lease, batch_size=10)
         if not claimed:
@@ -712,7 +712,7 @@ async def test_repeated_fake_downstream_crashes_eventually_fail_visibly(tmp_path
         expired = t + timedelta(seconds=90)
         reaper_settings = SimpleNamespace(
             stale_lease_reaper_batch_size=10,
-            delivery_max_attempts=settings.delivery_max_attempts,
+            delivery_retry_max_attempts=settings.delivery_retry_max_attempts,
             delivery_retry_base_delay_seconds=1,
             delivery_retry_max_delay_seconds=10,
         )
@@ -747,7 +747,7 @@ async def test_manual_retry_requeues_capture_after_retry_cap_failure(tmp_path):
     """manual_retry_capture resets FAILED capture to RECEIVED/RETRY_WAIT with retry_attempts=0."""
     from secondbrain.reaper import run_stale_lease_reaper_once
     ledger = Ledger(tmp_path / "ledger.sqlite3")
-    settings = make_delivery_settings(delivery_max_attempts=1)
+    settings = make_delivery_settings(delivery_retry_max_attempts=1)
     now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
 
     insert_result = ledger.insert_accepted_capture(
@@ -766,7 +766,7 @@ async def test_manual_retry_requeues_capture_after_retry_cap_failure(tmp_path):
     ledger.mark_forwarded(capture_id=capture_id, delivery_attempt=1, lease_until=lease)
     reaper_settings = SimpleNamespace(
         stale_lease_reaper_batch_size=10,
-        delivery_max_attempts=1,
+        delivery_retry_max_attempts=1,
         delivery_retry_base_delay_seconds=1,
         delivery_retry_max_delay_seconds=10,
     )
@@ -827,7 +827,7 @@ async def test_reaper_receipt_alert_runs_only_after_database_commit(tmp_path):
 
     reaper_settings = SimpleNamespace(
         stale_lease_reaper_batch_size=10,
-        delivery_max_attempts=5,
+        delivery_retry_max_attempts=5,
         delivery_retry_base_delay_seconds=1,
         delivery_retry_max_delay_seconds=10,
     )

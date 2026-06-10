@@ -503,7 +503,7 @@ def make_delivery_settings(tmp_path, **overrides):
         "startup_reconcile_limit": 10,
         "ledger_path": tmp_path / "runtime" / "ledger.sqlite3",
         "vault_path": None,
-        "delivery_max_attempts": 5,
+        "delivery_retry_max_attempts": 5,
         "delivery_retry_base_delay_seconds": 10,
         "delivery_retry_max_delay_seconds": 300,
         "delivery_forward_lease_seconds": 60,

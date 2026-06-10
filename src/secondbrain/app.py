@@ -12,7 +12,6 @@ from secondbrain.capture_api import create_capture_api
 from secondbrain.capture_service import CaptureService
 from secondbrain.config import Settings
 from secondbrain.discord_capture import create_discord_client
-from secondbrain.reaper import run_stale_lease_reaper
 from secondbrain.reconcile import ReconcileResult
 from secondbrain.vault_writer import VaultWriter
 from secondbrain.worker import CaptureQueue, run_capture_worker
@@ -102,17 +101,20 @@ class CaptureOnlyStartup:
                 return None
             result = await self.capture_service.startup_reconcile(client)
             self._started = True
-            if self.settings is not None and (
-                self.reaper_task is None or self.reaper_task.done()
-            ):
-                self.reaper_task = asyncio.create_task(
-                    run_stale_lease_reaper(
-                        settings=self.settings,
-                        ledger=self.capture_service._ledger,
-                        receipt_client=self.capture_service,
-                    )
-                )
             return result
+
+
+def ensure_stale_lease_reaper_task(
+    *,
+    startup,
+    capture_service: CaptureService,
+) -> None:
+    task = startup.reaper_task
+    if task is not None and not task.done():
+        return
+    startup.reaper_task = asyncio.create_task(
+        capture_service.run_stale_lease_reaper_loop()
+    )
 
 
 def ensure_periodic_reconciliation_task(
@@ -242,6 +244,10 @@ async def run_capture_only_runtime(settings: Settings) -> None:
             client=client,
             capture_service=capture_service,
         )
+        ensure_stale_lease_reaper_task(
+            startup=startup,
+            capture_service=capture_service,
+        )
         if reconcile_result is not None:
             print(f"  periodic reconciliation started (interval: {settings.periodic_reconcile_interval_seconds}s)")
 
@@ -369,7 +375,7 @@ def format_status_report(
             f"delivery waiting for retry: {d.get('retry_wait', 0)}",
             f"delivery failed after retry cap: {d.get('failed', 0)}",
             f"total downstream delivery attempts: {d.get('total_delivery_attempts', 0)}",
-            f"total retry attempts: {d.get('total_retry_attempts', 0)}",
+            f"current accumulated retry attempts across captures: {d.get('total_retry_attempts', 0)}",
             f"next scheduled retry: {d.get('next_attempt_at') or 'none'}",
         ]
     return "\n".join(lines)
@@ -392,6 +398,7 @@ def run_status() -> None:
 
 
 def run_manual_retry(capture_id: str) -> None:
+    from secondbrain.capture_service import CaptureNotFoundError
     settings = Settings()
     capture_service = CaptureService.open(settings)
     try:
@@ -400,6 +407,8 @@ def run_manual_retry(capture_id: str) -> None:
             print(f"manual retry queued: {capture_id}")
         else:
             print(f"manual retry rejected: capture is not in terminal FAILED state")
+    except CaptureNotFoundError:
+        print(f"manual retry rejected: capture not found")
     finally:
         capture_service.close()
 

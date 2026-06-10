@@ -29,7 +29,7 @@ from secondbrain.ledger import (
     REJECTED_SENSITIVE,
     TERMINAL_STATUSES,
     Ledger,
-    _calculate_retry_delay,
+    calculate_retry_delay_seconds,
 )
 
 
@@ -896,7 +896,7 @@ def _accepted(ledger, msg_id="1001"):
 
 def _make_retry_settings(**overrides):
     defaults = dict(
-        delivery_max_attempts=5,
+        delivery_retry_max_attempts=5,
         delivery_retry_base_delay_seconds=10,
         delivery_retry_max_delay_seconds=300,
     )
@@ -1039,7 +1039,7 @@ def test_claim_due_deliveries_claims_retry_rows_only_after_next_attempt_at(tmp_p
         now=_NOW,
         error_type="TimeoutError",
         reason_type="webhook_failure",
-        max_attempts=s.delivery_max_attempts,
+        max_attempts=s.delivery_retry_max_attempts,
         base_delay_seconds=s.delivery_retry_base_delay_seconds,
         max_delay_seconds=s.delivery_retry_max_delay_seconds,
     )
@@ -1365,7 +1365,7 @@ def test_schedule_retry_moves_active_attempt_to_retry_wait(tmp_path):
         now=_NOW,
         error_type="TimeoutError",
         reason_type="webhook_failure",
-        max_attempts=s.delivery_max_attempts,
+        max_attempts=s.delivery_retry_max_attempts,
         base_delay_seconds=s.delivery_retry_base_delay_seconds,
         max_delay_seconds=s.delivery_retry_max_delay_seconds,
     )
@@ -1389,7 +1389,7 @@ def test_schedule_retry_sets_capped_exponential_backoff(tmp_path):
         now=_NOW,
         error_type="TimeoutError",
         reason_type="webhook_failure",
-        max_attempts=s.delivery_max_attempts,
+        max_attempts=s.delivery_retry_max_attempts,
         base_delay_seconds=s.delivery_retry_base_delay_seconds,
         max_delay_seconds=s.delivery_retry_max_delay_seconds,
     )
@@ -1410,7 +1410,7 @@ def test_schedule_retry_clears_processing_lease(tmp_path):
         now=_NOW,
         error_type="TimeoutError",
         reason_type="webhook_failure",
-        max_attempts=s.delivery_max_attempts,
+        max_attempts=s.delivery_retry_max_attempts,
         base_delay_seconds=s.delivery_retry_base_delay_seconds,
         max_delay_seconds=s.delivery_retry_max_delay_seconds,
     )
@@ -1430,7 +1430,7 @@ def test_schedule_retry_preserves_safe_error_type(tmp_path):
         now=_NOW,
         error_type="ConnectionError",
         reason_type="webhook_failure",
-        max_attempts=s.delivery_max_attempts,
+        max_attempts=s.delivery_retry_max_attempts,
         base_delay_seconds=s.delivery_retry_base_delay_seconds,
         max_delay_seconds=s.delivery_retry_max_delay_seconds,
     )
@@ -1443,14 +1443,14 @@ def test_schedule_retry_marks_failed_when_attempt_cap_exceeded(tmp_path):
     ledger = make_ledger(tmp_path)
     _accepted(ledger, "1001")
     ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
-    s = _make_retry_settings(delivery_max_attempts=1)
+    s = _make_retry_settings(delivery_retry_max_attempts=1)
     disp = ledger.schedule_retry(
         capture_id="SB-20260609-0001",
         delivery_attempt=1,
         now=_NOW,
         error_type="TimeoutError",
         reason_type="webhook_failure",
-        max_attempts=s.delivery_max_attempts,
+        max_attempts=s.delivery_retry_max_attempts,
         base_delay_seconds=s.delivery_retry_base_delay_seconds,
         max_delay_seconds=s.delivery_retry_max_delay_seconds,
     )
@@ -1466,14 +1466,14 @@ def test_retry_cap_appends_retry_limit_exceeded_event(tmp_path):
     ledger = make_ledger(tmp_path)
     _accepted(ledger, "1001")
     ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
-    s = _make_retry_settings(delivery_max_attempts=1)
+    s = _make_retry_settings(delivery_retry_max_attempts=1)
     ledger.schedule_retry(
         capture_id="SB-20260609-0001",
         delivery_attempt=1,
         now=_NOW,
         error_type="TimeoutError",
         reason_type="webhook_failure",
-        max_attempts=s.delivery_max_attempts,
+        max_attempts=s.delivery_retry_max_attempts,
         base_delay_seconds=s.delivery_retry_base_delay_seconds,
         max_delay_seconds=s.delivery_retry_max_delay_seconds,
     )
@@ -1507,7 +1507,7 @@ def test_ledger_schedule_retry_rejects_free_form_error_type(tmp_path):
             now=_NOW,
             error_type="TimeoutError: POST https://n8n.internal?token=secret",
             reason_type="webhook_failure",
-            max_attempts=s.delivery_max_attempts,
+            max_attempts=s.delivery_retry_max_attempts,
             base_delay_seconds=s.delivery_retry_base_delay_seconds,
             max_delay_seconds=s.delivery_retry_max_delay_seconds,
         )
@@ -1527,7 +1527,7 @@ def test_ledger_schedule_retry_rejects_free_form_reason_type(tmp_path):
             now=_NOW,
             error_type="TimeoutError",
             reason_type="free form reason with spaces",
-            max_attempts=s.delivery_max_attempts,
+            max_attempts=s.delivery_retry_max_attempts,
             base_delay_seconds=s.delivery_retry_base_delay_seconds,
             max_delay_seconds=s.delivery_retry_max_delay_seconds,
         )
@@ -1647,15 +1647,15 @@ def test_normalize_delivery_for_local_full_appends_audit_event(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_backoff_grows_exponentially_from_base():
-    assert _calculate_retry_delay(delivery_attempts=1, base_delay_seconds=10, max_delay_seconds=300) == 10
-    assert _calculate_retry_delay(delivery_attempts=2, base_delay_seconds=10, max_delay_seconds=300) == 20
-    assert _calculate_retry_delay(delivery_attempts=3, base_delay_seconds=10, max_delay_seconds=300) == 40
-    assert _calculate_retry_delay(delivery_attempts=4, base_delay_seconds=10, max_delay_seconds=300) == 80
-    assert _calculate_retry_delay(delivery_attempts=5, base_delay_seconds=10, max_delay_seconds=300) == 160
+    assert calculate_retry_delay_seconds(retry_attempts=1, base_delay_seconds=10, max_delay_seconds=300) == 10
+    assert calculate_retry_delay_seconds(retry_attempts=2, base_delay_seconds=10, max_delay_seconds=300) == 20
+    assert calculate_retry_delay_seconds(retry_attempts=3, base_delay_seconds=10, max_delay_seconds=300) == 40
+    assert calculate_retry_delay_seconds(retry_attempts=4, base_delay_seconds=10, max_delay_seconds=300) == 80
+    assert calculate_retry_delay_seconds(retry_attempts=5, base_delay_seconds=10, max_delay_seconds=300) == 160
 
 
 def test_backoff_is_capped_at_max():
-    assert _calculate_retry_delay(delivery_attempts=10, base_delay_seconds=10, max_delay_seconds=300) == 300
+    assert calculate_retry_delay_seconds(retry_attempts=10, base_delay_seconds=10, max_delay_seconds=300) == 300
 
 
 # ---------------------------------------------------------------------------
@@ -1994,4 +1994,157 @@ def test_stale_lease_indexes_exist(tmp_path):
     ledger = make_ledger(tmp_path)
     assert index_columns(ledger, "idx_captures_stale_lease") == ["delivery_status", "processing_lease_until"]
     assert index_columns(ledger, "idx_captures_retry_due") == ["delivery_status", "next_attempt_at"]
+    ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# Unified retry_attempts accounting — webhook failure and stale-lease paths
+# ---------------------------------------------------------------------------
+
+def test_webhook_failure_increments_retry_attempts(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    s = _make_retry_settings()
+    ledger.schedule_retry(
+        capture_id="SB-20260609-0001",
+        delivery_attempt=1,
+        now=_NOW,
+        error_type="TimeoutError",
+        reason_type="webhook_failure",
+        max_attempts=s.delivery_retry_max_attempts,
+        base_delay_seconds=s.delivery_retry_base_delay_seconds,
+        max_delay_seconds=s.delivery_retry_max_delay_seconds,
+    )
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.retry_attempts == 1
+    assert capture.delivery_attempts == 1  # claim increments delivery_attempts; retry does not
+    ledger.close()
+
+
+def test_webhook_failure_backoff_uses_retry_attempts(tmp_path):
+    """Second webhook failure schedules delay based on retry_attempts=2, not delivery_attempts."""
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    s = _make_retry_settings(delivery_retry_base_delay_seconds=10, delivery_retry_max_delay_seconds=300)
+
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.schedule_retry(
+        capture_id="SB-20260609-0001",
+        delivery_attempt=1,
+        now=_NOW,
+        error_type="TimeoutError",
+        reason_type="webhook_failure",
+        max_attempts=s.delivery_retry_max_attempts,
+        base_delay_seconds=s.delivery_retry_base_delay_seconds,
+        max_delay_seconds=s.delivery_retry_max_delay_seconds,
+    )
+
+    new_lease = _LATER + timedelta(minutes=1)
+    ledger.claim_due_deliveries(now=_LATER, lease_until=new_lease, batch_size=10)
+
+    disp = ledger.schedule_retry(
+        capture_id="SB-20260609-0001",
+        delivery_attempt=2,
+        now=_LATER,
+        error_type="TimeoutError",
+        reason_type="webhook_failure",
+        max_attempts=s.delivery_retry_max_attempts,
+        base_delay_seconds=s.delivery_retry_base_delay_seconds,
+        max_delay_seconds=s.delivery_retry_max_delay_seconds,
+    )
+    assert disp.retry_scheduled is True
+    delay = (disp.next_attempt_at - _LATER).total_seconds()
+    assert delay == 20  # base * 2^(retry_attempts-1) = 10 * 2^1 = 20
+
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.retry_attempts == 2
+    assert capture.delivery_attempts == 2
+    ledger.close()
+
+
+def test_mixed_webhook_failure_and_stale_lease_share_one_retry_counter(tmp_path):
+    """One webhook failure + one stale-lease reap both increment the same retry_attempts."""
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    s = _make_retry_settings()
+
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    ledger.schedule_retry(
+        capture_id="SB-20260609-0001",
+        delivery_attempt=1,
+        now=_NOW,
+        error_type="TimeoutError",
+        reason_type="webhook_failure",
+        max_attempts=s.delivery_retry_max_attempts,
+        base_delay_seconds=s.delivery_retry_base_delay_seconds,
+        max_delay_seconds=s.delivery_retry_max_delay_seconds,
+    )
+
+    stale_lease = _LATER + timedelta(minutes=1)
+    ledger.claim_due_deliveries(now=_LATER, lease_until=stale_lease, batch_size=10)
+
+    reap_now = _LATER + timedelta(minutes=2)
+    ledger.reap_expired_processing_leases(
+        now=reap_now,
+        batch_size=10,
+        retry_max_attempts=s.delivery_retry_max_attempts,
+        retry_base_delay_seconds=s.delivery_retry_base_delay_seconds,
+        retry_max_delay_seconds=s.delivery_retry_max_delay_seconds,
+    )
+
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.retry_attempts == 2
+    ledger.close()
+
+
+def test_mixed_failure_paths_reach_one_consistent_retry_cap(tmp_path):
+    """With max_attempts=2: one webhook failure + one stale lease = terminal FAILED."""
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    s = _make_retry_settings(delivery_retry_max_attempts=2)
+
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+    disp = ledger.schedule_retry(
+        capture_id="SB-20260609-0001",
+        delivery_attempt=1,
+        now=_NOW,
+        error_type="TimeoutError",
+        reason_type="webhook_failure",
+        max_attempts=s.delivery_retry_max_attempts,
+        base_delay_seconds=s.delivery_retry_base_delay_seconds,
+        max_delay_seconds=s.delivery_retry_max_delay_seconds,
+    )
+    assert disp.retry_scheduled is True
+
+    stale_lease = _LATER + timedelta(minutes=1)
+    ledger.claim_due_deliveries(now=_LATER, lease_until=stale_lease, batch_size=10)
+
+    reap_now = _LATER + timedelta(minutes=2)
+    result = ledger.reap_expired_processing_leases(
+        now=reap_now,
+        batch_size=10,
+        retry_max_attempts=s.delivery_retry_max_attempts,
+        retry_base_delay_seconds=s.delivery_retry_base_delay_seconds,
+        retry_max_delay_seconds=s.delivery_retry_max_delay_seconds,
+    )
+
+    assert len(result.failed) == 1
+    assert result.failed[0].capture_id == "SB-20260609-0001"
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.status == FAILED
+    assert capture.retry_attempts == 2
+    ledger.close()
+
+
+def test_dispatch_claim_increments_delivery_attempts_but_not_retry_attempts(tmp_path):
+    """Claiming a delivery generation increments delivery_attempts but leaves retry_attempts at zero."""
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+
+    ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
+
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.delivery_attempts == 1
+    assert capture.retry_attempts == 0
     ledger.close()

@@ -28,7 +28,7 @@ async def api_context(tmp_path):
         startup_reconcile_limit=10,
         ledger_path=tmp_path / "runtime" / "ledger.sqlite3",
         vault_path=tmp_path / "vault",
-        delivery_max_attempts=5,
+        delivery_retry_max_attempts=5,
         delivery_retry_base_delay_seconds=10,
         delivery_retry_max_delay_seconds=300,
         delivery_forward_lease_seconds=60,
@@ -582,6 +582,51 @@ async def test_capture_only_mode_rejects_legacy_mark_filed_route(api_context):
         json={"note_path": "x.md", "classification": VALID_CLASSIFICATION},
     )
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# retry_attempts field presence in API responses
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_capture_get_includes_retry_attempts(api_context):
+    capture = await ingest_normal_capture(api_context)
+
+    response = await api_context.downstream.get_capture(capture.capture_id)
+
+    body = response.json()
+    assert "retry_attempts" in body
+    assert body["retry_attempts"] == 0
+
+
+@pytest.mark.asyncio
+async def test_schedule_retry_response_includes_retry_attempts(api_context):
+    capture, attempt = await _capture_in_classifying_state(api_context)
+
+    response = await api_context.downstream.schedule_retry(
+        capture.capture_id, attempt, "TimeoutError", "webhook_failure"
+    )
+
+    body = response.json()
+    assert "retry_attempts" in body
+    assert body["retry_attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_callback_response_includes_current_retry_attempts(api_context):
+    """A stale-attempt callback response includes the capture's current retry_attempts."""
+    capture, attempt = await _capture_in_classifying_state_attempt_2(api_context)
+
+    stale = await api_context.downstream.acknowledge_filed(
+        capture.capture_id, attempt - 1, "20_projects/halo/file.md"
+    )
+
+    body = stale.json()
+    assert stale.status_code == 200
+    assert body["outcome"] == "stale_attempt"
+    assert "retry_attempts" in body
+    # After one schedule_retry call in _capture_in_classifying_state_attempt_2, retry_attempts == 1
+    assert body["retry_attempts"] == 1
 
 
 # ---------------------------------------------------------------------------

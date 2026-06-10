@@ -95,7 +95,9 @@ class Settings:
         self.capture_api_port           = int(self.capture_api_port)
 
         # Delivery dispatcher and reaper
-        self.delivery_max_attempts               = _parse_int_env("DELIVERY_MAX_ATTEMPTS", "5")
+        # DELIVERY_RETRY_MAX_ATTEMPTS is the canonical name; DELIVERY_MAX_ATTEMPTS is a legacy alias
+        self.delivery_retry_max_attempts         = _parse_int_env("DELIVERY_RETRY_MAX_ATTEMPTS",
+                                                       os.getenv("DELIVERY_MAX_ATTEMPTS", "5"))
         self.delivery_retry_base_delay_seconds   = _parse_int_env("DELIVERY_RETRY_BASE_DELAY_SECONDS", "10")
         self.delivery_retry_max_delay_seconds    = _parse_int_env("DELIVERY_RETRY_MAX_DELAY_SECONDS", "300")
         self.delivery_forward_lease_seconds      = _parse_int_env("DELIVERY_FORWARD_LEASE_SECONDS", "60")
@@ -135,8 +137,8 @@ class Settings:
         if self.periodic_reconcile_limit < 1:
             raise RuntimeError("PERIODIC_RECONCILE_LIMIT must be >= 1")
 
-        if self.delivery_max_attempts < 1:
-            raise RuntimeError("DELIVERY_MAX_ATTEMPTS must be >= 1")
+        if self.delivery_retry_max_attempts < 1:
+            raise RuntimeError("DELIVERY_RETRY_MAX_ATTEMPTS must be >= 1")
         if self.delivery_retry_base_delay_seconds < 1:
             raise RuntimeError("DELIVERY_RETRY_BASE_DELAY_SECONDS must be >= 1")
         if self.delivery_retry_max_delay_seconds < self.delivery_retry_base_delay_seconds:

@@ -99,7 +99,7 @@ async def _run_one_dispatch_pass(
                     now=datetime.now(UTC),
                     error_type=error_type,
                     reason_type="webhook_failure",
-                    max_attempts=settings.delivery_max_attempts,
+                    max_attempts=settings.delivery_retry_max_attempts,
                     base_delay_seconds=settings.delivery_retry_base_delay_seconds,
                     max_delay_seconds=settings.delivery_retry_max_delay_seconds,
                 )

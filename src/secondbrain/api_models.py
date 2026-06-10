@@ -35,6 +35,7 @@ class CaptureResponse(BaseModel):
     status: str
     delivery_status: str
     delivery_attempts: int
+    retry_attempts: int
     processing_lease_until: datetime | None
     next_attempt_at: datetime | None
     raw_text: str | None
@@ -59,6 +60,7 @@ class DeliveryTransitionResponse(BaseModel):
     capture_id: str
     delivery_status: str
     delivery_attempts: int
+    retry_attempts: int
     changed: bool
     outcome: str
     ignored_reason: str | None = None

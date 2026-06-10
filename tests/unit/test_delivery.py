@@ -33,7 +33,7 @@ def make_ledger(tmp_path):
 
 def make_settings(**overrides):
     defaults = dict(
-        delivery_max_attempts=5,
+        delivery_retry_max_attempts=5,
         delivery_retry_base_delay_seconds=10,
         delivery_retry_max_delay_seconds=300,
         delivery_forward_lease_seconds=60,
@@ -242,7 +242,7 @@ async def test_stale_while_forwarding_logs_stale_not_forwarded(tmp_path, capsys)
                 now=now,
                 error_type="SyntheticRace",
                 reason_type="test_race",
-                max_attempts=self._settings.delivery_max_attempts,
+                max_attempts=self._settings.delivery_retry_max_attempts,
                 base_delay_seconds=1,
                 max_delay_seconds=10,
             )
@@ -277,7 +277,7 @@ async def test_dispatcher_edits_receipt_to_retry_warning_on_webhook_failure(tmp_
     capture = accepted(ledger)
     receipt_client = FakeReceiptEditClient()
     await _run_one_dispatch_pass(
-        settings=make_settings(delivery_max_attempts=5),
+        settings=make_settings(delivery_retry_max_attempts=5),
         ledger=ledger,
         downstream_client=AlwaysFailClient(),
         receipt_edit_client=receipt_client,
@@ -295,7 +295,7 @@ async def test_dispatcher_edits_receipt_to_failed_when_retry_cap_exceeded(tmp_pa
     capture = accepted(ledger)
     receipt_client = FakeReceiptEditClient()
     await _run_one_dispatch_pass(
-        settings=make_settings(delivery_max_attempts=1),  # cap = 1 attempt
+        settings=make_settings(delivery_retry_max_attempts=1),  # cap = 1 attempt
         ledger=ledger,
         downstream_client=AlwaysFailClient(),
         receipt_edit_client=receipt_client,
@@ -316,7 +316,7 @@ async def test_dispatcher_receipt_edit_failure_does_not_kill_pass(tmp_path):
     receipt_client.should_raise = True
     # Should not raise even though receipt edit throws
     await _run_one_dispatch_pass(
-        settings=make_settings(delivery_max_attempts=5),
+        settings=make_settings(delivery_retry_max_attempts=5),
         ledger=ledger,
         downstream_client=AlwaysFailClient(),
         receipt_edit_client=receipt_client,

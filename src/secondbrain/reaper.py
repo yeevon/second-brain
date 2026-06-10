@@ -69,7 +69,7 @@ async def run_stale_lease_reaper_once(
     result = ledger.reap_expired_processing_leases(
         now=now,
         batch_size=settings.stale_lease_reaper_batch_size,
-        retry_max_attempts=settings.delivery_max_attempts,
+        retry_max_attempts=settings.delivery_retry_max_attempts,
         retry_base_delay_seconds=settings.delivery_retry_base_delay_seconds,
         retry_max_delay_seconds=settings.delivery_retry_max_delay_seconds,
     )
@@ -79,6 +79,23 @@ async def run_stale_lease_reaper_once(
         requeued_count=len(result.requeued),
         failed_count=len(result.failed),
     )
+    for item in result.requeued:
+        log_metadata(
+            "stale_lease_requeued",
+            capture_id=item.capture_id,
+            previous_delivery_status=item.previous_delivery_status,
+            delivery_attempts=item.delivery_attempts,
+            retry_attempts=item.retry_attempts,
+            next_attempt_at=item.next_attempt_at.isoformat(),
+        )
+    for item in result.failed:
+        log_metadata(
+            "retry_limit_exceeded",
+            capture_id=item.capture_id,
+            previous_delivery_status=item.previous_delivery_status,
+            delivery_attempts=item.delivery_attempts,
+            retry_attempts=item.retry_attempts,
+        )
     if receipt_client is not None:
         for requeued in result.requeued:
             try:

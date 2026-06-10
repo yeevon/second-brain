@@ -32,7 +32,7 @@ def make_ledger(tmp_path):
 
 def make_settings(**overrides):
     defaults = dict(
-        delivery_max_attempts=5,
+        delivery_retry_max_attempts=5,
         delivery_retry_base_delay_seconds=10,
         delivery_retry_max_delay_seconds=300,
         stale_lease_reaper_interval_seconds=30,

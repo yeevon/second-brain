@@ -1127,17 +1127,19 @@ class Ledger:
 
         now_ts = _iso(now)
         safe_reason = f"{reason_type}:{error_type}"
+        next_retry_attempts = (row["retry_attempts"] if "retry_attempts" in row.keys() else 0) + 1
 
-        if delivery_attempt >= max_attempts:
+        if next_retry_attempts >= max_attempts:
             # Terminal failure
             conn.execute(
                 """
                 UPDATE captures
-                SET status = ?, delivery_status = ?, processing_lease_until = NULL,
+                SET status = ?, delivery_status = ?, retry_attempts = ?,
+                    processing_lease_until = NULL,
                     next_attempt_at = NULL, last_error = ?, updated_at = ?
                 WHERE capture_id = ?
                 """,
-                (FAILED, DELIVERY_FAILED, safe_reason, now_ts, capture_id),
+                (FAILED, DELIVERY_FAILED, next_retry_attempts, safe_reason, now_ts, capture_id),
             )
             self._append_event(
                 conn,
@@ -1145,6 +1147,7 @@ class Ledger:
                 "RETRY_LIMIT_EXCEEDED",
                 {
                     "delivery_attempt": delivery_attempt,
+                    "retry_attempts": next_retry_attempts,
                     "delivery_status": DELIVERY_FAILED,
                     "error_type": error_type,
                     "reason_type": reason_type,
@@ -1159,8 +1162,8 @@ class Ledger:
                 failed_terminally=True,
             )
 
-        delay = _calculate_retry_delay(
-            delivery_attempts=delivery_attempt,
+        delay = calculate_retry_delay_seconds(
+            retry_attempts=next_retry_attempts,
             base_delay_seconds=base_delay_seconds,
             max_delay_seconds=max_delay_seconds,
         )
@@ -1170,11 +1173,11 @@ class Ledger:
         conn.execute(
             """
             UPDATE captures
-            SET delivery_status = ?, processing_lease_until = NULL, next_attempt_at = ?,
-                last_error = ?, updated_at = ?
+            SET delivery_status = ?, retry_attempts = ?, processing_lease_until = NULL,
+                next_attempt_at = ?, last_error = ?, updated_at = ?
             WHERE capture_id = ?
             """,
-            (RETRY_WAIT, next_iso, safe_reason, now_ts, capture_id),
+            (RETRY_WAIT, next_retry_attempts, next_iso, safe_reason, now_ts, capture_id),
         )
         self._append_event(
             conn,
@@ -1182,6 +1185,7 @@ class Ledger:
             "DELIVERY_RETRY_SCHEDULED",
             {
                 "delivery_attempt": delivery_attempt,
+                "retry_attempts": next_retry_attempts,
                 "delivery_status": RETRY_WAIT,
                 "next_attempt_at": next_iso,
                 "error_type": error_type,
@@ -1679,15 +1683,6 @@ def calculate_retry_delay_seconds(
     delay = base_delay_seconds * (2 ** max(retry_attempts - 1, 0))
     return min(delay, max_delay_seconds)
 
-
-def _calculate_retry_delay(
-    *,
-    delivery_attempts: int,
-    base_delay_seconds: int,
-    max_delay_seconds: int,
-) -> int:
-    delay = base_delay_seconds * (2 ** max(delivery_attempts - 1, 0))
-    return min(delay, max_delay_seconds)
 
 
 def _json_dumps(value: Any) -> str:
