@@ -510,8 +510,8 @@ def make_delivery_settings(tmp_path, **overrides):
         "delivery_processing_lease_seconds": 300,
         "delivery_dispatch_interval_seconds": 2,
         "delivery_dispatch_batch_size": 25,
-        "delivery_reaper_interval_seconds": 30,
-        "delivery_reaper_batch_size": 100,
+        "stale_lease_reaper_interval_seconds": 30,
+        "stale_lease_reaper_batch_size": 100,
     }
     data.update(overrides)
     return SimpleNamespace(**data)

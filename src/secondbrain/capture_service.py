@@ -572,6 +572,13 @@ class CaptureService:
             )
         return result
 
+    def manual_retry_capture(self, *, capture_id: str) -> bool:
+        from datetime import UTC, datetime
+        return self._ledger.manual_retry_capture(
+            capture_id=capture_id,
+            now=datetime.now(UTC),
+        )
+
     def status_snapshot(self) -> CaptureStatusSnapshot:
         counts = self._ledger.status_counts()
         return CaptureStatusSnapshot(

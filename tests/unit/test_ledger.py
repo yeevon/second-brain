@@ -154,6 +154,8 @@ def test_minimal_schema_tables_columns_and_indexes_match_mvp(tmp_path):
         # Added by migration 003
         "delivery_commit_hash",
         "delivery_reason_type",
+        # Added by migration 004
+        "retry_attempts",
     ]
     assert table_columns(ledger, "capture_events") == [
         "id",
@@ -330,7 +332,7 @@ def test_existing_mvp_database_is_adopted_without_data_loss(tmp_path):
     migration_count = ledger._runtime.read(
         lambda conn: conn.execute("SELECT COUNT(*) AS c FROM schema_migrations").fetchone()["c"]
     )
-    assert migration_count == 3  # migration 001 back-applied + 002 delivery_leases + 003 terminal_fields
+    assert migration_count == 4  # 001 initial + 002 delivery_leases + 003 terminal_fields + 004 stale_lease_reaper
     # Verify delivery columns were added and existing row has correct default
     capture = ledger.get_capture("SB-20260607-0001")
     assert capture.delivery_status == "PENDING_FORWARD"
@@ -1967,3 +1969,29 @@ def _seed_mvp_db_sensitive(db_path):
     )
     raw.commit()
     raw.close()
+
+
+# ---------------------------------------------------------------------------
+# SB-108 — stale-lease reaper migration tests
+# ---------------------------------------------------------------------------
+
+def test_stale_lease_reaper_migration_adds_retry_attempts(tmp_path):
+    ledger = make_ledger(tmp_path)
+    cols = table_columns(ledger, "captures")
+    assert "retry_attempts" in cols
+    ledger.close()
+
+
+def test_existing_rows_default_retry_attempts_to_zero(tmp_path):
+    ledger = make_ledger(tmp_path)
+    _accepted(ledger, "1001")
+    capture = ledger.get_capture("SB-20260609-0001")
+    assert capture.retry_attempts == 0
+    ledger.close()
+
+
+def test_stale_lease_indexes_exist(tmp_path):
+    ledger = make_ledger(tmp_path)
+    assert index_columns(ledger, "idx_captures_stale_lease") == ["delivery_status", "processing_lease_until"]
+    assert index_columns(ledger, "idx_captures_retry_due") == ["delivery_status", "next_attempt_at"]
+    ledger.close()

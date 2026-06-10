@@ -47,6 +47,27 @@ def _is_transient_lock_error(exc: sqlite3.OperationalError) -> bool:
     )
 
 
+def _set_wal_mode(
+    conn: sqlite3.Connection,
+    *,
+    retry_base_delay_ms: int,
+    retry_attempts: int,
+) -> None:
+    # PRAGMA journal_mode = WAL on a fresh database does not respect busy_timeout
+    # (SQLite's WAL-file setup bypasses the busy handler). Retry explicitly.
+    delay_ms = retry_base_delay_ms
+    for attempt in range(retry_attempts):
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if _is_transient_lock_error(exc) and attempt + 1 < retry_attempts:
+                time.sleep(delay_ms / 1000.0)
+                delay_ms *= 2
+                continue
+            raise
+
+
 class SQLiteRuntime:
     def __init__(
         self,
@@ -119,9 +140,9 @@ class SQLiteRuntime:
         try:
             conn = sqlite3.connect(self._database_path, isolation_level=None)
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.execute("PRAGMA foreign_keys = ON")
             conn.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms}")
+            _set_wal_mode(conn, retry_base_delay_ms=self._retry_base_delay_ms, retry_attempts=self._retry_attempts)
+            conn.execute("PRAGMA foreign_keys = ON")
 
             journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
             if journal_mode != "wal":

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +73,7 @@ class CaptureRecord:
     receipt_message_id: str | None
     derived_note_path: str | None
     last_error: str | None
+    retry_attempts: int = 0
     delivery_commit_hash: str | None = None
     delivery_reason_type: str | None = None
 
@@ -104,6 +105,30 @@ class RetryDisposition:
     next_attempt_at: datetime | None
     retry_scheduled: bool
     failed_terminally: bool
+
+
+@dataclass(frozen=True)
+class RequeuedLease:
+    capture_id: str
+    delivery_attempts: int
+    retry_attempts: int
+    previous_delivery_status: str
+    next_attempt_at: datetime
+
+
+@dataclass(frozen=True)
+class FailedLease:
+    capture_id: str
+    delivery_attempts: int
+    retry_attempts: int
+    previous_delivery_status: str
+
+
+@dataclass(frozen=True)
+class LeaseReaperResult:
+    scanned: int
+    requeued: Tuple[RequeuedLease, ...]
+    failed: Tuple[FailedLease, ...]
 
 
 @dataclass(frozen=True)

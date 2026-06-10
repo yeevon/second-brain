@@ -461,8 +461,8 @@ def make_delivery_settings(**overrides):
         delivery_processing_lease_seconds=300,
         delivery_dispatch_interval_seconds=2,
         delivery_dispatch_batch_size=25,
-        delivery_reaper_interval_seconds=30,
-        delivery_reaper_batch_size=100,
+        stale_lease_reaper_interval_seconds=30,
+        stale_lease_reaper_batch_size=100,
         discord_capture_channel_id=200,
     )
     data.update(overrides)
@@ -668,6 +668,177 @@ async def test_saved_receipt_commit_precedes_delivery_claim(tmp_path):
     assert row["status"] == RECEIVED
     assert row["delivery_status"] == PENDING_FORWARD
 
+    ledger.close()
+
+
+# ===========================================================================
+# SB-108 — Stale-lease reaper integration tests
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_repeated_fake_downstream_crashes_eventually_fail_visibly(tmp_path):
+    """Repeated expired leases exhaust retry cap → FAILED with RETRY_LIMIT_EXCEEDED event."""
+    from secondbrain.reaper import run_stale_lease_reaper_once
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    settings = make_delivery_settings(delivery_max_attempts=3)
+    now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
+
+    insert_result = ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="important note",
+        received_at=now,
+    )
+    capture_id = insert_result.capture.capture_id
+
+    receipt_edits: list[dict] = []
+
+    class TrackingReceiptClient:
+        async def edit_receipt(self, *, capture_id: str, content: str) -> None:
+            receipt_edits.append({"capture_id": capture_id, "content": content})
+
+    t = now
+    for cycle in range(settings.delivery_max_attempts + 1):
+        lease = t + timedelta(seconds=30)
+        claimed = ledger.claim_due_deliveries(now=t, lease_until=lease, batch_size=10)
+        if not claimed:
+            break
+        attempt = claimed[0].delivery_attempts
+        ledger.mark_forwarded(capture_id=capture_id, delivery_attempt=attempt, lease_until=lease)
+
+        # Advance clock to expire the lease
+        expired = t + timedelta(seconds=90)
+        reaper_settings = SimpleNamespace(
+            stale_lease_reaper_batch_size=10,
+            delivery_max_attempts=settings.delivery_max_attempts,
+            delivery_retry_base_delay_seconds=1,
+            delivery_retry_max_delay_seconds=10,
+        )
+        result = await run_stale_lease_reaper_once(
+            settings=reaper_settings,
+            ledger=ledger,
+            receipt_client=TrackingReceiptClient(),
+            _now=expired,
+        )
+        t = expired + timedelta(seconds=20)
+        if result.failed:
+            break
+
+    capture = ledger.get_capture(capture_id)
+    assert capture.status == FAILED
+    assert capture.delivery_status == DELIVERY_FAILED
+    assert capture.processing_lease_until is None
+    assert capture.next_attempt_at is None
+    assert capture.raw_text == "important note"
+
+    events = ledger.capture_events(capture_id)
+    assert "RETRY_LIMIT_EXCEEDED" in [e["event_type"] for e in events]
+
+    # Receipt was edited at least once with a failure message
+    failure_edits = [e for e in receipt_edits if "retry" in e["content"].lower() or "failed" in e["content"].lower()]
+    assert len(failure_edits) > 0
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_retry_requeues_capture_after_retry_cap_failure(tmp_path):
+    """manual_retry_capture resets FAILED capture to RECEIVED/RETRY_WAIT with retry_attempts=0."""
+    from secondbrain.reaper import run_stale_lease_reaper_once
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    settings = make_delivery_settings(delivery_max_attempts=1)
+    now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
+
+    insert_result = ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="note",
+        received_at=now,
+    )
+    capture_id = insert_result.capture.capture_id
+
+    # Claim, forward, expire, reap to terminal failure
+    lease = now + timedelta(seconds=30)
+    ledger.claim_due_deliveries(now=now, lease_until=lease, batch_size=10)
+    ledger.mark_forwarded(capture_id=capture_id, delivery_attempt=1, lease_until=lease)
+    reaper_settings = SimpleNamespace(
+        stale_lease_reaper_batch_size=10,
+        delivery_max_attempts=1,
+        delivery_retry_base_delay_seconds=1,
+        delivery_retry_max_delay_seconds=10,
+    )
+    await run_stale_lease_reaper_once(
+        settings=reaper_settings,
+        ledger=ledger,
+        _now=lease + timedelta(seconds=1),
+    )
+    assert ledger.get_capture(capture_id).delivery_status == DELIVERY_FAILED
+
+    # Manual retry
+    changed = ledger.manual_retry_capture(capture_id=capture_id, now=now + timedelta(hours=1))
+    assert changed is True
+
+    updated = ledger.get_capture(capture_id)
+    assert updated.status == RECEIVED
+    assert updated.delivery_status == RETRY_WAIT
+    assert updated.retry_attempts == 0
+    assert updated.next_attempt_at is not None
+    assert updated.raw_text == "note"
+
+    events = ledger.capture_events(capture_id)
+    assert "MANUAL_RETRY_REQUESTED" in [e["event_type"] for e in events]
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_reaper_receipt_alert_runs_only_after_database_commit(tmp_path):
+    """Receipt edit callback sees the updated delivery_status in a separate DB connection."""
+    from secondbrain.reaper import run_stale_lease_reaper_once
+    db_path = tmp_path / "ledger.sqlite3"
+    ledger = Ledger(db_path)
+    now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
+
+    insert_result = ledger.insert_accepted_capture(
+        discord_message_id="1001",
+        discord_channel_id="200",
+        discord_guild_id="300",
+        discord_author_id="400",
+        raw_text="note",
+        received_at=now,
+    )
+    capture_id = insert_result.capture.capture_id
+    lease = now + timedelta(seconds=30)
+    ledger.claim_due_deliveries(now=now, lease_until=lease, batch_size=10)
+
+    observed_status: list[str] = []
+
+    class VerifyingReceiptClient:
+        async def edit_receipt(self, *, capture_id: str, content: str) -> None:
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT delivery_status FROM captures WHERE capture_id = ?", (capture_id,)
+            ).fetchone()
+            conn.close()
+            observed_status.append(row["delivery_status"])
+
+    reaper_settings = SimpleNamespace(
+        stale_lease_reaper_batch_size=10,
+        delivery_max_attempts=5,
+        delivery_retry_base_delay_seconds=1,
+        delivery_retry_max_delay_seconds=10,
+    )
+    await run_stale_lease_reaper_once(
+        settings=reaper_settings,
+        ledger=ledger,
+        receipt_client=VerifyingReceiptClient(),
+        _now=lease + timedelta(seconds=1),
+    )
+    assert len(observed_status) == 1
+    assert observed_status[0] == RETRY_WAIT
     ledger.close()
 
 

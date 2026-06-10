@@ -12,6 +12,7 @@ from secondbrain.capture_api import create_capture_api
 from secondbrain.capture_service import CaptureService
 from secondbrain.config import Settings
 from secondbrain.discord_capture import create_discord_client
+from secondbrain.reaper import run_stale_lease_reaper
 from secondbrain.reconcile import ReconcileResult
 from secondbrain.vault_writer import VaultWriter
 from secondbrain.worker import CaptureQueue, run_capture_worker
@@ -86,12 +87,14 @@ class LocalWorkerStartup:
 
 
 class CaptureOnlyStartup:
-    def __init__(self, *, capture_service: CaptureService) -> None:
+    def __init__(self, *, capture_service: CaptureService, settings=None) -> None:
         self.capture_service = capture_service
+        self.settings = settings
         self._startup_lock = asyncio.Lock()
         self._started = False
         self.worker_task: asyncio.Task | None = None
         self.periodic_task: asyncio.Task | None = None
+        self.reaper_task: asyncio.Task | None = None
 
     async def start_once(self, client) -> ReconcileResult | None:
         async with self._startup_lock:
@@ -99,6 +102,16 @@ class CaptureOnlyStartup:
                 return None
             result = await self.capture_service.startup_reconcile(client)
             self._started = True
+            if self.settings is not None and (
+                self.reaper_task is None or self.reaper_task.done()
+            ):
+                self.reaper_task = asyncio.create_task(
+                    run_stale_lease_reaper(
+                        settings=self.settings,
+                        ledger=self.capture_service._ledger,
+                        receipt_client=self.capture_service,
+                    )
+                )
             return result
 
 
@@ -203,7 +216,7 @@ async def run_local_full_runtime(settings: Settings) -> None:
 
 async def run_capture_only_runtime(settings: Settings) -> None:
     capture_service = CaptureService.open(settings, notify_capture=None)
-    startup = CaptureOnlyStartup(capture_service=capture_service)
+    startup = CaptureOnlyStartup(capture_service=capture_service, settings=settings)
     api = create_capture_api(
         capture_service=capture_service,
         internal_token=settings.capture_service_internal_token,
@@ -279,17 +292,12 @@ async def run_service_runtime(
         await api_server.stop()
         await client.close()
 
-        periodic_task = getattr(startup, "periodic_task", None)
-        if periodic_task is not None and not periodic_task.done():
-            periodic_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await periodic_task
-
-        worker_task = getattr(startup, "worker_task", None)
-        if worker_task is not None and not worker_task.done():
-            worker_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await worker_task
+        for attr in ("periodic_task", "worker_task", "reaper_task"):
+            task = getattr(startup, attr, None)
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
 
         for task in tasks:
             if not task.done():
@@ -347,16 +355,22 @@ def format_status_report(
         ]
     if delivery_snapshot is not None:
         d = delivery_snapshot
+        interval = getattr(settings, "stale_lease_reaper_interval_seconds", "?")
+        batch = getattr(settings, "stale_lease_reaper_batch_size", "?")
         lines += [
+            f"stale lease reaper interval: {interval} seconds",
+            f"stale lease reaper batch size: {batch}",
+            f"active processing leases: {d.get('active_processing_leases', 0)}",
+            f"expired processing leases: {d.get('expired_leases', 0)}",
             f"delivery pending forward: {d.get('pending_forward', 0)}",
             f"delivery forwarding: {d.get('forwarding', 0)}",
             f"delivery forwarded awaiting callback: {d.get('forwarded', 0)}",
             f"delivery classifying: {d.get('classifying', 0)}",
             f"delivery waiting for retry: {d.get('retry_wait', 0)}",
             f"delivery failed after retry cap: {d.get('failed', 0)}",
-            f"expired processing leases: {d.get('expired_leases', 0)}",
             f"total downstream delivery attempts: {d.get('total_delivery_attempts', 0)}",
-            f"next scheduled delivery attempt: {d.get('next_attempt_at') or 'none'}",
+            f"total retry attempts: {d.get('total_retry_attempts', 0)}",
+            f"next scheduled retry: {d.get('next_attempt_at') or 'none'}",
         ]
     return "\n".join(lines)
 
@@ -377,11 +391,26 @@ def run_status() -> None:
         capture_service.close()
 
 
+def run_manual_retry(capture_id: str) -> None:
+    settings = Settings()
+    capture_service = CaptureService.open(settings)
+    try:
+        changed = capture_service.manual_retry_capture(capture_id=capture_id)
+        if changed:
+            print(f"manual retry queued: {capture_id}")
+        else:
+            print(f"manual retry rejected: capture is not in terminal FAILED state")
+    finally:
+        capture_service.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="secondbrain")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("run", help="listen for Discord captures and print them")
     subparsers.add_parser("status", help="report local ledger and vault status")
+    retry_parser = subparsers.add_parser("retry", help="queue a manual retry for a failed capture")
+    retry_parser.add_argument("capture_id", help="the capture ID to retry (e.g. SB-20260607-0042)")
 
     args = parser.parse_args(argv)
     try:
@@ -390,6 +419,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "status":
             run_status()
+            return 0
+        if args.command == "retry":
+            run_manual_retry(args.capture_id)
             return 0
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)

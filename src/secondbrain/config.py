@@ -102,9 +102,8 @@ class Settings:
         self.delivery_processing_lease_seconds   = _parse_int_env("DELIVERY_PROCESSING_LEASE_SECONDS", "300")
         self.delivery_dispatch_interval_seconds  = _parse_int_env("DELIVERY_DISPATCH_INTERVAL_SECONDS", "2")
         self.delivery_dispatch_batch_size        = _parse_int_env("DELIVERY_DISPATCH_BATCH_SIZE", "25")
-        # Reserved for SB-108 (stale lease reaper — not yet implemented)
-        self.delivery_reaper_interval_seconds    = _parse_int_env("DELIVERY_REAPER_INTERVAL_SECONDS", "30")
-        self.delivery_reaper_batch_size          = _parse_int_env("DELIVERY_REAPER_BATCH_SIZE", "100")
+        self.stale_lease_reaper_interval_seconds = _parse_int_env("STALE_LEASE_REAPER_INTERVAL_SECONDS", "30")
+        self.stale_lease_reaper_batch_size       = _parse_int_env("STALE_LEASE_REAPER_BATCH_SIZE", "100")
 
         self.ledger_path = Path(self.ledger_path)
 
@@ -150,10 +149,10 @@ class Settings:
             raise RuntimeError("DELIVERY_DISPATCH_INTERVAL_SECONDS must be >= 1")
         if self.delivery_dispatch_batch_size < 1:
             raise RuntimeError("DELIVERY_DISPATCH_BATCH_SIZE must be >= 1")
-        if self.delivery_reaper_interval_seconds < 1:
-            raise RuntimeError("DELIVERY_REAPER_INTERVAL_SECONDS must be >= 1")
-        if self.delivery_reaper_batch_size < 1:
-            raise RuntimeError("DELIVERY_REAPER_BATCH_SIZE must be >= 1")
+        if self.stale_lease_reaper_interval_seconds < 1:
+            raise RuntimeError("STALE_LEASE_REAPER_INTERVAL_SECONDS must be >= 1")
+        if self.stale_lease_reaper_batch_size < 1:
+            raise RuntimeError("STALE_LEASE_REAPER_BATCH_SIZE must be >= 1")
 
         if self.sqlite_busy_timeout_ms < 0:
             raise RuntimeError("SQLITE_BUSY_TIMEOUT_MS must be >= 0")

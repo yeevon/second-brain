@@ -104,6 +104,15 @@ _MIGRATIONS: list[Migration] = [
             "ALTER TABLE captures ADD COLUMN delivery_reason_type TEXT",
         ),
     ),
+    Migration(
+        version=4,
+        name="stale_lease_reaper",
+        statements=(
+            "ALTER TABLE captures ADD COLUMN retry_attempts INTEGER NOT NULL DEFAULT 0",
+            "CREATE INDEX IF NOT EXISTS idx_captures_stale_lease ON captures(delivery_status, processing_lease_until)",
+            "CREATE INDEX IF NOT EXISTS idx_captures_retry_due ON captures(delivery_status, next_attempt_at)",
+        ),
+    ),
 ]
 
 

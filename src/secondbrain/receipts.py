@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -172,6 +173,34 @@ def format_downstream_filed_receipt(
     if has_attachments:
         content += f"\n{ATTACHMENT_WARNING}"
     return content
+
+
+def format_delivery_retry_scheduled_receipt(
+    capture_id: str,
+    *,
+    retry_attempts: int,
+    next_attempt_at: datetime,
+) -> str:
+    return (
+        f"⚠️ {capture_id} captured, but downstream processing was interrupted.\n"
+        "Your original note is safe.\n"
+        f"Automatic retry {retry_attempts} is scheduled."
+    )
+
+
+def format_delivery_retry_exhausted_receipt(capture_id: str) -> str:
+    return (
+        f"❌ {capture_id} captured, but filing failed after repeated retries.\n"
+        "Your original note is safe in the local ledger.\n"
+        "Manual retry is available."
+    )
+
+
+def format_manual_retry_accepted_receipt(capture_id: str) -> str:
+    return (
+        f"⏳ {capture_id} queued for manual retry.\n"
+        "Your original note remains safe in the local ledger."
+    )
 
 
 def format_vault_failure_receipt(capture_id: str, *, has_attachments: bool) -> str:

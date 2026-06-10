@@ -188,8 +188,8 @@ def test_delivery_settings_use_safe_defaults(monkeypatch):
         "DELIVERY_PROCESSING_LEASE_SECONDS",
         "DELIVERY_DISPATCH_INTERVAL_SECONDS",
         "DELIVERY_DISPATCH_BATCH_SIZE",
-        "DELIVERY_REAPER_INTERVAL_SECONDS",
-        "DELIVERY_REAPER_BATCH_SIZE",
+        "STALE_LEASE_REAPER_INTERVAL_SECONDS",
+        "STALE_LEASE_REAPER_BATCH_SIZE",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -201,8 +201,8 @@ def test_delivery_settings_use_safe_defaults(monkeypatch):
     assert s.delivery_processing_lease_seconds == 300
     assert s.delivery_dispatch_interval_seconds == 2
     assert s.delivery_dispatch_batch_size == 25
-    assert s.delivery_reaper_interval_seconds == 30
-    assert s.delivery_reaper_batch_size == 100
+    assert s.stale_lease_reaper_interval_seconds == 30
+    assert s.stale_lease_reaper_batch_size == 100
 
 
 def test_delivery_settings_accept_valid_overrides(monkeypatch):
@@ -214,8 +214,8 @@ def test_delivery_settings_accept_valid_overrides(monkeypatch):
     monkeypatch.setenv("DELIVERY_PROCESSING_LEASE_SECONDS", "120")
     monkeypatch.setenv("DELIVERY_DISPATCH_INTERVAL_SECONDS", "5")
     monkeypatch.setenv("DELIVERY_DISPATCH_BATCH_SIZE", "10")
-    monkeypatch.setenv("DELIVERY_REAPER_INTERVAL_SECONDS", "60")
-    monkeypatch.setenv("DELIVERY_REAPER_BATCH_SIZE", "50")
+    monkeypatch.setenv("STALE_LEASE_REAPER_INTERVAL_SECONDS", "60")
+    monkeypatch.setenv("STALE_LEASE_REAPER_BATCH_SIZE", "50")
 
     s = Settings()
     assert s.delivery_max_attempts == 3

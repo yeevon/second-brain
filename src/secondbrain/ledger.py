@@ -30,6 +30,9 @@ from secondbrain.capture_models import (
     TERMINAL_STATUSES,
     CaptureRecord,
     DeliveryMutationResult,
+    FailedLease,
+    LeaseReaperResult,
+    RequeuedLease,
     RetryDisposition,
     TransitionResult,
 )
@@ -378,11 +381,50 @@ class Ledger:
             ),
         )
 
+    def reap_expired_processing_leases(
+        self,
+        *,
+        now: datetime,
+        batch_size: int,
+        retry_max_attempts: int,
+        retry_base_delay_seconds: int,
+        retry_max_delay_seconds: int,
+    ) -> LeaseReaperResult:
+        return self._write(
+            "reap_expired_processing_leases",
+            lambda conn: self._reap_expired_processing_leases(
+                conn,
+                now=now,
+                batch_size=batch_size,
+                retry_max_attempts=retry_max_attempts,
+                retry_base_delay_seconds=retry_base_delay_seconds,
+                retry_max_delay_seconds=retry_max_delay_seconds,
+            ),
+        )
+
+    def manual_retry_capture(self, *, capture_id: str, now: datetime) -> bool:
+        return self._write(
+            "manual_retry_capture",
+            lambda conn: self._manual_retry_capture(conn, capture_id=capture_id, now=now),
+        )
+
     def normalize_delivery_for_local_full(self) -> int:
         """Set PENDING_FORWARD/RETRY_WAIT captures to NOT_APPLICABLE for local-full mode startup."""
         return self._write(
             "normalize_delivery_for_local_full",
             self._normalize_delivery_for_local_full,
+        )
+
+    def capture_events(self, capture_id: str) -> list[dict[str, Any]]:
+        return self._read(
+            "capture_events",
+            lambda conn: [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT event_type, event_payload_json, created_at FROM capture_events WHERE capture_id = ? ORDER BY id",
+                    (capture_id,),
+                ).fetchall()
+            ],
         )
 
     def delivery_status_counts(self) -> dict[str, int]:
@@ -1291,6 +1333,178 @@ class Ledger:
         ).fetchall()
         return {row["delivery_status"]: row["count"] for row in rows}
 
+    def _reap_expired_processing_leases(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        now: datetime,
+        batch_size: int,
+        retry_max_attempts: int,
+        retry_base_delay_seconds: int,
+        retry_max_delay_seconds: int,
+    ) -> LeaseReaperResult:
+        from datetime import timedelta
+        now_iso = _iso(now)
+        stale_rows = conn.execute(
+            """
+            SELECT capture_id, delivery_status, delivery_attempts, retry_attempts
+            FROM captures
+            WHERE delivery_status IN (?, ?, ?)
+              AND processing_lease_until IS NOT NULL
+              AND processing_lease_until <= ?
+            ORDER BY processing_lease_until ASC, id ASC
+            LIMIT ?
+            """,
+            (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING, now_iso, batch_size),
+        ).fetchall()
+
+        requeued: list[RequeuedLease] = []
+        failed: list[FailedLease] = []
+
+        for row in stale_rows:
+            capture_id = row["capture_id"]
+            prev_delivery_status = row["delivery_status"]
+            delivery_attempts = row["delivery_attempts"]
+            next_retry_attempts = row["retry_attempts"] + 1
+
+            if next_retry_attempts < retry_max_attempts:
+                delay = calculate_retry_delay_seconds(
+                    retry_attempts=next_retry_attempts,
+                    base_delay_seconds=retry_base_delay_seconds,
+                    max_delay_seconds=retry_max_delay_seconds,
+                )
+                next_attempt_at = now + timedelta(seconds=delay)
+                next_attempt_at_iso = _iso(next_attempt_at)
+                rowcount = conn.execute(
+                    """
+                    UPDATE captures
+                    SET delivery_status = ?,
+                        retry_attempts = ?,
+                        processing_lease_until = NULL,
+                        next_attempt_at = ?,
+                        last_error = ?,
+                        updated_at = ?
+                    WHERE capture_id = ?
+                      AND delivery_status = ?
+                      AND processing_lease_until IS NOT NULL
+                      AND processing_lease_until <= ?
+                    """,
+                    (
+                        RETRY_WAIT,
+                        next_retry_attempts,
+                        next_attempt_at_iso,
+                        "stale processing lease expired",
+                        now_iso,
+                        capture_id,
+                        prev_delivery_status,
+                        now_iso,
+                    ),
+                ).rowcount
+                if rowcount > 0:
+                    conn.execute(
+                        "INSERT INTO capture_events (capture_id, event_type, event_payload_json, created_at) VALUES (?, 'REQUEUED_STALE_LEASE', ?, ?)",
+                        (
+                            capture_id,
+                            _json_dumps({
+                                "previous_delivery_status": prev_delivery_status,
+                                "delivery_attempts": delivery_attempts,
+                                "retry_attempts": next_retry_attempts,
+                                "next_attempt_at": next_attempt_at_iso,
+                            }),
+                            now_iso,
+                        ),
+                    )
+                    requeued.append(RequeuedLease(
+                        capture_id=capture_id,
+                        delivery_attempts=delivery_attempts,
+                        retry_attempts=next_retry_attempts,
+                        previous_delivery_status=prev_delivery_status,
+                        next_attempt_at=next_attempt_at,
+                    ))
+            else:
+                rowcount = conn.execute(
+                    """
+                    UPDATE captures
+                    SET status = ?,
+                        delivery_status = ?,
+                        retry_attempts = ?,
+                        processing_lease_until = NULL,
+                        next_attempt_at = NULL,
+                        last_error = ?,
+                        updated_at = ?
+                    WHERE capture_id = ?
+                      AND delivery_status = ?
+                      AND processing_lease_until IS NOT NULL
+                      AND processing_lease_until <= ?
+                    """,
+                    (
+                        FAILED,
+                        DELIVERY_FAILED,
+                        next_retry_attempts,
+                        "retry limit exceeded after repeated stale processing leases",
+                        now_iso,
+                        capture_id,
+                        prev_delivery_status,
+                        now_iso,
+                    ),
+                ).rowcount
+                if rowcount > 0:
+                    conn.execute(
+                        "INSERT INTO capture_events (capture_id, event_type, event_payload_json, created_at) VALUES (?, 'RETRY_LIMIT_EXCEEDED', ?, ?)",
+                        (
+                            capture_id,
+                            _json_dumps({
+                                "previous_delivery_status": prev_delivery_status,
+                                "delivery_attempts": delivery_attempts,
+                                "retry_attempts": next_retry_attempts,
+                            }),
+                            now_iso,
+                        ),
+                    )
+                    failed.append(FailedLease(
+                        capture_id=capture_id,
+                        delivery_attempts=delivery_attempts,
+                        retry_attempts=next_retry_attempts,
+                        previous_delivery_status=prev_delivery_status,
+                    ))
+
+        return LeaseReaperResult(
+            scanned=len(stale_rows),
+            requeued=tuple(requeued),
+            failed=tuple(failed),
+        )
+
+    def _manual_retry_capture(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        capture_id: str,
+        now: datetime,
+    ) -> bool:
+        now_iso = _iso(now)
+        rowcount = conn.execute(
+            """
+            UPDATE captures
+            SET status = ?,
+                delivery_status = ?,
+                retry_attempts = 0,
+                processing_lease_until = NULL,
+                next_attempt_at = ?,
+                last_error = NULL,
+                updated_at = ?
+            WHERE capture_id = ?
+              AND status = ?
+              AND delivery_status = ?
+            """,
+            (RECEIVED, RETRY_WAIT, now_iso, now_iso, capture_id, FAILED, DELIVERY_FAILED),
+        ).rowcount
+        if rowcount > 0:
+            conn.execute(
+                "INSERT INTO capture_events (capture_id, event_type, event_payload_json, created_at) VALUES (?, 'MANUAL_RETRY_REQUESTED', ?, ?)",
+                (capture_id, _json_dumps({"next_attempt_at": now_iso}), now_iso),
+            )
+        return rowcount > 0
+
     def _delivery_snapshot(self, conn: sqlite3.Connection) -> dict[str, Any]:
         counts = {row["delivery_status"]: row["count"] for row in conn.execute(
             "SELECT delivery_status, COUNT(*) AS count FROM captures GROUP BY delivery_status"
@@ -1315,6 +1529,19 @@ class Ledger:
             """,
             (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING, now_iso),
         ).fetchone()["count"]
+        active_leases_count = conn.execute(
+            """
+            SELECT COUNT(*) AS count FROM captures
+            WHERE delivery_status IN (?, ?, ?)
+              AND processing_lease_until IS NOT NULL
+              AND processing_lease_until > ?
+            """,
+            (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING, now_iso),
+        ).fetchone()["count"]
+        total_retry_row = conn.execute(
+            "SELECT COALESCE(SUM(retry_attempts), 0) AS total FROM captures"
+        ).fetchone()
+        total_retry_attempts = int(total_retry_row["total"]) if total_retry_row else 0
         return {
             "pending_forward": counts.get(PENDING_FORWARD, 0),
             "forwarding": counts.get(FORWARDING, 0),
@@ -1325,6 +1552,8 @@ class Ledger:
             "failed": counts.get(DELIVERY_FAILED, 0),
             "not_applicable": counts.get(NOT_APPLICABLE, 0),
             "total_delivery_attempts": total_attempts,
+            "total_retry_attempts": total_retry_attempts,
+            "active_processing_leases": active_leases_count,
             "next_attempt_at": next_row["next"] if next_row else None,
             "expired_leases": expired_count,
         }
@@ -1435,9 +1664,20 @@ def _record_from_row(row: sqlite3.Row) -> CaptureRecord:
         receipt_message_id=row["receipt_message_id"],
         derived_note_path=row["derived_note_path"],
         last_error=row["last_error"],
+        retry_attempts=row["retry_attempts"] if "retry_attempts" in row.keys() else 0,
         delivery_commit_hash=row["delivery_commit_hash"],
         delivery_reason_type=row["delivery_reason_type"],
     )
+
+
+def calculate_retry_delay_seconds(
+    *,
+    retry_attempts: int,
+    base_delay_seconds: int,
+    max_delay_seconds: int,
+) -> int:
+    delay = base_delay_seconds * (2 ** max(retry_attempts - 1, 0))
+    return min(delay, max_delay_seconds)
 
 
 def _calculate_retry_delay(
