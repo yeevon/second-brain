@@ -224,47 +224,71 @@ def _fail_if_called(*args, **kwargs):
 # Status query integration — read_operational_status against real ledger state
 # ---------------------------------------------------------------------------
 
-def test_status_reports_retry_backlog_without_manual_sqlite_query(tmp_path):
+@pytest.mark.asyncio
+async def test_status_reports_retry_backlog_without_manual_sqlite_query(tmp_path):
+    """
+    End-to-end path from SB-108 reaper to SB-109 diagnostics:
+    claim → mark forwarded → lease expires → reaper runs → RETRY_WAIT →
+    status reader reports captures_waiting_for_retry = 1, stale_leases = 0.
+    """
     from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    from secondbrain.reaper import run_stale_lease_reaper_once
     from secondbrain.status import StatusSettings, read_operational_status
 
     settings = make_settings(tmp_path)
     ledger = Ledger(settings.ledger_path)
 
     now = datetime.now(UTC)
-    ledger.insert_accepted_capture(
+    result = ledger.insert_accepted_capture(
         discord_message_id="1001",
         discord_channel_id="200",
         discord_guild_id="300",
         discord_author_id="400",
         raw_text="test capture",
+        received_at=now,
     )
+
+    lease_until = now + timedelta(seconds=30)
     claims = ledger.claim_due_deliveries(
         now=now,
-        lease_until=now + timedelta(minutes=5),
+        lease_until=lease_until,
         batch_size=10,
     )
     assert len(claims) == 1
-    ledger.schedule_retry(
-        capture_id=claims[0].capture_id,
+
+    ledger.mark_forwarded(
+        capture_id=result.capture.capture_id,
         delivery_attempt=claims[0].delivery_attempts,
-        now=now,
-        error_type="webhook_timeout",
-        reason_type="transient",
-        max_attempts=5,
-        base_delay_seconds=10,
-        max_delay_seconds=300,
+        lease_until=lease_until,
     )
+
+    reaper_settings = SimpleNamespace(
+        stale_lease_reaper_batch_size=10,
+        delivery_retry_max_attempts=5,
+        delivery_retry_base_delay_seconds=10,
+        delivery_retry_max_delay_seconds=300,
+    )
+    await run_stale_lease_reaper_once(
+        settings=reaper_settings,
+        ledger=ledger,
+        _now=lease_until + timedelta(seconds=1),
+    )
+
     ledger.close()
 
-    status_settings = StatusSettings(
-        ledger_path=settings.ledger_path,
-        vault_path=None,
-        status_timezone="UTC",
-        capture_service_health_stale_after_seconds=60,
+    snapshot = read_operational_status(
+        settings=StatusSettings(
+            ledger_path=settings.ledger_path,
+            vault_path=None,
+            status_timezone="UTC",
+            capture_service_health_stale_after_seconds=60,
+        ),
+        now=lease_until + timedelta(seconds=1),
     )
-    snapshot = read_operational_status(settings=status_settings, now=now)
     assert snapshot.captures_waiting_for_retry == 1
+    assert snapshot.stale_leases == 0
 
 
 def test_status_reports_stale_lease_before_watchdog_recovery(tmp_path):
@@ -333,3 +357,37 @@ def test_status_reports_stale_capture_service_after_heartbeat_stops(tmp_path):
     )
     snapshot = read_operational_status(settings=status_settings, now=now)
     assert snapshot.capture_service_health == "STALE"
+
+
+def test_status_reports_healthy_after_local_full_runtime_ready(tmp_path):
+    """
+    Real-ledger regression: after the local-full startup sequence (STARTING →
+    heartbeat → RUNNING) the status reader must return HEALTHY, not STALE or
+    UNKNOWN.  This closes the gap between the stub-based unit tests and the
+    actual ledger write path.
+    """
+    from datetime import UTC, datetime, timedelta
+    from secondbrain.status import StatusSettings, read_operational_status
+
+    settings = make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+
+    now = datetime.now(UTC)
+    instance_id = "local-full-test-instance"
+
+    ledger.record_capture_service_start(instance_id=instance_id, now=now - timedelta(seconds=30))
+    ledger.record_capture_service_ready(instance_id=instance_id, now=now - timedelta(seconds=25))
+    ledger.record_capture_service_heartbeat(instance_id=instance_id, now=now - timedelta(seconds=5))
+    ledger.close()
+
+    snapshot = read_operational_status(
+        settings=StatusSettings(
+            ledger_path=settings.ledger_path,
+            vault_path=None,
+            status_timezone="UTC",
+            capture_service_health_stale_after_seconds=60,
+        ),
+        now=now,
+    )
+    assert snapshot.capture_service_health == "HEALTHY"
+    assert snapshot.capture_service_state == "RUNNING"

@@ -1746,11 +1746,11 @@ secondbrain status
 
 Exit codes:
 
-| Code | Meaning                                                                                       |
-|------|-----------------------------------------------------------------------------------------------|
-| `0`  | Healthy — no operator attention needed                                                        |
-| `1`  | Operator attention — stale/unknown capture-service health, stale leases, or failed captures   |
-| `2`  | Database unavailable — ledger file does not exist or cannot be opened                         |
+| Code | Meaning                                                                                        |
+|------|------------------------------------------------------------------------------------------------|
+| `0`  | Healthy — no operator attention needed                                                         |
+| `1`  | Operator attention — any non-`HEALTHY` capture-service state, stale leases, or failed captures |
+| `2`  | Database unavailable — ledger file does not exist or cannot be opened                          |
 
 Inbox-only captures do not trigger exit code 1; they are a normal operating state.
 
@@ -1776,7 +1776,7 @@ Capture-service health values:
 | `STALE`    | State is `RUNNING` or `STARTING` but heartbeat is old or missing      |
 | `UNKNOWN`  | No state has ever been written                                        |
 
-**Heartbeat lifecycle.** The capture-service writes an instance ID and `STARTING` state at boot, transitions to `RUNNING` after startup reconciliation completes, then loops a heartbeat write on `CAPTURE_SERVICE_HEARTBEAT_INTERVAL_SECONDS` (default 15 s). On shutdown the `STOPPED` state is written. All writes are conditional on the current instance ID to prevent a shutting-down process from overwriting a freshly started replacement.
+**Heartbeat lifecycle.** Both `local-full` and `capture-only` runtimes write an instance ID and `STARTING` state at boot, then begin periodic heartbeat writes. The service transitions to `RUNNING` only after startup reconciliation completes and the mode-specific background tasks are initialized. On shutdown the `STOPPED` state is written. All lifecycle writes are conditional on the current instance ID to prevent a superseded process from overwriting a freshly started replacement.
 
 Future fields (not yet implemented): writer-service health, n8n health, last successful Git push, last successful backup.
 
