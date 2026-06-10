@@ -97,7 +97,7 @@ Do not suppress failures silently, but do not allow one cleanup exception to str
 
 # SQLite Runtime Follow-Up Hardening
 
-These concerns do not block SB-105 through SB-109. The current serialized SQLite runtime is appropriate for the expected capture volume, but these should be revisited before substantially increasing traffic or relying on automated backups.
+These concerns do not block the completed Milestone 2 feature slice. Revisit them before unattended EC2 operation, automated backups, or substantially higher traffic. The current serialized SQLite runtime is appropriate for the expected capture volume, but these should be revisited before substantially increasing traffic or relying on automated backups.
 
 ## Prevent SQLite contention from blocking the asyncio event loop
 
@@ -307,7 +307,7 @@ Revisit this when logs are being shipped, indexed, or queried operationally.
 
 # Delivery Callback Follow-Up Hardening
 
-These concerns do not block SB-107 or SB-108. The current implementation preserves durable state correctly, but these should be revisited before relying on an external n8n workflow as the primary production processing path.
+These concerns do not block the completed Milestone 2 feature slice. Revisit them before relying on n8n and writer-service as the primary production processing path. The current implementation preserves durable state correctly, but these should be revisited before relying on an external n8n workflow as the primary production processing path.
 
 ## Add durable receipt-repair tracking
 
@@ -470,65 +470,91 @@ Reaper-related configuration values may be parsed early for deployment-template 
 
 ---
 
-# Scheduled Milestone Work — Do Not Duplicate as Tech Debt
+## Add a configuration preflight command
 
-The following items already have assigned tickets and should not be copied into the open-debt backlog.
+**Status:** Open  
+**Priority:** Medium before EC2 deployment
 
-## SB-108 — Stale-processing-lease reaper
+The runtime intentionally fails closed when required configuration is missing.
 
-SB-108 owns:
-
-```text
-retry_attempts ledger column
-bounded stale-lease claim operation
-transactional retry scheduling
-capped exponential backoff
-terminal FAILED transition after retry exhaustion
-visible Discord retry warning
-visible Discord permanent-failure alert
-manual-retry ledger operation
-manual-retry receipt text
-self-scheduling reaper loop
-structured metadata logs
-status-command fields
-lease-expiration and retry-cap tests
-```
-
-## SB-109 — Expanded operational status command
-
-SB-109 owns:
+As the service evolved, new required values were added:
 
 ```text
-read-only SQLite status access
-status-only configuration
-today-based operational counts
-retry backlog visibility
-stale-lease visibility
-capture-service health reporting
-reconciliation health reporting
-separate status formatting module
-clear failure when the ledger does not exist
+CAPTURE_SERVICE_INTERNAL_TOKEN
+CAPTURE_API_HOST
+CAPTURE_API_PORT
 ```
 
-## Milestone 2 Exit Regression
+Existing `.env` files do not automatically inherit additions from `.env.example`. This can cause a previously working local environment to fail after pulling a new milestone.
 
-After SB-109, create a dedicated milestone-exit validation ticket for:
+Add a command such as:
+
+```bash
+uv run secondbrain config-check
+```
+
+The command should:
 
 ```text
-full automated suite
-local Docker regression
-live SQLite monitoring
-Discord capture tests
-duplicate suppression
-sensitive-input rejection
-offline reconciliation
-periodic skipped-Gateway recovery
-retry and lease recovery
-container recreation
-missing-volume fail-closed behavior
-EC2 reboot persistence
-status-command validation
-clean shutdown
+report missing required variables
+identify variables that were renamed
+distinguish local-full from capture-only requirements
+validate token minimum length
+validate numeric ranges
+report which env template should be used
+never print secret values
 ```
 
-Do not treat the exit regression as optional cleanup. It is the completion gate for Milestone 2.
+Keep startup fail-closed behavior. The preflight command is an operator convenience, not a replacement for runtime validation.
+
+---
+
+## Monitor background-task liveness independently
+
+**Status:** Open  
+**Priority:** Medium before unattended EC2 operation
+
+The service now runs several important background tasks:
+
+```text
+capture-service heartbeat
+periodic Discord reconciliation
+stale-processing-lease reaper
+local classifier worker in local-full mode
+future downstream delivery dispatcher
+```
+
+Ordinary pass-level failures are contained safely. A task cancelled unexpectedly by future code may still remain dead until a reconnect or service restart.
+
+Add lightweight task-liveness reporting later:
+
+```text
+task name
+running / completed unexpectedly
+last successful pass timestamp
+last safe error type
+```
+
+Expose the result through the operational status command.
+
+Do not add a complex supervisor framework unless real operational evidence justifies it.
+
+---
+
+## Persist dedicated last-successful-vault-write metadata
+
+**Status:** Open  
+**Priority:** Low
+
+The operational status report currently infers the last successful vault write by selecting the most recently updated `FILED` or `INBOX` row.
+
+A later metadata or receipt update can make an older note appear to be the most recent vault write.
+
+Persist dedicated system-state fields during the actual successful write operation:
+
+```text
+last_successful_vault_write_at
+last_successful_vault_write_path
+```
+
+The status command should read those fields directly rather than infer the value from mutable capture-row timestamps.
