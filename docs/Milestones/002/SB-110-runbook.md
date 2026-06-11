@@ -59,79 +59,35 @@ Expected: all tests pass.
 
 ## Step 3 — Local Docker regression
 
-Local testing uses `compose.local.yaml` with a Docker-managed named volume so the procedure works under Docker Desktop on any platform. The EC2 bind-mount path (`/opt/second-brain/data`) is not used locally.
+Local testing uses `compose.local.yaml` with the `second-brain-local-data` Docker-managed named volume. The EC2 bind-mount path (`/opt/second-brain/data`) is not used locally.
 
-### 3a — Prepare a disposable local environment
+### 3a — Start the local container
 
-Create the local env file. Do not commit it — it holds real Discord tokens.
-
-```bash
-cp deploy/capture-service.env.example capture-service.local.env
-chmod 600 capture-service.local.env
-```
-
-Edit `capture-service.local.env` and fill in the required values:
-
-```text
-DISCORD_BOT_TOKEN=<real bot token>
-DISCORD_GUILD_ID=<real guild ID>
-DISCORD_CAPTURE_CHANNEL_ID=<real channel ID>
-DISCORD_ALLOWED_USER_ID=<real user ID>
-CAPTURE_SERVICE_INTERNAL_TOKEN=<output of: openssl rand -hex 32>
-```
-
-Set the three shell helpers used throughout the Docker steps:
+Set the two shell variables used throughout the Docker steps, then run the local startup script:
 
 ```bash
-export CAPTURE_SERVICE_ENV_FILE=./capture-service.local.env
-export COMPOSE="docker compose -f compose.yaml -f compose.local.yaml"
+export CAPTURE_SERVICE_ENV_FILE=./.env
+export CAPTURE_DATA_SOURCE=second-brain-local-data
+export COMPOSE_FILE=compose.yaml:compose.local.yaml
 export LEDGER=/var/lib/second-brain/ledger.sqlite3
+
+deploy/local-up.sh
 ```
 
-Create and initialize the named volume with the EBS sentinel and correct ownership:
+`deploy/local-up.sh` builds the image, creates and initializes the named volume (sentinel + ownership), starts the container, and waits for the health check to pass. No manual volume or sentinel setup is required.
+
+Confirm:
 
 ```bash
-docker run --rm \
-  -v second-brain-local-data:/data \
-  busybox \
-  sh -c 'touch /data/.second-brain-ebs-volume && chown -R 10001:10001 /data'
+docker compose ps
 ```
 
-Build the image, start the container, and wait for it to pass the Compose health check:
-
-```bash
-$COMPOSE config >/dev/null
-$COMPOSE build
-$COMPOSE up -d
-
-health=""
-
-for _ in $(seq 1 45); do
-  health="$(
-    docker inspect \
-      --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
-      second-brain-capture-service \
-      2>/dev/null || true
-  )"
-
-  if [ "$health" = "healthy" ]; then
-    break
-  fi
-
-  sleep 2
-done
-
-test "$health" = "healthy"
-
-$COMPOSE ps
-```
-
-Expected: `second-brain-capture-service` shows `Up` and the health loop exits with `healthy`.
+Expected: `second-brain-capture-service` shows `Up`.
 
 Check the internal health endpoint from inside the container:
 
 ```bash
-$COMPOSE exec -T capture-service \
+docker compose exec -T capture-service \
   /app/.venv/bin/python -c \
   "import urllib.request; print(
       urllib.request.urlopen(
@@ -153,14 +109,22 @@ docker inspect \
 
 Expected: `{"8000/tcp":null}`
 
+Run the packaging regression tests against the running image:
+
+```bash
+deploy/test-container-packaging.sh
+```
+
+Expected: `All container packaging tests passed.`
+
 ### 3b — Open three monitoring terminals
 
-Open three separate terminals with `COMPOSE` and `LEDGER` exported, then run one watch in each. Do not print note text.
+Open three separate terminals with the four variables exported (`CAPTURE_SERVICE_ENV_FILE`, `CAPTURE_DATA_SOURCE`, `COMPOSE_FILE`, `LEDGER`), then run one watch in each. Do not print note text.
 
 **Terminal 1 — captures (metadata only):**
 
 ```bash
-watch -n 5 "$COMPOSE exec -T capture-service sqlite3 -header -column $LEDGER '
+watch -n 5 "docker compose exec -T capture-service sqlite3 -header -column $LEDGER '
 SELECT
   capture_id,
   discord_message_id,
@@ -179,13 +143,13 @@ LIMIT 10;'"
 **Terminal 2 — capture_events:**
 
 ```bash
-watch -n 5 "$COMPOSE exec -T capture-service sqlite3 -header -column $LEDGER 'SELECT id, capture_id, event_type, created_at FROM capture_events ORDER BY id DESC LIMIT 10;'"
+watch -n 5 "docker compose exec -T capture-service sqlite3 -header -column $LEDGER 'SELECT id, capture_id, event_type, created_at FROM capture_events ORDER BY id DESC LIMIT 10;'"
 ```
 
 **Terminal 3 — system_state:**
 
 ```bash
-watch -n 5 "$COMPOSE exec -T capture-service sqlite3 -header -column $LEDGER 'SELECT key, value, updated_at FROM system_state;'"
+watch -n 5 "docker compose exec -T capture-service sqlite3 -header -column $LEDGER 'SELECT key, value, updated_at FROM system_state;'"
 ```
 
 ### 3c — Discord capture test
@@ -200,7 +164,7 @@ Confirm within 60 seconds:
 Confirm in logs:
 
 ```bash
-$COMPOSE logs --tail=50 capture-service
+docker compose logs --tail=50 capture-service
 ```
 
 Expected: `{"event":"capture_received",...}` log line, no error events.
@@ -222,7 +186,7 @@ password=TEST_ONLY_FAKE_SECRET_123456
 Query the ledger to confirm the capture was rejected cleanly:
 
 ```bash
-$COMPOSE exec -T capture-service sqlite3 -header -column "$LEDGER" "
+docker compose exec -T capture-service sqlite3 -header -column "$LEDGER" "
 SELECT
   capture_id,
   status,
@@ -246,7 +210,7 @@ redaction_present = 1
 Confirm the fake value is absent from container logs:
 
 ```bash
-if $COMPOSE logs capture-service | \
+if docker compose logs capture-service | \
   grep -Fq "TEST_ONLY_FAKE_SECRET_123456"; then
   echo "FAIL: plaintext found in logs" >&2
   false
@@ -258,7 +222,7 @@ fi
 Confirm it is absent from all database files in the volume (including WAL):
 
 ```bash
-if $COMPOSE exec -T capture-service \
+if docker compose exec -T capture-service \
   grep -r -a -Fq "TEST_ONLY_FAKE_SECRET_123456" /var/lib/second-brain; then
   echo "FAIL: plaintext found in data volume" >&2
   false
@@ -274,7 +238,7 @@ Expected: both checks print `PASS`.
 Run the status command from inside the running container:
 
 ```bash
-$COMPOSE exec -T capture-service \
+docker compose exec -T capture-service \
   /app/.venv/bin/python -m secondbrain status
 echo "exit code: $?"
 ```
@@ -292,15 +256,15 @@ Expected exit codes:
 Record the current capture count:
 
 ```bash
-$COMPOSE exec -T capture-service sqlite3 "$LEDGER" "SELECT COUNT(*) FROM captures;"
+docker compose exec -T capture-service sqlite3 "$LEDGER" "SELECT COUNT(*) FROM captures;"
 ```
 
 Stop and remove the container while keeping the named data volume:
 
 ```bash
-$COMPOSE stop capture-service
-$COMPOSE rm -f capture-service
-$COMPOSE up -d capture-service
+docker compose stop capture-service
+docker compose rm -f capture-service
+docker compose up -d capture-service
 ```
 
 Confirm after restart:
@@ -308,20 +272,20 @@ Confirm after restart:
 1. Container is `Up`:
 
    ```bash
-   $COMPOSE ps
+   docker compose ps
    ```
 
 2. Status command returns HEALTHY with a new instance ID:
 
    ```bash
-   $COMPOSE exec -T capture-service \
+   docker compose exec -T capture-service \
      /app/.venv/bin/python -m secondbrain status
    ```
 
 3. Total captures matches the count before recreation:
 
    ```bash
-   $COMPOSE exec -T capture-service sqlite3 "$LEDGER" "SELECT COUNT(*) FROM captures;"
+   docker compose exec -T capture-service sqlite3 "$LEDGER" "SELECT COUNT(*) FROM captures;"
    ```
 
 ### 3g — Offline reconciliation
@@ -329,7 +293,7 @@ Confirm after restart:
 Stop the running container:
 
 ```bash
-$COMPOSE stop capture-service
+docker compose stop capture-service
 ```
 
 Post one normal Discord thought from your phone while the container is stopped.
@@ -339,19 +303,19 @@ Note the Discord message ID of that message.
 Restart the container:
 
 ```bash
-$COMPOSE up -d capture-service
+docker compose up -d capture-service
 ```
 
 Wait until the service is healthy:
 
 ```bash
-$COMPOSE ps
+docker compose ps
 ```
 
 Verify exactly one row for the offline message:
 
 ```bash
-$COMPOSE exec -T capture-service sqlite3 "$LEDGER" "
+docker compose exec -T capture-service sqlite3 "$LEDGER" "
 SELECT COUNT(*)
 FROM captures
 WHERE discord_message_id = '<offline-message-id>';"
@@ -362,7 +326,7 @@ Expected: `1`
 Confirm in logs that startup reconciliation processed it:
 
 ```bash
-$COMPOSE logs --tail=100 capture-service | \
+docker compose logs --tail=100 capture-service | \
   grep -A 4 "startup Discord history reconciliation complete"
 ```
 
@@ -376,9 +340,10 @@ No duplicate receipt in Discord.
 
 ### 3h — Missing-volume fail-closed behavior
 
-Create a fresh named volume with no sentinel file:
+Create a fresh named volume with no sentinel file (remove any stale copy first):
 
 ```bash
+docker volume rm second-brain-invalid-data 2>/dev/null || true
 docker volume create second-brain-invalid-data
 ```
 
@@ -431,13 +396,13 @@ docker volume rm second-brain-invalid-data
 Send SIGTERM to the container:
 
 ```bash
-$COMPOSE stop --timeout 15 capture-service
+docker compose stop --timeout 15 capture-service
 ```
 
 Inspect the final log lines:
 
 ```bash
-$COMPOSE logs --tail=20 capture-service
+docker compose logs --tail=20 capture-service
 ```
 
 Expected log events include:
@@ -478,10 +443,14 @@ Expected: `STOPPED`
 Only tear down after evidence has been recorded. If any step above failed, preserve the environment temporarily for diagnosis.
 
 ```bash
-$COMPOSE down -v
+deploy/local-down.sh
 ```
 
-The `-v` flag removes the `second-brain-local-data` named volume along with the containers. Do not run it until evidence is safely recorded.
+To delete the named volume and all local test data (only when a full reset is needed):
+
+```bash
+deploy/local-reset.sh --confirm-delete-local-test-data
+```
 
 ---
 
@@ -546,7 +515,7 @@ git pull
 deploy/deploy.sh
 ```
 
-`deploy/deploy.sh` verifies the EBS mount and sentinel before building and starting the container. It exits with an error if either check fails.
+`deploy/deploy.sh` sets `CAPTURE_SERVICE_ENV_FILE`, `CAPTURE_DATA_SOURCE`, and `COMPOSE_FILE=compose.yaml`, then verifies the EBS mount and sentinel before building and starting the container. It exits with an error if either check fails.
 
 Run the post-deploy verification:
 
@@ -557,6 +526,13 @@ deploy/verify.sh
 `deploy/verify.sh` checks: container running, `unless-stopped` restart policy, non-root user, port 8000 not published, sentinel present, ledger exists, container health `healthy`.
 
 Expected output: `capture-service deployment checks passed`.
+
+Set the required variables for direct `docker compose` commands in the steps below:
+
+```bash
+export CAPTURE_SERVICE_ENV_FILE=/opt/second-brain/config/capture-service.env
+export CAPTURE_DATA_SOURCE=/opt/second-brain/data
+```
 
 Send a test capture and confirm it is durably saved:
 
@@ -592,6 +568,9 @@ deploy/verify.sh
 Check the status command:
 
 ```bash
+export CAPTURE_SERVICE_ENV_FILE=/opt/second-brain/config/capture-service.env
+export CAPTURE_DATA_SOURCE=/opt/second-brain/data
+
 docker compose exec -T capture-service \
   /app/.venv/bin/python -m secondbrain status
 ```
@@ -637,7 +616,7 @@ Primary tests:
 
 - [ ] Step 1 — full automated suite passes (`uv run pytest -q`)
 - [ ] Step 2 — status-command slice passes
-- [ ] Step 3a — local Docker environment prepared, container starts, health endpoint ok, port 8000 not published
+- [ ] Step 3a — `deploy/local-up.sh` succeeds, health endpoint ok, port 8000 not published, packaging tests pass
 - [ ] Step 3b — three monitoring terminals open and showing live data
 - [ ] Step 3c — Discord capture test passes (live receipt in Discord, `CAPTURE_RECEIVED` event in Terminal 2)
 - [ ] Step 3d — sensitive-input rejection: `REJECTED_SENSITIVE`, plaintext absent from logs and data volume
@@ -677,6 +656,8 @@ Create one file per execution at `docs/Milestones/002/evidence/SB-110-YYYY-MM-DD
 
 - Image built from commit: <git sha>
 - Named volume: second-brain-local-data
+- Step 3a: `deploy/local-up.sh` succeeded
+- Step 3a: `deploy/test-container-packaging.sh` passed
 - Step 3a: internal health endpoint: passed
 - Step 3a: internal API host publication: `{"8000/tcp":null}`
 - Step 3c: Discord capture received — message ID: <id>, capture ID: <SB-xxx>

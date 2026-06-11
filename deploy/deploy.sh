@@ -16,6 +16,10 @@ if [[ ! -f "$MARKER" ]]; then
   exit 1
 fi
 
+export CAPTURE_SERVICE_ENV_FILE="${CAPTURE_SERVICE_ENV_FILE:-/opt/second-brain/config/capture-service.env}"
+export CAPTURE_DATA_SOURCE="${CAPTURE_DATA_SOURCE:-$DATA_DIR}"
+export COMPOSE_FILE=compose.yaml
+
 cd "$APP_DIR"
 
 docker compose config >/dev/null
