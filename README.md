@@ -12,6 +12,7 @@ Two explicit modes are supported via `CAPTURE_PROCESSING_MODE`:
 | --- | --- | --- |
 | `local-full` | Desktop | Capture → screen → persist → classify (Gemini) → file (Obsidian) → receipt |
 | `capture-only` | EC2 | Capture → screen → persist → receipt. Downstream filing disabled. |
+| `capture-only` | Local Docker | Same container image as EC2, validated locally via `deploy/local-up.sh`. |
 
 The mode must be set explicitly. Startup fails if it is missing or unsupported.
 
@@ -161,6 +162,8 @@ deploy/local-reset.sh --confirm-delete-local-test-data   # wipe volume and start
 ```
 
 The named volume `second-brain-local-data` is managed by Docker. `local-up.sh` creates the EBS sentinel marker inside it automatically so the entrypoint check passes.
+
+`test-container-packaging.sh` runs four tests: Python version, environment override correctness, running-container invariants, and a clean SIGTERM shutdown. The SIGTERM test stops the container — run `deploy/local-up.sh` again before the next test cycle.
 
 ## Setup — capture-only (EC2)
 

@@ -6,7 +6,7 @@ All notable changes to this project are documented here.
 
 ## Milestone 2 — Harden durable intake before adding orchestration
 
-**Commits:** `783b090` → `d1319c4` | **Branch:** `milestone_two`
+**Commits:** `783b090` → `d2a4124` | **Branch:** `milestone_two`
 
 The goal of Milestone 2 was to make the EC2 `capture-only` service production-grade: no data loss under load, automatic recovery from stale state, observable health, and a correctly packaged container that shuts down cleanly.
 
@@ -85,7 +85,7 @@ Refactored the monolith so Discord intake, SQLite ownership, receipts, and recon
 
 Added a small authenticated internal HTTP API wrapping `CaptureService`:
 
-```
+```text
 GET  /health
 GET  /internal/captures/:capture_id
 POST /internal/captures/:capture_id/mark-forwarded
@@ -113,9 +113,9 @@ Added an explicit `capture-only` runtime mode alongside the existing `local-full
 
 **Container and deployment:**
 
-- `Dockerfile` — Python 3.12, non-root user (uid 10001), locked production dependencies, no dev dependencies, no secrets baked in.
+- `Dockerfile` — initially Python 3.12; corrected to Python 3.13 by SB-110A. Non-root user (uid 10001), locked production dependencies, no dev dependencies, no secrets baked in.
 - `.dockerignore` — excludes `.git`, `.venv`, `.env*`, `.runtime`, `vault`, `tests`, `docs`.
-- `compose.yaml` — `restart: unless-stopped`, EBS bind mount, `expose: 8000` (no `ports:`), `cap_drop: ALL`, `read_only: true`, `tmpfs: /tmp`, `no-new-privileges`, JSON log rotation, internal health check. Paths parameterized via `CAPTURE_SERVICE_ENV_FILE` and `CAPTURE_DATA_DIR` for local validation.
+- `compose.yaml` — `restart: unless-stopped`, EBS bind mount, `expose: 8000` (no `ports:`), `cap_drop: ALL`, `read_only: true`, `tmpfs: /tmp`, `no-new-privileges`, JSON log rotation, internal health check. Paths initially parameterized via `CAPTURE_SERVICE_ENV_FILE` and `CAPTURE_DATA_DIR`; `CAPTURE_DATA_DIR` renamed to `CAPTURE_DATA_SOURCE` by SB-110A.
 - `deploy/container-entrypoint.sh` — checks for `/var/lib/second-brain/.second-brain-ebs-volume` before starting the process. Container exits immediately if the EBS volume is not mounted, preventing SQLite writes to the root filesystem after a failed remount.
 - `deploy/provision-host.sh` — installs Docker Engine and Compose plugin, creates application directories. Config directory is owned by the deploy user (not root) so Compose can read the env file without `sudo`.
 - `deploy/deploy.sh` — fails before `docker compose up` if `$DATA_DIR` is not a mount point or the EBS sentinel marker is absent.

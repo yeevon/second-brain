@@ -6,3 +6,4 @@ services:
 volumes:
   second-brain-local-data:
     name: second-brain-local-data
+    external: true
