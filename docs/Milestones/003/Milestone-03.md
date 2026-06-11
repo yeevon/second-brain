@@ -53,7 +53,7 @@ edit Discord receipt
 
 The canonical architecture deliberately places n8n after the durable capture boundary. n8n coordinates processing but does not own intake durability or SQLite.
 
-**Done when:** posting while n8n is stopped still produces an immediate saved receipt, and starting n8n later processes the queued item exactly once.
+**Done when:** posting while n8n is stopped still produces an immediate saved receipt, and starting n8n later processes the queued item through at-least-once delivery while producing one observable terminal result.
 
 ---
 
@@ -69,4 +69,4 @@ Use the n8n Error Trigger to:
 - Send a visible receipt update.
 - Preserve the raw capture.
 
-**Done when:** a forced Gemini timeout or invalid payload produces a visible failure or Inbox result instead of silent disappearance.
+**Done when:** a forced Gemini timeout or invalid payload produces a visible failure or retry receipt instead of silent disappearance when safe correlation exists; when correlation is unavailable the system fails closed and relies on eventual stale-lease recovery without guessing.
