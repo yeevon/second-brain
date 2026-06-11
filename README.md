@@ -205,11 +205,26 @@ vault/
 
 Note filenames follow the pattern: `YYYY-MM-DD--CAPTURE_ID--sanitized-title.md`
 
+## n8n orchestration (SB-111+)
+
+n8n runs alongside capture-service in the `compose.n8n.yaml` overlay. Key facts:
+
+- Persistent state on the EBS-backed volume at `/opt/second-brain/data/n8n`.
+- Single instance, `N8N_CONCURRENCY_PRODUCTION_LIMIT=1`, SQLite during the foundation phase.
+- UI accessible only through an SSH tunnel (`deploy/open-n8n-tunnel.sh`). Port 5678 is never publicly exposed.
+- Credentials encrypted with an explicit external key; key stored outside the repository.
+- Execution payloads not retained globally — raw capture text must never appear in n8n storage.
+- An Error Trigger workflow is bootstrapped once via `deploy/bootstrap-n8n.sh`.
+
+capture-service remains the sole owner of the capture ledger. n8n reaches it over the private Compose backend network at `http://capture-service:8000`.
+
+See [deploy/README.md](deploy/README.md) for provisioning, bootstrap, and verification steps.
+
 ## Behavior notes
 
 - Messages containing secrets are rejected before SQLite and before Gemini.
 - Attachment-only messages are saved to inbox without calling Gemini.
 - If Gemini returns low-confidence results, the note goes to `00_inbox/` — never silently dropped.
-- The internal API is not published outside the container. Future services (n8n, writer-service) will reach it over the Compose bridge network.
+- The internal API is not published outside the container. n8n and future writer-service reach it over the Compose bridge network.
 - The container entrypoint refuses to start if the EBS sentinel file is absent, preventing SQLite writes to the root filesystem after a failed EBS remount.
 - SIGTERM is owned by the outer runtime, not Uvicorn. The shutdown sequence records `capture_service_state = STOPPED` and closes SQLite before the process exits with code 0.

@@ -12,6 +12,8 @@ __pycache__
 !.env.example
 deploy/*.env
 capture-service.local.env
+n8n.local.env
+n8n-encryption-key.local
 vault
 tests
 docs

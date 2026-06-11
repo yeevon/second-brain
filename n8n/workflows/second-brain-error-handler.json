@@ -1,0 +1,63 @@
+{
+  "name": "Second Brain - Error Handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [260, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract safe metadata — never retain raw exception messages, stack traces, or capture text\nconst payload = $input.first().json;\n\nconst workflowName = payload?.workflow?.name ?? null;\nconst workflowId = payload?.workflow?.id ?? null;\nconst executionId = payload?.execution?.id ?? null;\nconst lastNode = payload?.execution?.lastNodeExecuted ?? null;\n// Error name (type category) is safe; raw message and stack are not retained\nconst errorCategory = payload?.execution?.error?.name ?? null;\n\nreturn [{\n  json: {\n    workflow_name: workflowName,\n    workflow_id: workflowId,\n    execution_id: executionId,\n    last_node: lastNode,\n    safe_error_category: errorCategory,\n    timestamp: new Date().toISOString(),\n  }\n}];"
+      },
+      "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+      "name": "Normalize Error Metadata",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {},
+      "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+      "name": "No Operation",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [700, 300]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Error Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Error Metadata": {
+      "main": [
+        [
+          {
+            "node": "No Operation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

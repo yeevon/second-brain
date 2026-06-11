@@ -4,6 +4,27 @@ All notable changes to this project are documented here.
 
 ---
 
+## Milestone 3 — Move classification into n8n
+
+### SB-111 — Deploy a secured n8n foundation
+
+Added n8n as a Compose overlay alongside capture-service. Key changes:
+
+- **`compose.n8n.yaml`** — n8n service overlay. Image pinned to `docker.n8n.io/n8nio/n8n:1.123.55`. Port 5678 bound to `127.0.0.1` only. Encryption key injected via Docker secret. Data volume mounted at `/home/node/.n8n`.
+- **`deploy/n8n.env.example`** — environment template. Execution payload retention defaults to `none` globally. `N8N_BLOCK_ENV_ACCESS_IN_NODE=true` prevents Code nodes from reading host environment variables.
+- **`deploy/local-stack-up.sh`** / **`local-stack-down.sh`** / **`local-n8n-reset.sh`** — local full-stack lifecycle scripts. Existing `deploy/local-up.sh` and capture-only scripts are unchanged.
+- **`deploy/open-n8n-tunnel.sh`** — SSH tunnel helper for desktop access to the n8n editor.
+- **`deploy/bootstrap-n8n.sh`** — one-time idempotent workflow importer. Strips `id` and `versionId` before import to prevent ID collision. Verifies import by name; exits non-zero on duplicate or missing post-import.
+- **`deploy/test-n8n-foundation.sh`** — local runtime regression script covering health, image pin, non-root user, loopback binding, volume mount, backend network reachability, and data directory write access.
+- **`n8n/workflows/second-brain-error-handler.json`** — Error Trigger workflow fixture. Normalizes safe metadata only (workflow name, IDs, error type category, timestamp). No `id` or `versionId` at the top level.
+- **`deploy/deploy.sh`** — extended to export n8n variables, validate n8n data dir / env file / key file, and set `COMPOSE_FILE=compose.yaml:compose.n8n.yaml`.
+- **`deploy/provision-host.sh`** — creates `/opt/second-brain/data/n8n` owned by `1000:1000`.
+- **`deploy/verify.sh`** — extended with 12 n8n checks. Final output: both `capture-service deployment checks passed` and `n8n foundation deployment checks passed`.
+- **`tests/architecture/test_n8n_foundation_config.py`** — 38 architecture regressions covering Compose overlay, environment template, secret exclusions, bootstrap behavior, and deployment script requirements.
+- **n8n image pinned:** `1.123.55` (confirmed stable at implementation time).
+
+---
+
 ## Milestone 2 — Harden durable intake before adding orchestration
 
 **Commits:** `783b090` → `d2a4124` | **Branch:** `milestone_two`
