@@ -77,6 +77,68 @@ check "LEDGER_PATH"             "/var/lib/second-brain/ledger.sqlite3"
 
 echo ""
 
+# ── Test 3: Running local container invariants ────────────────────────────────
+echo "--- Test 3: running local container invariants ---"
+
+export CAPTURE_SERVICE_ENV_FILE="${CAPTURE_SERVICE_ENV_FILE:-$ROOT_DIR/.env}"
+export CAPTURE_DATA_SOURCE=second-brain-local-data
+export COMPOSE_FILE=compose.yaml:compose.local.yaml
+
+health="$(
+  docker inspect \
+    --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+    second-brain-capture-service
+)"
+
+if [[ "$health" == "healthy" ]]; then
+  echo "  PASS: container health = healthy"
+else
+  echo "  FAIL: container health = $health" >&2
+  ERRORS=$((ERRORS + 1))
+fi
+
+ports="$(
+  docker inspect \
+    --format '{{json .NetworkSettings.Ports}}' \
+    second-brain-capture-service
+)"
+
+if [[ "$ports" == *'"8000/tcp":null'* ]]; then
+  echo "  PASS: port 8000 is private"
+else
+  echo "  FAIL: port 8000 appears published: $ports" >&2
+  ERRORS=$((ERRORS + 1))
+fi
+
+if docker compose exec -T capture-service \
+  test -f /var/lib/second-brain/.second-brain-ebs-volume; then
+  echo "  PASS: sentinel exists"
+else
+  echo "  FAIL: sentinel missing" >&2
+  ERRORS=$((ERRORS + 1))
+fi
+
+if docker compose exec -T capture-service \
+  test -f /var/lib/second-brain/ledger.sqlite3; then
+  echo "  PASS: ledger exists"
+else
+  echo "  FAIL: ledger missing" >&2
+  ERRORS=$((ERRORS + 1))
+fi
+
+if docker compose exec -T capture-service \
+  /bin/sh -lc '
+    touch /var/lib/second-brain/.write-test
+    rm /var/lib/second-brain/.write-test
+  '; then
+  echo "  PASS: runtime user can write"
+else
+  echo "  FAIL: runtime user cannot write" >&2
+  ERRORS=$((ERRORS + 1))
+fi
+
+echo ""
+
 # ── Result ────────────────────────────────────────────────────────────────────
 if [[ $ERRORS -eq 0 ]]; then
   echo "All container packaging tests passed."
