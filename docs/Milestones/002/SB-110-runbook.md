@@ -90,20 +90,36 @@ touch "$CAPTURE_DATA_DIR/.second-brain-ebs-volume"
 sudo chown -R 10001:10001 "$CAPTURE_DATA_DIR"
 ```
 
-Build the image and start the container:
+Build the image, start the container, and wait for it to pass the Compose health check:
 
 ```bash
+docker compose config >/dev/null
 docker compose build
 docker compose up -d
-```
 
-Confirm the container starts and does not exit within 30 seconds:
+health=""
 
-```bash
+for _ in $(seq 1 45); do
+  health="$(
+    docker inspect \
+      --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+      second-brain-capture-service \
+      2>/dev/null || true
+  )"
+
+  if [ "$health" = "healthy" ]; then
+    break
+  fi
+
+  sleep 2
+done
+
+test "$health" = "healthy"
+
 docker compose ps
 ```
 
-Expected: `second-brain-capture-service` shows `Up`.
+Expected: `second-brain-capture-service` shows `Up` and the health loop exits with `healthy`.
 
 Check the internal health endpoint from inside the container:
 
@@ -206,6 +222,9 @@ Query the ledger to confirm the capture was rejected cleanly:
 
 ```bash
 sqlite3 "$HOST_LEDGER" "
+.headers on
+.mode column
+
 SELECT
   capture_id,
   status,
@@ -230,19 +249,25 @@ redaction_present = 1
 Confirm the fake value is absent from container logs:
 
 ```bash
-docker compose logs capture-service | \
-  grep -F "TEST_ONLY_FAKE_SECRET_123456" && \
-  echo "FAIL: plaintext found in logs" || \
+if docker compose logs capture-service | \
+  grep -Fq "TEST_ONLY_FAKE_SECRET_123456"; then
+  echo "FAIL: plaintext found in logs" >&2
+  false
+else
   echo "PASS: plaintext absent from logs"
+fi
 ```
 
 Confirm it is absent from all mounted database files (including WAL):
 
 ```bash
-grep -R -a -F "TEST_ONLY_FAKE_SECRET_123456" \
-  "$CAPTURE_DATA_DIR" && \
-  echo "FAIL: plaintext found in data directory" || \
+if grep -R -a -Fq "TEST_ONLY_FAKE_SECRET_123456" \
+  "$CAPTURE_DATA_DIR"; then
+  echo "FAIL: plaintext found in data directory" >&2
+  false
+else
   echo "PASS: plaintext absent from data directory"
+fi
 ```
 
 Expected: both checks print `PASS`.
@@ -341,10 +366,17 @@ Expected: `1`
 Confirm in logs that startup reconciliation processed it:
 
 ```bash
-docker compose logs --tail=50 capture-service | grep reconcil
+docker compose logs --tail=100 capture-service | \
+  grep -A 4 "startup Discord history reconciliation complete"
 ```
 
-Expected: a log line showing `handled: 1` for the startup reconciliation pass. No duplicate receipt in Discord.
+Expected output includes:
+
+```text
+captures handled: 1
+```
+
+No duplicate receipt in Discord.
 
 ### 3h — Missing-volume fail-closed behavior
 
@@ -370,6 +402,7 @@ exit_code=$?
 set -e
 
 echo "exit code: $exit_code"
+test "$exit_code" -eq 1
 ```
 
 Expected: `exit code: 1`, with the message:
@@ -381,9 +414,12 @@ persistent EBS volume marker missing: /var/lib/second-brain/.second-brain-ebs-vo
 Confirm no SQLite database was created in the invalid directory:
 
 ```bash
-test ! -e /tmp/sb-local-docker/invalid-data/ledger.sqlite3 && \
-  echo "PASS: no ledger created" || \
-  echo "FAIL: ledger found in invalid directory"
+if test -e /tmp/sb-local-docker/invalid-data/ledger.sqlite3; then
+  echo "FAIL: ledger found in invalid directory" >&2
+  false
+else
+  echo "PASS: no ledger created"
+fi
 ```
 
 Expected: `PASS: no ledger created`
@@ -477,6 +513,8 @@ passwordauthentication no
 pubkeyauthentication yes
 permitrootlogin no
 ```
+
+`permitrootlogin prohibit-password` is acceptable on a standard Ubuntu image if recorded in the SB-110 evidence file.
 
 Confirm security group allows only SSH from the intended `/32` source:
 
@@ -640,6 +678,7 @@ Create one file per execution at `docs/Milestones/002/evidence/SB-110-YYYY-MM-DD
 
 ## EC2 reboot persistence
 
+- EC2 deployed commit: <output of: git rev-parse HEAD>
 - Instance ID: <EC2 instance ID>
 - EBS volume ID: <id>
 - EBS DeleteOnTermination: false
