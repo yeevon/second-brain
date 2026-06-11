@@ -359,8 +359,13 @@ async def run_service_runtime(
 ) -> None:
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
-    loop.add_signal_handler(signal.SIGTERM, stop_event.set)
-    loop.add_signal_handler(signal.SIGINT, stop_event.set)
+    installed_signals: list[signal.Signals] = []
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+        except NotImplementedError:
+            continue
+        installed_signals.append(sig)
 
     stop_waiter = asyncio.ensure_future(stop_event.wait())
     tasks = (api_task, discord_task)
@@ -369,13 +374,15 @@ async def run_service_runtime(
             {api_task, discord_task, stop_waiter},
             return_when=asyncio.FIRST_COMPLETED,
         )
-        stop_waiter.cancel()
-        with suppress(asyncio.CancelledError):
-            await stop_waiter
         for task in done:
             if task is not stop_waiter:
                 task.result()
     finally:
+        if not stop_waiter.done():
+            stop_waiter.cancel()
+        with suppress(asyncio.CancelledError):
+            await stop_waiter
+
         await api_server.stop()
         await client.close()
 
@@ -402,6 +409,9 @@ async def run_service_runtime(
                 await task
 
         capture_service.close()
+
+        for sig in installed_signals:
+            loop.remove_signal_handler(sig)
 
 
 def run_discord_listener() -> None:

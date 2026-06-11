@@ -1,5 +1,7 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+import os
+import signal
 from types import SimpleNamespace
 
 import pytest
@@ -523,6 +525,95 @@ async def test_runtime_closes_capture_service_last():
     assert events[-1] == "capture_service.close"
 
 
+@pytest.mark.asyncio
+async def test_runtime_shuts_down_cleanly_on_sigterm():
+    """SIGTERM sets the stop event, wakes asyncio.wait, and completes the full shutdown sequence."""
+    events = []
+    api_server = FakeRuntimeApiServer(events)
+    client = FakeRuntimeDiscordClient(events)
+    worker_task = asyncio.create_task(runtime_worker(events))
+    await asyncio.sleep(0)
+    startup = SimpleNamespace(worker_task=worker_task)
+    capture_service = FakeRuntimeCaptureService(events)
+
+    async def fire_sigterm():
+        await asyncio.sleep(0.01)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    asyncio.create_task(fire_sigterm())
+
+    await run_service_runtime(
+        api_task=asyncio.create_task(api_server.serve()),
+        discord_task=asyncio.create_task(client.start("token")),
+        api_server=api_server,
+        client=client,
+        startup=startup,
+        capture_service=capture_service,
+        instance_id="test-instance",
+    )
+
+    assert "api.stop" in events
+    assert "discord.close" in events
+    assert "worker.cancelled" in events
+    assert len(capture_service.stop_calls) == 1
+    assert capture_service.stop_calls[0] == "test-instance"
+    assert events[-1] == "capture_service.close"
+
+
+@pytest.mark.asyncio
+async def test_runtime_removes_signal_handlers_after_shutdown():
+    """Signal handlers installed for SIGTERM and SIGINT are removed when the runtime exits."""
+    events = []
+    api_server = FakeRuntimeApiServer(events)
+    client = FakeRuntimeDiscordClient(events)
+    startup = SimpleNamespace(worker_task=None)
+    capture_service = FakeRuntimeCaptureService(events)
+
+    loop = asyncio.get_running_loop()
+
+    async def fire_sigterm():
+        await asyncio.sleep(0.01)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    asyncio.create_task(fire_sigterm())
+
+    await run_service_runtime(
+        api_task=asyncio.create_task(api_server.serve()),
+        discord_task=asyncio.create_task(client.start("token")),
+        api_server=api_server,
+        client=client,
+        startup=startup,
+        capture_service=capture_service,
+    )
+
+    assert not loop.remove_signal_handler(signal.SIGTERM)
+    assert not loop.remove_signal_handler(signal.SIGINT)
+
+
+@pytest.mark.asyncio
+async def test_runtime_record_stop_called_exactly_once_and_close_is_last():
+    """record_capture_service_stop fires exactly once and capture_service.close is the final action."""
+    events = []
+    api_server = FakeRuntimeApiServer(events, exits_immediately=True)
+    client = FakeRuntimeDiscordClient(events)
+    startup = SimpleNamespace(worker_task=None)
+    capture_service = FakeRuntimeCaptureService(events)
+
+    await run_service_runtime(
+        api_task=asyncio.create_task(api_server.serve()),
+        discord_task=asyncio.create_task(client.start("token")),
+        api_server=api_server,
+        client=client,
+        startup=startup,
+        capture_service=capture_service,
+        instance_id="unique-id",
+    )
+
+    assert len(capture_service.stop_calls) == 1
+    assert capture_service.stop_calls[0] == "unique-id"
+    assert events[-1] == "capture_service.close"
+
+
 class FakeChannel:
     def __init__(self):
         self.id = 200
@@ -623,6 +714,11 @@ class FakeRuntimeDiscordClient:
 class FakeRuntimeCaptureService:
     def __init__(self, events):
         self.events = events
+        self.stop_calls: list[str] = []
+
+    def record_capture_service_stop(self, *, instance_id: str, now) -> bool:
+        self.stop_calls.append(instance_id)
+        return True
 
     def close(self):
         self.events.append("capture_service.close")
