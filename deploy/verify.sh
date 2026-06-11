@@ -24,9 +24,14 @@ if [[ "$user" == "" || "$user" == "0" || "$user" == "root" ]]; then
   exit 1
 fi
 
-ports="$(docker inspect --format '{{json .NetworkSettings.Ports}}' "$CONTAINER")"
-if [[ "$ports" != *'"8000/tcp":null'* ]]; then
-  echo "internal API port appears to be published: $ports" >&2
+port_bindings="$(
+  docker inspect \
+    --format '{{json .HostConfig.PortBindings}}' \
+    "$CONTAINER"
+)"
+
+if [[ "$port_bindings" != "{}" && "$port_bindings" != "null" ]]; then
+  echo "host ports appear to be published: $port_bindings" >&2
   exit 1
 fi
 

@@ -63,16 +63,22 @@ def audit_events(vault_path):
 
 
 def ledger_rows(ledger):
-    return ledger._connection.execute("SELECT * FROM captures ORDER BY id").fetchall()
+    return ledger._runtime.read(
+        lambda conn: conn.execute("SELECT * FROM captures ORDER BY id").fetchall()
+    )
 
 
 def sqlite_dump(ledger):
-    return "\n".join(ledger._connection.iterdump())
+    return ledger._runtime.read(lambda conn: "\n".join(conn.iterdump()))
 
 
 def event_types(ledger, capture_id):
-    rows = ledger._connection.execute(
-        "SELECT event_type FROM capture_events WHERE capture_id = ? ORDER BY id",
-        (capture_id,),
-    ).fetchall()
-    return [row["event_type"] for row in rows]
+    return ledger._runtime.read(
+        lambda conn: [
+            row["event_type"]
+            for row in conn.execute(
+                "SELECT event_type FROM capture_events WHERE capture_id = ? ORDER BY id",
+                (capture_id,),
+            ).fetchall()
+        ]
+    )

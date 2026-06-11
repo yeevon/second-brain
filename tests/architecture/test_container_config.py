@@ -56,8 +56,27 @@ def test_compose_config_does_not_contain_real_secrets():
 
     assert "DISCORD_BOT_TOKEN=" not in serialized
     assert "CAPTURE_SERVICE_INTERNAL_TOKEN=" not in serialized
+
     env_files = compose["services"]["capture-service"]["env_file"]
-    assert any("capture-service" in f for f in env_files)
+
+    assert env_files == [
+        "${CAPTURE_SERVICE_ENV_FILE:?CAPTURE_SERVICE_ENV_FILE must be set}"
+    ]
+
+
+def test_compose_enforces_capture_only_container_runtime():
+    service = load_compose()["services"]["capture-service"]
+
+    assert service["environment"] == {
+        "CAPTURE_PROCESSING_MODE": "capture-only",
+        "CAPTURE_API_HOST": "0.0.0.0",
+        "CAPTURE_API_PORT": "8000",
+        "LEDGER_PATH": "/var/lib/second-brain/ledger.sqlite3",
+    }
+
+    assert service["volumes"] == [
+        "${CAPTURE_DATA_SOURCE:?CAPTURE_DATA_SOURCE must be set}:/var/lib/second-brain"
+    ]
 
 
 def test_dockerfile_runs_as_non_root_user():
@@ -81,6 +100,7 @@ def test_dockerignore_excludes_secrets_runtime_and_tests():
     assert ".env" in ignored
     assert ".env.*" in ignored
     assert "deploy/*.env" in ignored
+    assert "capture-service.local.env" in ignored
     assert ".runtime" in ignored
     assert "tests" in ignored
     assert "docs" in ignored

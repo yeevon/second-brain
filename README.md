@@ -12,6 +12,7 @@ Two explicit modes are supported via `CAPTURE_PROCESSING_MODE`:
 | --- | --- | --- |
 | `local-full` | Desktop | Capture → screen → persist → classify (Gemini) → file (Obsidian) → receipt |
 | `capture-only` | EC2 | Capture → screen → persist → receipt. Downstream filing disabled. |
+| `capture-only` | Local Docker | Same container image as EC2, validated locally via `deploy/local-up.sh`. |
 
 The mode must be set explicitly. Startup fails if it is missing or unsupported.
 
@@ -40,15 +41,21 @@ src/secondbrain/
   config.py           # settings and mode validation
   capture_service.py  # CaptureService facade — sole SQLite owner
   capture_api.py      # internal HTTP API route definitions
-  api_server.py       # internal API server lifecycle
+  api_server.py       # embedded Uvicorn server (EmbeddedUvicornServer)
   api_models.py       # internal API request/response models
   capture_models.py   # capture record and status types
   ledger.py           # SQLite repository (source of truth)
+  sqlite_runtime.py   # dedicated SQLite worker thread with bounded retries
+  migrations.py       # schema migrations applied at startup
+  delivery.py         # delivery attempt tracking and backoff
+  heartbeat.py        # periodic capture-service liveness signal
+  reaper.py           # stale-lease watchdog loop
+  status.py           # operational status snapshot and formatting
   classifier.py       # Gemini API call and response parsing
   vault_writer.py     # Markdown rendering and file writing
   worker.py           # background classifier worker loop
   receipts.py         # Discord receipt formatting and delivery
-  reconcile.py        # startup Discord history catch-up
+  reconcile.py        # startup and periodic Discord history catch-up
   discord_capture.py  # Discord client wiring
   secret_screen.py    # pre-persistence secret detection
   models.py           # Pydantic models
@@ -56,12 +63,16 @@ src/secondbrain/
   audit.py            # append-only audit log
 
 deploy/
-  container-entrypoint.sh   # EBS sentinel check before container start
-  provision-host.sh          # EC2 host setup
-  deploy.sh                  # build and start on EC2
-  verify.sh                  # post-deployment checks
+  container-entrypoint.sh        # EBS sentinel check before container start
+  provision-host.sh               # EC2 host setup
+  deploy.sh                       # build and start on EC2
+  verify.sh                       # post-deployment checks
+  local-up.sh                     # build, initialize named volume, and start locally
+  local-down.sh                   # stop the local container (volume preserved)
+  local-reset.sh                  # destroy and recreate the local named volume
+  test-container-packaging.sh     # container packaging regression suite
   capture-service.env.example
-  README.md                  # EC2 provisioning and deployment guide
+  README.md                       # EC2 provisioning and deployment guide
 ```
 
 ## Requirements
@@ -71,6 +82,7 @@ deploy/
 - A Discord bot token with Message Content Intent enabled
 - **`local-full` only:** a Gemini API key and an Obsidian vault directory
 - **`capture-only` (EC2):** Docker Engine and Docker Compose plugin
+- **`capture-only` (local validation):** Docker Desktop or Docker Engine with Compose plugin
 
 ## Setup — local-full (desktop)
 
@@ -137,6 +149,22 @@ Check status:
 uv run python -m secondbrain status
 ```
 
+## Setup — capture-only (local Docker validation)
+
+Use the managed local scripts to build and test the container without EC2:
+
+```bash
+cp .env.example .env           # fill in Discord credentials and internal token
+deploy/local-up.sh             # build image, create named volume, start container
+deploy/test-container-packaging.sh   # run the packaging regression suite
+deploy/local-down.sh           # stop container (volume preserved)
+deploy/local-reset.sh --confirm-delete-local-test-data   # wipe volume and start fresh
+```
+
+The named volume `second-brain-local-data` is managed by Docker. `local-up.sh` creates the EBS sentinel marker inside it automatically so the entrypoint check passes.
+
+`test-container-packaging.sh` runs four tests: Python version, environment override correctness, running-container invariants, and a clean SIGTERM shutdown. The SIGTERM test stops the container — run `deploy/local-up.sh` again before the next test cycle.
+
 ## Setup — capture-only (EC2)
 
 See [deploy/README.md](deploy/README.md) for the full EC2 provisioning, deployment, and verification guide.
@@ -184,3 +212,4 @@ Note filenames follow the pattern: `YYYY-MM-DD--CAPTURE_ID--sanitized-title.md`
 - If Gemini returns low-confidence results, the note goes to `00_inbox/` — never silently dropped.
 - The internal API is not published outside the container. Future services (n8n, writer-service) will reach it over the Compose bridge network.
 - The container entrypoint refuses to start if the EBS sentinel file is absent, preventing SQLite writes to the root filesystem after a failed EBS remount.
+- SIGTERM is owned by the outer runtime, not Uvicorn. The shutdown sequence records `capture_service_state = STOPPED` and closes SQLite before the process exits with code 0.

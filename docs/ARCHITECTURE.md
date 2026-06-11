@@ -1,8 +1,8 @@
 # Second Brain — Canonical Architecture & Build Plan
 
-**Status:** V2 production release candidate / implemented architecture  
-**Last updated:** 2026-06-16  
-**Revision:** V2 production release prep: writer-service vault ownership, n8n update-in-place bootstrap, Daily/Weekly vault-backed briefs, host Obsidian bind-mount validation, read-only MCP posture, and V3 proposal-only write boundary.  
+**Status:** Approved design, pre-build  
+**Last updated:** 2026-06-07  
+**Revision:** Runtime-hardening pass: Docker egress, SQLite write serialization, lease reaper, OS advisory Git lock, correction targeting, and digest labeling.  
 **Canonical document:** This file is the source of truth for implementation.  
 **Application repository:** `yeevon/second-brain`  
 **Vault repository:** private Git repository  
@@ -38,7 +38,7 @@ Classification is useful. Capture durability is mandatory.
 
 ## 2. Scope
 
-### 2.1 Version-one goals
+## 2.1 Version-one goals
 
 - Provide one capture surface across mobile, laptop, and desktop.
 - Acknowledge each accepted Discord message within a few seconds.
@@ -55,14 +55,13 @@ Classification is useful. Capture durability is mandatory.
 - Expose local search through a narrow, read-only MCP server.
 - Fail visibly and retry safely.
 
-### 2.2 Explicit non-goals for version one
+## 2.2 Explicit non-goals for version one
 
 Version one will not include:
 
 - Vector databases or embeddings.
 - A separate Bouncer LLM call.
 - Writable MCP tools.
-- Controlled LLM-assisted vault updates (deferred to V3; must use proposal/approval/apply semantics, not direct writable MCP tools).
 - Automatic attachment archiving.
 - Complex two-way Obsidian sync.
 - Redis, Kafka, or a distributed queue.
@@ -98,7 +97,7 @@ These are design decisions, not open questions.
 
 ## 4. Audit findings
 
-### 4.1 What was right in the original concept
+## 4.1 What was right in the original concept
 
 | Original choice | Verdict | Why it stays |
 |---|---|---|
@@ -113,7 +112,7 @@ These are design decisions, not open questions.
 | Daily and weekly review loops | Keep | They turn capture into a working review system. |
 | MCP query layer | Keep, but read-only | It enables local query access after the intake spine is stable. |
 
-### 4.2 Problems fixed by this architecture
+## 4.2 Problems fixed by this architecture
 
 ### Incorrect Discord-to-n8n edge
 
@@ -175,7 +174,7 @@ These rules must remain true as implementation evolves.
 12. **Clarification delays filing, not capture.**
 13. **GitHub is not the ledger and not the only backup.**
 14. **Local Obsidian is pull-only in version one.**
-15. **MCP is local and read-only in V1/V2. V3 may add proposal-only update tools, but direct vault mutation through MCP remains disallowed.**
+15. **MCP is local and read-only in version one.**
 16. **Any failed capture remains visible and retryable.**
 17. **Every stored derived note is traceable back to one capture ID.**
 18. **Every correction appends history rather than erasing history.**
@@ -260,7 +259,7 @@ fine-grained GitHub token scoped only to the private vault repository with minim
 
 ## 8. Component responsibilities
 
-### 8.1 Private Discord server
+## 8.1 Private Discord server
 
 ### Required channels
 
@@ -312,7 +311,7 @@ fix: file this under Learning, not Projects.
 
 ---
 
-### 8.2 `capture-service`
+## 8.2 `capture-service`
 
 ### Purpose
 
@@ -556,7 +555,7 @@ The SQLite transaction that creates a capture must guarantee uniqueness.
 
 ---
 
-### 8.3 SQLite capture ledger
+## 8.3 SQLite capture ledger
 
 ### Ownership
 
@@ -801,7 +800,7 @@ The stale-lease reaper must update a bounded batch in a short transaction, commi
 
 ---
 
-### 8.4 Minimal pre-persistence secret screen
+## 8.4 Minimal pre-persistence secret screen
 
 ### Location
 
@@ -855,7 +854,7 @@ anything unsuitable for Discord, GitHub, or an external LLM API
 
 ---
 
-### 8.5 n8n orchestration
+## 8.5 n8n orchestration
 
 ### Purpose
 
@@ -939,7 +938,7 @@ Before adding digest workflows, review this development-only setting. Remove it 
 
 ---
 
-### 8.6 Gemini structured classifier
+## 8.6 Gemini structured classifier
 
 ### Model
 
@@ -1012,7 +1011,7 @@ A model-provided confidence value is a routing heuristic, not a calibrated proba
 
 ---
 
-### 8.7 `writer-service`
+## 8.7 `writer-service`
 
 ### Purpose
 
@@ -1210,7 +1209,7 @@ notify user
 
 ---
 
-### 8.8 EC2-side vault clone and private Git repository
+## 8.8 EC2-side vault clone and private Git repository
 
 ### Roles
 
@@ -1266,7 +1265,7 @@ Review Obsidian exclusions deliberately before syncing settings across machines.
 
 ---
 
-### 8.9 Local Obsidian vault
+## 8.9 Local Obsidian vault
 
 ### Version-one rule
 
@@ -1294,9 +1293,9 @@ No future option changes the version-one rule.
 
 ---
 
-### 8.10 Receipt behavior
+## 8.10 Receipt behavior
 
-#### Immediate accepted receipt
+## Immediate accepted receipt
 
 Sent after SQLite persistence and before n8n classification:
 
@@ -1305,7 +1304,7 @@ Sent after SQLite persistence and before n8n classification:
 Your note is saved. Processing…
 ```
 
-#### Successful filing receipt
+## Successful filing receipt
 
 Edit the original receipt:
 
@@ -1316,14 +1315,14 @@ Type: task
 Tags: telemetry, websocket
 ```
 
-#### Inbox receipt
+## Inbox receipt
 
 ```text
 ⚠️ SB-20260607-0043 saved to 00_inbox.
 Question: Is this a HALO task or a general learning note?
 ```
 
-#### Sensitive rejection receipt
+## Sensitive rejection receipt
 
 ```text
 ⚠️ SB-20260607-0044 rejected.
@@ -1331,7 +1330,7 @@ The message appears to contain a credential or sensitive identifier.
 A redacted audit record was saved. The original text was not archived or sent to Gemini.
 ```
 
-#### Failed downstream receipt
+## Failed downstream receipt
 
 ```text
 ❌ SB-20260607-0045 captured but filing failed.
@@ -1339,7 +1338,7 @@ Your original note is safe. The system will retry.
 Error: Git push conflict.
 ```
 
-#### Attachment warning
+## Attachment warning
 
 ```text
 ⚠️ SB-20260607-0046 saved.
@@ -1348,7 +1347,7 @@ One attachment was detected but was not archived in version one.
 
 ---
 
-### 8.11 Correction flow
+## 8.11 Correction flow
 
 ### Trigger
 
@@ -1387,7 +1386,7 @@ flowchart TD
 
 ---
 
-### 8.12 Attachment policy
+## 8.12 Attachment policy
 
 ### Version one
 
@@ -1417,7 +1416,7 @@ Store attachments outside Git in S3-compatible object storage and reference them
 
 ---
 
-### 8.13 Scheduled digests
+## 8.13 Scheduled digests
 
 ### Runtime
 
@@ -1487,7 +1486,7 @@ Do not write suggested priorities back into the task ledger unless the user expl
 
 ---
 
-### 8.14 Local MCP server and Gemini CLI wrapper
+## 8.14 Local MCP server and Gemini CLI wrapper
 
 ### Build timing
 
@@ -1550,7 +1549,7 @@ last successful MCP query
 
 ## 9. Security requirements
 
-### 9.1 Network
+## 9.1 Network
 
 - Do not expose n8n port `5678` directly to the public internet.
 - Keep `capture-service`, n8n, and `writer-service` internal APIs on localhost or an un-published private Compose bridge network.
@@ -1597,7 +1596,7 @@ networks:
 
 Services on `backend` reach one another by Compose service name. Omitting a `ports:` mapping prevents host exposure while preserving normal outbound internet access for Discord Gateway and GitHub calls.
 
-### 9.2 n8n configuration
+## 9.2 n8n configuration
 
 - Persist the n8n data volume.
 - Set and securely store `N8N_ENCRYPTION_KEY`.
@@ -1605,7 +1604,7 @@ Services on `backend` reach one another by Compose service name. Omitting a `por
 - When using a reverse proxy, configure `WEBHOOK_URL`, `N8N_PROXY_HOPS`, and forwarded headers correctly.
 - Configure an Error Trigger workflow.
 
-### 9.3 Service isolation
+## 9.3 Service isolation
 
 - Store the Discord token only in `capture-service`.
 - Store Git write credentials only in `writer-service`.
@@ -1614,7 +1613,7 @@ Services on `backend` reach one another by Compose service name. Omitting a `por
 - Avoid mounting Git write credentials into n8n.
 - Avoid exposing internal service ports publicly.
 
-### 9.4 Backups
+## 9.4 Backups
 
 Back up:
 
@@ -1638,7 +1637,7 @@ weekly restore test or validation
 
 ## 10. Reliability requirements
 
-### 10.1 Idempotency
+## 10.1 Idempotency
 
 Use the Discord message ID as the unique idempotency key.
 
@@ -1656,7 +1655,7 @@ periodic reconciliation
 manual retry
 ```
 
-### 10.2 Retry behavior
+## 10.2 Retry behavior
 
 Use capped exponential backoff for transient failures.
 
@@ -1681,7 +1680,7 @@ notify user
 leave item manually retryable
 ```
 
-### 10.3 Dead-letter visibility
+## 10.3 Dead-letter visibility
 
 Do not silently abandon failed work.
 
@@ -1695,7 +1694,7 @@ next retry time
 manual retry action
 ```
 
-### 10.4 Catch-up and reconciliation
+## 10.4 Catch-up and reconciliation
 
 - Run mandatory startup catch-up.
 - Run a bounded periodic reconciliation scan.
@@ -1708,7 +1707,7 @@ manual retry action
 
 ## 11. Observability
 
-### 11.1 Required event data
+## 11.1 Required event data
 
 Log:
 
@@ -1729,7 +1728,7 @@ last error
 timestamps
 ```
 
-### 11.2 Health endpoints
+## 11.2 Health endpoints
 
 ```text
 capture-service GET /health
@@ -1737,7 +1736,7 @@ writer-service  GET /health
 n8n health endpoint
 ```
 
-### 11.3 Operational status command
+## 11.3 Operational status command
 
 The `secondbrain status` command reads the local ledger and prints a structured status report. It does not require Discord or Gemini credentials.
 
@@ -1781,7 +1780,7 @@ Capture-service health values:
 
 Future fields (not yet implemented): writer-service health, n8n health, last successful Git push, last successful backup.
 
-### 11.4 Human-readable vault audit log
+## 11.4 Human-readable vault audit log
 
 Append:
 
@@ -1853,7 +1852,7 @@ Do not commit `.env`, tokens, or runtime SQLite files.
 
 ## 13. Build plan
 
-### Phase 0 — Secure the EC2 foundation
+## Phase 0 — Secure the EC2 foundation
 
 ### Build
 
@@ -1878,7 +1877,7 @@ Do not commit `.env`, tokens, or runtime SQLite files.
 
 ---
 
-### Phase 1 — Build the durable capture spine
+## Phase 1 — Build the durable capture spine
 
 ### Build
 
@@ -1924,7 +1923,7 @@ Do not commit `.env`, tokens, or runtime SQLite files.
 
 ---
 
-### Phase 2 — Build n8n classification orchestration
+## Phase 2 — Build n8n classification orchestration
 
 ### Build
 
@@ -1951,7 +1950,7 @@ Do not commit `.env`, tokens, or runtime SQLite files.
 
 ---
 
-### Phase 3 — Build deterministic rendering and serialized Git writes
+## Phase 3 — Build deterministic rendering and serialized Git writes
 
 ### Build
 
@@ -1986,7 +1985,7 @@ Do not commit `.env`, tokens, or runtime SQLite files.
 
 ---
 
-### Phase 4 — Build receipt updates, corrections, and backup
+## Phase 4 — Build receipt updates, corrections, and backup
 
 ### Build
 
@@ -2020,7 +2019,7 @@ Do not commit `.env`, tokens, or runtime SQLite files.
 
 ---
 
-### Phase 5 — Build scheduled digests
+## Phase 5 — Build scheduled digests
 
 ### Prerequisite
 
@@ -2046,7 +2045,7 @@ Do not commit `.env`, tokens, or runtime SQLite files.
 
 ---
 
-### Phase 6 — Build local pull wrapper and read-only MCP
+## Phase 6 — Build local pull wrapper and read-only MCP
 
 ### Build
 
@@ -2178,232 +2177,3 @@ Version one is complete only when:
 - [SQLite write-ahead logging](https://www.sqlite.org/wal.html)
 - [SQLite busy timeout pragma](https://www.sqlite.org/pragma.html#pragma_busy_timeout)
 - [Linux `flock(2)` manual page](https://man7.org/linux/man-pages/man2/flock.2.html)
-
-## V3 Extension — Controlled LLM-Assisted Vault Updates
-
-### Purpose
-
-Version three may allow LLM clients to help update the vault, but only through a controlled proposal, review, and apply flow.
-
-The goal is not to give an LLM direct write access to Markdown files. The goal is to let an LLM identify useful updates, propose structured changes, and route those changes through the same controlled vault mutation boundary used by the rest of the system.
-
-In V1/V2, the local MCP server remains read-only. Writable MCP tools are explicitly out of scope until the proposal/approval/apply model exists.
-
-### Problem being solved
-
-The read-only MCP server lets an LLM answer questions from the vault, but it cannot safely maintain the vault.
-
-Useful future operations include:
-
-- Mark a task complete.
-- Add or change a due date.
-- Add priority metadata.
-- Link a note to a project.
-- Move a note from inbox to a better folder.
-- Append a follow-up action.
-- Add a weekly review outcome.
-- Create a new planning note from user-approved content.
-
-These operations are valuable, but unsafe if exposed as raw file edits.
-
-### Core rule
-
-LLMs must not directly mutate vault files.
-
-All LLM-assisted writes must follow this path:
-
-```text
-LLM reads vault through read-only MCP
-    ↓
-LLM proposes a structured vault change
-    ↓
-proposal is validated by schema and policy
-    ↓
-human approval is required
-    ↓
-writer-service applies the change under lock
-    ↓
-Git commit records the mutation
-    ↓
-audit trail links proposal, approval, changed file, and commit
-```
-
-### New V3 components
-
-#### vault-update-proposal
-
-A structured change request generated by an LLM or by a UI/Discord command.
-
-A proposal is data, not executable code.
-
-Example:
-
-```json
-{
-  "proposal_id": "VUP-20260616-0001",
-  "source": "local_mcp",
-  "requested_by": "user",
-  "operation": "mark_task_done",
-  "target_note_path": "20_projects/second-brain/example.md",
-  "target_anchor": {
-    "capture_id": "SB-20260615-0005",
-    "task_text": "Expose second brain to local MCP server"
-  },
-  "change": {
-    "status": "done",
-    "completed_at": "2026-06-16",
-    "completion_note": "Validated local MCP read access."
-  },
-  "reason": "User stated this task is complete.",
-  "requires_approval": true
-}
-```
-
-#### vault-update-service
-
-A V3 internal service or writer-service extension responsible for validating and applying approved proposals.
-
-It must:
-
-- Reject path traversal.
-- Reject hidden paths.
-- Reject unsupported file types.
-- Reject raw full-file rewrites unless explicitly allowed.
-- Validate operation-specific schemas.
-- Verify the target note still exists.
-- Verify the target anchor still matches before mutation.
-- Apply changes under the existing writer lock.
-- Commit changes to Git.
-- Return changed path, commit hash, and audit record.
-
-#### approval surface
-
-At least one approval surface must exist before write tools are enabled.
-
-Acceptable approval surfaces:
-
-- Discord approval flow.
-- Local CLI approval.
-- Obsidian-side review file.
-- Web UI later, if added.
-
-The approval surface must show:
-
-- Target file.
-- Proposed operation.
-- Before/after summary.
-- Risk level.
-- Whether the operation changes task status, due date, folder, or content.
-
-### Allowed V3 operations
-
-Initial writable operations should be narrow.
-
-Allowed first:
-
-- `mark_task_done`
-- `mark_task_open`
-- `set_task_due_date`
-- `set_task_priority`
-- `append_task`
-- `append_note_section`
-- `move_note_to_folder`
-- `add_project_tag`
-- `add_weekly_review_entry`
-
-Not allowed initially:
-
-- `delete_note`
-- `overwrite_note`
-- `rewrite_note_body`
-- `bulk_edit`
-- `git_reset`
-- `git_push_direct`
-- `modify_raw_capture`
-- `modify_audit_history`
-
-### Updated MCP posture
-
-The default MCP server remains read-only.
-
-A separate V3 write-capable MCP profile may be added later, but it must expose proposal tools only.
-
-Allowed V3 MCP proposal tools:
-
-- `propose_task_completion`
-- `propose_due_date_change`
-- `propose_priority_change`
-- `propose_note_move`
-- `propose_task_append`
-- `propose_review_entry`
-- `list_pending_update_proposals`
-- `read_update_proposal`
-
-Disallowed MCP tools:
-
-- `write_note`
-- `delete_note`
-- `replace_note`
-- `move_note_directly`
-- `git_commit`
-- `git_push`
-- `shell`
-
-The MCP client may propose changes, but it may not apply them.
-
-### Approval and apply flow
-
-To be defined when V3 begins.
-
-### V3 design invariants
-
-Add these to the system invariants when V3 begins:
-
-- LLM clients may propose vault updates, but may not directly write vault files.
-- All approved vault mutations still go through writer-service or a dedicated update service using the same Git lock.
-- Every LLM-proposed update must be schema-validated before approval.
-- Every approved update must produce an audit record.
-- Every applied update must produce a Git commit.
-- The raw capture ledger is never modified by LLM tooling.
-- The approval UI must show the intended target and before/after effect before applying.
-- Rejected proposals are retained for audit but never applied.
-- Bulk edits are disabled until single-note update behavior is proven.
-- The read-only MCP profile remains the default.
-
-### Security constraints
-
-The V3 write path must defend against:
-
-- Prompt injection inside vault notes.
-- LLM hallucinated file paths.
-- LLM marking tasks complete based on implication instead of explicit user confirmation.
-- Accidental edits to archived notes.
-- Hidden file or `.git` access.
-- Broad regex replacements.
-- Silent movement of notes between folders.
-- Update races against human Obsidian edits.
-
-### Completion rule
-
-An LLM may only propose a task completion when one of these is true:
-
-- The user explicitly says the task is done.
-- The target note already contains an explicit `done:` or equivalent completion marker.
-- The user approves a proposal that clearly marks the task complete.
-
-The system must not infer completion from casual prose.
-
-### V3 acceptance criteria
-
-V3 is not complete until:
-
-- Read-only MCP remains available and unchanged.
-- Proposal tools cannot mutate files directly.
-- At least one approval surface exists.
-- Approved proposals are applied only by writer-service/update-service.
-- Every applied proposal creates a Git commit.
-- Every proposal has an audit trail.
-- Rejected proposals do not change the vault.
-- Tests prove unsupported operations are rejected.
-- Tests prove path traversal and hidden paths are rejected.
-- Tests prove stale anchors are rejected.
