@@ -147,49 +147,27 @@ Never commit the real Discord bot token or internal API token.
 From `/opt/second-brain/app`:
 
 ```bash
-docker compose config
-docker compose build
-docker compose up -d
-docker compose ps
-docker compose logs --tail=200 capture-service
+deploy/deploy.sh
 ```
 
-Expected log lines include:
-
-```text
-capture-service runtime mode: capture-only
-downstream processing: disabled
-capture-service API started on internal container port 8000
-startup Discord history reconciliation complete
-Discord listener ready
-```
+`deploy/deploy.sh` exports `CAPTURE_SERVICE_ENV_FILE`, `CAPTURE_DATA_SOURCE`, and `COMPOSE_FILE=compose.yaml`, then verifies the EBS mount and sentinel before building and starting the container.
 
 ## Verify
-
-Run:
 
 ```bash
 deploy/verify.sh
 ```
 
-Check the internal health endpoint from inside the container:
+`deploy/verify.sh` confirms container running, `unless-stopped` restart policy, non-root user, port 8000 not published to host, sentinel present, ledger present, and container health `healthy`.
+
+Expected output: `capture-service deployment checks passed`.
+
+For subsequent direct `docker compose` operations in this shell:
 
 ```bash
-docker compose exec -T capture-service \
-  /app/.venv/bin/python -c \
-  "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read().decode())"
-```
-
-Confirm the API is not published to the host:
-
-```bash
-docker inspect --format '{{json .NetworkSettings.Ports}}' second-brain-capture-service
-```
-
-Expected shape:
-
-```json
-{"8000/tcp":null}
+export CAPTURE_SERVICE_ENV_FILE=/opt/second-brain/config/capture-service.env
+export CAPTURE_DATA_SOURCE=/opt/second-brain/data
+export COMPOSE_FILE=compose.yaml
 ```
 
 ## Manual Acceptance Checks
@@ -197,7 +175,7 @@ Expected shape:
 1. Stop the desktop listener and confirm `pgrep -af "secondbrain"` does not show a local listener.
 2. Post a phone message to the capture channel and confirm the durable-capture receipt appears from EC2.
 3. Confirm `/opt/second-brain/data/ledger.sqlite3` exists after the first capture.
-4. Run `docker compose down && docker compose up -d` and confirm the prior capture remains in SQLite.
+4. Run `deploy/deploy.sh` (redeploy) and confirm the prior capture remains in SQLite.
 5. Reboot EC2, then confirm Docker restarts the container and a second phone capture works.
-6. Stop the container, post a message, start the container, and confirm startup reconciliation persists it once.
+6. Stop the container (`docker compose stop capture-service`), post a message, run `deploy/deploy.sh`, and confirm startup reconciliation persists it once.
 7. Post a test-only fake secret and confirm the plaintext value is absent from the SQLite dump.

@@ -418,10 +418,10 @@ wait until previous pass finishes
     ↓
 open short SQLite transaction
     ↓
-claim expired FORWARDED or CLASSIFYING rows conditionally
-increment delivery_attempts
+claim expired FORWARDING, FORWARDED, or CLASSIFYING rows conditionally
+increment retry_attempts (shared counter across both failure paths)
 clear expired lease
-calculate next_attempt_at
+calculate next_attempt_at using capped exponential backoff
 append REQUEUED_STALE_LEASE event
     ↓
 if retry cap exceeded:
@@ -431,12 +431,79 @@ if retry cap exceeded:
     ↓
 commit transaction
     ↓
-perform HTTP forwarding and Discord alert calls outside the transaction
+perform Discord alert calls outside the transaction
     ↓
 sleep 30–60 seconds
 ```
 
 The reaper must never use a naive `setInterval` loop that can start a second pass before the first pass finishes. It must also never retry a permanently stuck capture forever.
+
+#### Retry counters
+
+Two independent counters track delivery history:
+
+| Counter | Meaning | When incremented |
+| --- | --- | --- |
+| `delivery_attempts` | Number of times the dispatcher claimed a delivery generation | On every successful `claim_due_deliveries` |
+| `retry_attempts` | Accumulated retry events across both failure paths | On every `schedule_retry` (webhook failure) or stale-lease reap |
+
+`retry_attempts` is the authoritative counter for cap checks and backoff calculations. Both the webhook-failure path and the stale-lease reaper increment the same counter so that mixed failure modes reach one consistent cap.
+
+Example: one webhook failure followed by one stale-lease reap produces `retry_attempts == 2`, regardless of how many `delivery_attempts` exist.
+
+#### Startup independence from Discord connectivity
+
+The reaper watchdog is a SQLite-only background loop. It must start at `capture-service` initialization, not inside the Discord `on_ready` callback.
+
+Correct startup sequence:
+
+```text
+CaptureService opens SQLite
+    ↓
+Discord receipt client object attached
+    ↓
+stale-lease reaper task created
+    ↓
+capture-service API task starts
+    ↓
+Discord client task starts
+    ↓
+on_ready fires (eventually or never)
+    ↓
+startup reconciliation runs inside on_ready callback
+    ↓
+ensure_stale_lease_reaper_task called again as a dead-task restart guard
+```
+
+The reaper must keep running if:
+
+- Discord is unavailable at startup
+- `on_ready` never fires
+- Startup reconciliation raises an exception
+
+Discord receipt edits (after requeue or terminal failure) are always best-effort: they happen outside the SQLite transaction and after the transaction commits. A receipt-edit failure must not roll back, abort, or prevent the reaper from continuing.
+
+#### Manual retry CLI
+
+Operators can manually re-queue a terminally failed capture:
+
+```bash
+secondbrain retry SB-YYYYMMDD-NNNN
+```
+
+Exit codes:
+
+- `0` — retry was queued; capture moved from `FAILED` to `RETRY_WAIT`
+- `1` — rejected; either the capture ID does not exist or the capture is not in terminal `FAILED` state
+
+Rejection messages go to `stderr`. The queued confirmation goes to `stdout`.
+
+Metadata log events emitted:
+
+- `manual_retry_requested` — capture was successfully re-queued
+- `manual_retry_rejected` with `reason=capture_not_found` or `reason=invalid_state`
+
+The manual retry resets `retry_attempts` to zero so the capture gets a full fresh retry budget.
 
 ### Internal API
 
@@ -445,18 +512,30 @@ Bind this API to localhost or the private Docker network only.
 ```text
 GET  /health
 GET  /internal/captures/:capture_id
-POST /internal/captures/:capture_id/mark-forwarded
-POST /internal/captures/:capture_id/mark-classifying
-POST /internal/captures/:capture_id/mark-filed
-POST /internal/captures/:capture_id/mark-inbox
-POST /internal/captures/:capture_id/mark-failed
-POST /internal/captures/:capture_id/mark-corrected
-POST /internal/captures/:capture_id/retry
+
+POST /internal/captures/:capture_id/delivery/acknowledge-forwarded
+POST /internal/captures/:capture_id/delivery/acknowledge-classifying
+POST /internal/captures/:capture_id/delivery/renew-lease
+POST /internal/captures/:capture_id/delivery/acknowledge-filed
+POST /internal/captures/:capture_id/delivery/acknowledge-inbox
+POST /internal/captures/:capture_id/delivery/schedule-retry
+POST /internal/captures/:capture_id/delivery/acknowledge-failed
+
 POST /internal/receipts/:capture_id/edit
-POST /internal/clarifications/:capture_id
 ```
 
-All state-changing endpoints require an internal shared-secret header.
+All internal routes except `/health` require the shared-secret header.
+
+Every downstream delivery callback carries the current `delivery_attempt` generation.
+Capture-service rejects stale or invalid callback generations without allowing state regression.
+
+Manual retry is intentionally exposed through the operator CLI:
+
+```bash
+uv run python -m secondbrain retry SB-YYYYMMDD-NNNN
+```
+
+It is not exposed through a legacy unaudited HTTP `/retry` route.
 
 ### Capture IDs
 
@@ -642,6 +721,58 @@ Python:
     queued mutation commands
     short transactions
     no network I/O inside the worker transaction
+```
+
+#### Python implementation — `SQLiteRuntime`
+
+`capture-service` implements this through a dedicated `SQLiteRuntime` worker:
+
+```text
+Discord handler / classifier worker / status command
+    ↓
+Ledger repository method
+    ↓
+SQLiteRuntime.write(operation) or SQLiteRuntime.read(operation)
+    ↓
+bounded job queue (Queue(maxsize=SQLITE_JOB_QUEUE_MAXSIZE))
+    ↓
+single SQLite worker thread
+    ↓
+single worker-owned SQLite connection (WAL, foreign_keys=ON, busy_timeout configured)
+```
+
+**Invariant:** A saved receipt is sent only after the insert transaction commits and the row is externally visible from a separate SQLite connection.
+
+**Invariant:** No Discord call, Gemini call, or network request of any kind is made while a database write transaction is open.
+
+If an operation encounters `SQLITE_BUSY` or `SQLITE_LOCKED`, it retries with bounded exponential backoff (configurable via `SQLITE_BUSY_RETRY_ATTEMPTS` and `SQLITE_BUSY_RETRY_BASE_DELAY_MS`). After the retry budget is exhausted, `SQLiteBusyError` is raised — the service does not claim the note was saved.
+
+Startup sequence:
+```text
+SQLiteRuntime starts worker thread
+    ↓
+worker thread creates connection with WAL + foreign_keys + busy_timeout
+    ↓
+worker thread verifies PRAGMAs
+    ↓
+worker thread runs versioned migrations
+    ↓
+runtime signals ready
+    ↓
+Discord listener starts accepting messages
+```
+
+Migration sequence:
+```text
+create schema_migrations table (IF NOT EXISTS)
+    ↓
+read applied version numbers
+    ↓
+apply missing migrations in ascending order
+    ↓
+record each completed version
+    ↓
+accept normal jobs
 ```
 
 For every database connection:
@@ -1605,26 +1736,49 @@ writer-service  GET /health
 n8n health endpoint
 ```
 
-## 11.3 Required status view
+## 11.3 Operational status command
 
-Provide a small operational status command or report:
+The `secondbrain status` command reads the local ledger and prints a structured status report. It does not require Discord or Gemini credentials.
+
+```bash
+secondbrain status
+```
+
+Exit codes:
+
+| Code | Meaning                                                                                        |
+|------|------------------------------------------------------------------------------------------------|
+| `0`  | Healthy — no operator attention needed                                                         |
+| `1`  | Operator attention — any non-`HEALTHY` capture-service state, stale leases, or failed captures |
+| `2`  | Database unavailable — ledger file does not exist or cannot be opened                          |
+
+Inbox-only captures do not trigger exit code 1; they are a normal operating state.
+
+**Read-only guarantee.** The status reader opens SQLite with `mode=ro` and `PRAGMA query_only = ON`. It never runs migrations, writes to `system_state`, or modifies any row.
+
+Output sections:
 
 ```text
-captures received today
-captures filed today
-captures in inbox
-captures awaiting clarification
-captures rejected as sensitive
-captures failed
-captures waiting for retry
-stale leases
-last successful Git push
-last successful backup
-last successful digest
-capture-service health
-writer-service health
-n8n health
+Capture intake         — ledger path, vault path, total captures, received today, sensitive rejections
+Note lifecycle         — filed today, in inbox, failed, last vault write
+Delivery backlog       — waiting for retry, stale leases
+Discord reconciliation — last message ID, last reconciliation timestamp and mode
+Capture service        — health, state, instance ID, started at, last heartbeat, stopped at
 ```
+
+Capture-service health values:
+
+| Value      | Meaning                                                               |
+|------------|-----------------------------------------------------------------------|
+| `HEALTHY`  | State is `RUNNING` and heartbeat arrived within the stale threshold   |
+| `STARTING` | State is `STARTING` and heartbeat is recent                           |
+| `STOPPED`  | State is `STOPPED` (graceful shutdown)                                |
+| `STALE`    | State is `RUNNING` or `STARTING` but heartbeat is old or missing      |
+| `UNKNOWN`  | No state has ever been written                                        |
+
+**Heartbeat lifecycle.** Both `local-full` and `capture-only` runtimes write an instance ID and `STARTING` state at boot, then begin periodic heartbeat writes. The service transitions to `RUNNING` only after startup reconciliation completes and the mode-specific background tasks are initialized. On shutdown the `STOPPED` state is written. All lifecycle writes are conditional on the current instance ID to prevent a superseded process from overwriting a freshly started replacement.
+
+Future fields (not yet implemented): writer-service health, n8n health, last successful Git push, last successful backup.
 
 ## 11.4 Human-readable vault audit log
 
