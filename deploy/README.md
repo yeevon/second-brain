@@ -115,6 +115,15 @@ findmnt /opt/second-brain/data
 sudo chown -R 10001:10001 /opt/second-brain/data
 ```
 
+Only after `findmnt` confirms the EBS filesystem is mounted, create the n8n data subdirectory on the EBS volume (n8n container runs as UID 1000):
+
+```bash
+sudo mkdir -p /opt/second-brain/data/n8n
+sudo chown -R 1000:1000 /opt/second-brain/data/n8n
+```
+
+Do not create this directory before the EBS mount is confirmed. If created on the root filesystem first, the mount point hides it and `deploy/deploy.sh` will exit with `n8n data directory missing`.
+
 Only after `findmnt` confirms the EBS filesystem is mounted, create the sentinel file on the EBS volume:
 
 ```bash
