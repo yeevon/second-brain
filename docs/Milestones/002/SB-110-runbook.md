@@ -59,21 +59,18 @@ Expected: all tests pass.
 
 ## Step 3 — Local Docker regression
 
+Local testing uses `compose.local.yaml` with a Docker-managed named volume so the procedure works under Docker Desktop on any platform. The EC2 bind-mount path (`/opt/second-brain/data`) is not used locally.
+
 ### 3a — Prepare a disposable local environment
 
-Create a temporary data directory and set the three shell variables used throughout the Docker steps:
+Create the local env file. Do not commit it — it holds real Discord tokens.
 
 ```bash
-export CAPTURE_DATA_DIR=/tmp/sb-local-docker/data
-export CAPTURE_SERVICE_ENV_FILE=/tmp/sb-local-docker/capture-service.env
-export HOST_LEDGER=$CAPTURE_DATA_DIR/ledger.sqlite3
-
-mkdir -p "$CAPTURE_DATA_DIR"
-cp deploy/capture-service.env.example "$CAPTURE_SERVICE_ENV_FILE"
-chmod 600 "$CAPTURE_SERVICE_ENV_FILE"
+cp deploy/capture-service.env.example capture-service.local.env
+chmod 600 capture-service.local.env
 ```
 
-Edit `$CAPTURE_SERVICE_ENV_FILE` and fill in the required values:
+Edit `capture-service.local.env` and fill in the required values:
 
 ```text
 DISCORD_BOT_TOKEN=<real bot token>
@@ -83,19 +80,29 @@ DISCORD_ALLOWED_USER_ID=<real user ID>
 CAPTURE_SERVICE_INTERNAL_TOKEN=<output of: openssl rand -hex 32>
 ```
 
-Create the EBS sentinel marker and set container-user ownership:
+Set the three shell helpers used throughout the Docker steps:
 
 ```bash
-touch "$CAPTURE_DATA_DIR/.second-brain-ebs-volume"
-sudo chown -R 10001:10001 "$CAPTURE_DATA_DIR"
+export CAPTURE_SERVICE_ENV_FILE=./capture-service.local.env
+export COMPOSE="docker compose -f compose.yaml -f compose.local.yaml"
+export LEDGER=/var/lib/second-brain/ledger.sqlite3
+```
+
+Create and initialize the named volume with the EBS sentinel and correct ownership:
+
+```bash
+docker run --rm \
+  -v second-brain-local-data:/data \
+  busybox \
+  sh -c 'touch /data/.second-brain-ebs-volume && chown -R 10001:10001 /data'
 ```
 
 Build the image, start the container, and wait for it to pass the Compose health check:
 
 ```bash
-docker compose config >/dev/null
-docker compose build
-docker compose up -d
+$COMPOSE config >/dev/null
+$COMPOSE build
+$COMPOSE up -d
 
 health=""
 
@@ -116,7 +123,7 @@ done
 
 test "$health" = "healthy"
 
-docker compose ps
+$COMPOSE ps
 ```
 
 Expected: `second-brain-capture-service` shows `Up` and the health loop exits with `healthy`.
@@ -124,7 +131,7 @@ Expected: `second-brain-capture-service` shows `Up` and the health loop exits wi
 Check the internal health endpoint from inside the container:
 
 ```bash
-docker compose exec -T capture-service \
+$COMPOSE exec -T capture-service \
   /app/.venv/bin/python -c \
   "import urllib.request; print(
       urllib.request.urlopen(
@@ -148,16 +155,12 @@ Expected: `{"8000/tcp":null}`
 
 ### 3b — Open three monitoring terminals
 
-Open three separate terminals with `CAPTURE_DATA_DIR` and `HOST_LEDGER` exported, then run one watch in each. Do not print note text.
+Open three separate terminals with `COMPOSE` and `LEDGER` exported, then run one watch in each. Do not print note text.
 
 **Terminal 1 — captures (metadata only):**
 
 ```bash
-watch -n 5 "
-sqlite3 '$HOST_LEDGER' \"
-.headers on
-.mode column
-
+watch -n 5 "$COMPOSE exec -T capture-service sqlite3 -header -column $LEDGER '
 SELECT
   capture_id,
   discord_message_id,
@@ -170,21 +173,19 @@ SELECT
   updated_at
 FROM captures
 ORDER BY id DESC
-LIMIT 10;
-\"
-"
+LIMIT 10;'"
 ```
 
 **Terminal 2 — capture_events:**
 
 ```bash
-watch -n 5 "sqlite3 '$HOST_LEDGER' 'SELECT id, capture_id, event_type, created_at FROM capture_events ORDER BY id DESC LIMIT 10;'"
+watch -n 5 "$COMPOSE exec -T capture-service sqlite3 -header -column $LEDGER 'SELECT id, capture_id, event_type, created_at FROM capture_events ORDER BY id DESC LIMIT 10;'"
 ```
 
 **Terminal 3 — system_state:**
 
 ```bash
-watch -n 5 "sqlite3 '$HOST_LEDGER' 'SELECT key, value, updated_at FROM system_state;'"
+watch -n 5 "$COMPOSE exec -T capture-service sqlite3 -header -column $LEDGER 'SELECT key, value, updated_at FROM system_state;'"
 ```
 
 ### 3c — Discord capture test
@@ -199,7 +200,7 @@ Confirm within 60 seconds:
 Confirm in logs:
 
 ```bash
-docker compose logs --tail=50 capture-service
+$COMPOSE logs --tail=50 capture-service
 ```
 
 Expected: `{"event":"capture_received",...}` log line, no error events.
@@ -221,10 +222,7 @@ password=TEST_ONLY_FAKE_SECRET_123456
 Query the ledger to confirm the capture was rejected cleanly:
 
 ```bash
-sqlite3 "$HOST_LEDGER" "
-.headers on
-.mode column
-
+$COMPOSE exec -T capture-service sqlite3 -header -column "$LEDGER" "
 SELECT
   capture_id,
   status,
@@ -233,8 +231,7 @@ SELECT
   instr(redacted_text, '[REDACTED]') > 0 AS redaction_present
 FROM captures
 ORDER BY id DESC
-LIMIT 1;
-"
+LIMIT 1;"
 ```
 
 Expected:
@@ -249,7 +246,7 @@ redaction_present = 1
 Confirm the fake value is absent from container logs:
 
 ```bash
-if docker compose logs capture-service | \
+if $COMPOSE logs capture-service | \
   grep -Fq "TEST_ONLY_FAKE_SECRET_123456"; then
   echo "FAIL: plaintext found in logs" >&2
   false
@@ -258,15 +255,15 @@ else
 fi
 ```
 
-Confirm it is absent from all mounted database files (including WAL):
+Confirm it is absent from all database files in the volume (including WAL):
 
 ```bash
-if grep -R -a -Fq "TEST_ONLY_FAKE_SECRET_123456" \
-  "$CAPTURE_DATA_DIR"; then
-  echo "FAIL: plaintext found in data directory" >&2
+if $COMPOSE exec -T capture-service \
+  grep -r -a -Fq "TEST_ONLY_FAKE_SECRET_123456" /var/lib/second-brain; then
+  echo "FAIL: plaintext found in data volume" >&2
   false
 else
-  echo "PASS: plaintext absent from data directory"
+  echo "PASS: plaintext absent from data volume"
 fi
 ```
 
@@ -277,7 +274,7 @@ Expected: both checks print `PASS`.
 Run the status command from inside the running container:
 
 ```bash
-docker compose exec -T capture-service \
+$COMPOSE exec -T capture-service \
   /app/.venv/bin/python -m secondbrain status
 echo "exit code: $?"
 ```
@@ -295,15 +292,15 @@ Expected exit codes:
 Record the current capture count:
 
 ```bash
-sqlite3 "$HOST_LEDGER" "SELECT COUNT(*) FROM captures;"
+$COMPOSE exec -T capture-service sqlite3 "$LEDGER" "SELECT COUNT(*) FROM captures;"
 ```
 
-Stop and remove the container while keeping the bind-mounted data directory:
+Stop and remove the container while keeping the named data volume:
 
 ```bash
-docker compose stop capture-service
-docker compose rm -f capture-service
-docker compose up -d capture-service
+$COMPOSE stop capture-service
+$COMPOSE rm -f capture-service
+$COMPOSE up -d capture-service
 ```
 
 Confirm after restart:
@@ -311,20 +308,20 @@ Confirm after restart:
 1. Container is `Up`:
 
    ```bash
-   docker compose ps
+   $COMPOSE ps
    ```
 
 2. Status command returns HEALTHY with a new instance ID:
 
    ```bash
-   docker compose exec -T capture-service \
+   $COMPOSE exec -T capture-service \
      /app/.venv/bin/python -m secondbrain status
    ```
 
 3. Total captures matches the count before recreation:
 
    ```bash
-   sqlite3 "$HOST_LEDGER" "SELECT COUNT(*) FROM captures;"
+   $COMPOSE exec -T capture-service sqlite3 "$LEDGER" "SELECT COUNT(*) FROM captures;"
    ```
 
 ### 3g — Offline reconciliation
@@ -332,7 +329,7 @@ Confirm after restart:
 Stop the running container:
 
 ```bash
-docker compose stop capture-service
+$COMPOSE stop capture-service
 ```
 
 Post one normal Discord thought from your phone while the container is stopped.
@@ -342,23 +339,22 @@ Note the Discord message ID of that message.
 Restart the container:
 
 ```bash
-docker compose up -d capture-service
+$COMPOSE up -d capture-service
 ```
 
 Wait until the service is healthy:
 
 ```bash
-docker compose ps
+$COMPOSE ps
 ```
 
 Verify exactly one row for the offline message:
 
 ```bash
-sqlite3 "$HOST_LEDGER" "
+$COMPOSE exec -T capture-service sqlite3 "$LEDGER" "
 SELECT COUNT(*)
 FROM captures
-WHERE discord_message_id = '<offline-message-id>';
-"
+WHERE discord_message_id = '<offline-message-id>';"
 ```
 
 Expected: `1`
@@ -366,7 +362,7 @@ Expected: `1`
 Confirm in logs that startup reconciliation processed it:
 
 ```bash
-docker compose logs --tail=100 capture-service | \
+$COMPOSE logs --tail=100 capture-service | \
   grep -A 4 "startup Discord history reconciliation complete"
 ```
 
@@ -380,20 +376,19 @@ No duplicate receipt in Discord.
 
 ### 3h — Missing-volume fail-closed behavior
 
-Create a clean directory that has no sentinel file:
+Create a fresh named volume with no sentinel file:
 
 ```bash
-rm -rf /tmp/sb-local-docker/invalid-data
-mkdir -p /tmp/sb-local-docker/invalid-data
+docker volume create second-brain-invalid-data
 ```
 
-Run the image with that directory mounted:
+Run the image with that volume mounted:
 
 ```bash
 set +e
 
 docker run --rm \
-  --mount type=bind,src=/tmp/sb-local-docker/invalid-data,dst=/var/lib/second-brain \
+  -v second-brain-invalid-data:/var/lib/second-brain \
   --env-file "$CAPTURE_SERVICE_ENV_FILE" \
   second-brain-capture-service:local
 
@@ -411,31 +406,38 @@ Expected: `exit code: 1`, with the message:
 persistent EBS volume marker missing: /var/lib/second-brain/.second-brain-ebs-volume
 ```
 
-Confirm no SQLite database was created in the invalid directory:
+Confirm no SQLite database was created in the invalid volume:
 
 ```bash
-if test -e /tmp/sb-local-docker/invalid-data/ledger.sqlite3; then
-  echo "FAIL: ledger found in invalid directory" >&2
+if docker run --rm \
+  -v second-brain-invalid-data:/data \
+  busybox \
+  test -e /data/ledger.sqlite3; then
+  echo "FAIL: ledger found in invalid volume" >&2
   false
 else
   echo "PASS: no ledger created"
 fi
 ```
 
-Expected: `PASS: no ledger created`
+Clean up the invalid volume:
+
+```bash
+docker volume rm second-brain-invalid-data
+```
 
 ### 3i — Clean shutdown
 
 Send SIGTERM to the container:
 
 ```bash
-docker compose stop --timeout 15 capture-service
+$COMPOSE stop --timeout 15 capture-service
 ```
 
 Inspect the final log lines:
 
 ```bash
-docker compose logs --tail=20 capture-service
+$COMPOSE logs --tail=20 capture-service
 ```
 
 Expected log events include:
@@ -454,23 +456,32 @@ docker inspect \
 
 Expected: `0`
 
-Confirm the ledger shows `STOPPED` state:
+Confirm the ledger shows `STOPPED` state (runs against the stopped container's volume):
 
 ```bash
-sqlite3 "$HOST_LEDGER" \
-  "SELECT value FROM system_state WHERE key='capture_service_state';"
+docker run --rm \
+  -v second-brain-local-data:/var/lib/second-brain \
+  second-brain-capture-service:local \
+  /app/.venv/bin/python -c "
+import sqlite3
+conn = sqlite3.connect('/var/lib/second-brain/ledger.sqlite3')
+val = conn.execute(\"SELECT value FROM system_state WHERE key='capture_service_state'\").fetchone()
+print(val[0] if val else 'NOT_SET')
+conn.close()
+"
 ```
 
 Expected: `STOPPED`
 
 ### 3j — Tear down the local environment
 
-Only delete the disposable directory after evidence has been recorded. If any step above failed, preserve it temporarily for diagnosis.
+Only tear down after evidence has been recorded. If any step above failed, preserve the environment temporarily for diagnosis.
 
 ```bash
-docker compose down
-sudo rm -rf /tmp/sb-local-docker
+$COMPOSE down -v
 ```
+
+The `-v` flag removes the `second-brain-local-data` named volume along with the containers. Do not run it until evidence is safely recorded.
 
 ---
 
@@ -629,7 +640,7 @@ Primary tests:
 - [ ] Step 3a — local Docker environment prepared, container starts, health endpoint ok, port 8000 not published
 - [ ] Step 3b — three monitoring terminals open and showing live data
 - [ ] Step 3c — Discord capture test passes (live receipt in Discord, `CAPTURE_RECEIVED` event in Terminal 2)
-- [ ] Step 3d — sensitive-input rejection: `REJECTED_SENSITIVE`, plaintext absent from logs and data directory
+- [ ] Step 3d — sensitive-input rejection: `REJECTED_SENSITIVE`, plaintext absent from logs and data volume
 - [ ] Step 3e — status command inside container exits 0, health `HEALTHY`
 - [ ] Step 3f — container recreation preserves all rows
 - [ ] Step 3g — offline reconciliation: offline message persisted exactly once, no duplicate receipt
@@ -665,11 +676,11 @@ Create one file per execution at `docs/Milestones/002/evidence/SB-110-YYYY-MM-DD
 ## Local Docker regression
 
 - Image built from commit: <git sha>
-- CAPTURE_DATA_DIR: /tmp/sb-local-docker/data
+- Named volume: second-brain-local-data
 - Step 3a: internal health endpoint: passed
 - Step 3a: internal API host publication: `{"8000/tcp":null}`
 - Step 3c: Discord capture received — message ID: <id>, capture ID: <SB-xxx>
-- Step 3d: sensitive test rejection: plaintext absent from logs and mounted data directory
+- Step 3d: sensitive test rejection: plaintext absent from logs and data volume
 - Step 3e: status exit code: 0, health: HEALTHY
 - Step 3f: row count before recreation: <N>, row count after: <N>
 - Step 3g: offline message ID: <id>, persisted exactly once

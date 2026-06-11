@@ -1,6 +1,7 @@
 .agents
 .codex
 .env
+capture-service.local.env
 .runtime/
 __pycache__/
 *.pyc

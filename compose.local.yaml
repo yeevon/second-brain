@@ -1,0 +1,7 @@
+services:
+  capture-service:
+    volumes:
+      - second-brain-local-data:/var/lib/second-brain
+
+volumes:
+  second-brain-local-data:
