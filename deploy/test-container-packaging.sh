@@ -97,16 +97,16 @@ else
   ERRORS=$((ERRORS + 1))
 fi
 
-ports="$(
+port_bindings="$(
   docker inspect \
-    --format '{{json .NetworkSettings.Ports}}' \
+    --format '{{json .HostConfig.PortBindings}}' \
     second-brain-capture-service
 )"
 
-if [[ "$ports" == *'"8000/tcp":null'* ]]; then
-  echo "  PASS: port 8000 is private"
+if [[ "$port_bindings" == "{}" || "$port_bindings" == "null" ]]; then
+  echo "  PASS: no host ports are published"
 else
-  echo "  FAIL: port 8000 appears published: $ports" >&2
+  echo "  FAIL: host ports appear published: $port_bindings" >&2
   ERRORS=$((ERRORS + 1))
 fi
 
@@ -135,6 +135,87 @@ if docker compose exec -T capture-service \
 else
   echo "  FAIL: runtime user cannot write" >&2
   ERRORS=$((ERRORS + 1))
+fi
+
+echo ""
+
+# ── Test 4: Graceful SIGTERM shutdown (docker compose stop) ──────────────────
+echo "--- Test 4: graceful SIGTERM shutdown (docker compose stop) ---"
+
+container_state="$(
+  docker inspect \
+    --format '{{.State.Status}}' \
+    second-brain-capture-service 2>/dev/null || echo missing
+)"
+
+if [[ "$container_state" != "running" ]]; then
+  echo "  SKIP: container not running (state=$container_state); run deploy/local-up.sh first" >&2
+  ERRORS=$((ERRORS + 1))
+else
+  docker compose \
+    -f "$ROOT_DIR/compose.yaml" \
+    -f "$ROOT_DIR/compose.local.yaml" \
+    stop --timeout 15 capture-service
+
+  exit_code="$(
+    docker inspect \
+      --format '{{.State.ExitCode}}' \
+      second-brain-capture-service
+  )"
+
+  if [[ "$exit_code" == "0" ]]; then
+    echo "  PASS: exit code = 0"
+  else
+    echo "  FAIL: exit code = $exit_code (expected 0)" >&2
+    ERRORS=$((ERRORS + 1))
+  fi
+
+  db_state="$(
+    docker run \
+      --rm \
+      -v second-brain-local-data:/var/lib/second-brain \
+      second-brain-capture-service:local \
+      /app/.venv/bin/python -c "
+import sqlite3
+con = sqlite3.connect('/var/lib/second-brain/ledger.sqlite3')
+rows = con.execute(
+    \"SELECT key, value FROM system_state WHERE key IN ('capture_service_state','capture_service_stopped_at')\"
+).fetchall()
+con.close()
+for k, v in rows:
+    print(f'{k}={v}')
+"
+  )"
+
+  if echo "$db_state" | grep -qF "capture_service_state=STOPPED"; then
+    echo "  PASS: capture_service_state = STOPPED"
+  else
+    echo "  FAIL: capture_service_state not STOPPED: $db_state" >&2
+    ERRORS=$((ERRORS + 1))
+  fi
+
+  if echo "$db_state" | grep -qE "capture_service_stopped_at=20[0-9]{2}-"; then
+    echo "  PASS: capture_service_stopped_at populated"
+  else
+    echo "  FAIL: capture_service_stopped_at not populated: $db_state" >&2
+    ERRORS=$((ERRORS + 1))
+  fi
+
+  container_logs="$(docker logs second-brain-capture-service 2>&1)"
+
+  if echo "$container_logs" | grep -qF '"event":"capture_service_stopped"'; then
+    echo "  PASS: capture_service_stopped log emitted"
+  else
+    echo "  FAIL: capture_service_stopped log not found" >&2
+    ERRORS=$((ERRORS + 1))
+  fi
+
+  if echo "$container_logs" | grep -qF '"event":"sqlite_runtime_stopped"'; then
+    echo "  PASS: sqlite_runtime_stopped log emitted"
+  else
+    echo "  FAIL: sqlite_runtime_stopped log not found" >&2
+    ERRORS=$((ERRORS + 1))
+  fi
 fi
 
 echo ""

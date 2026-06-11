@@ -5,6 +5,7 @@ import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import signal
 import sys
 import uuid
 
@@ -356,11 +357,24 @@ async def run_service_runtime(
     capture_service: CaptureService,
     instance_id: str | None = None,
 ) -> None:
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+    loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+    loop.add_signal_handler(signal.SIGINT, stop_event.set)
+
+    stop_waiter = asyncio.ensure_future(stop_event.wait())
     tasks = (api_task, discord_task)
     try:
-        done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        done, _pending = await asyncio.wait(
+            {api_task, discord_task, stop_waiter},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        stop_waiter.cancel()
+        with suppress(asyncio.CancelledError):
+            await stop_waiter
         for task in done:
-            task.result()
+            if task is not stop_waiter:
+                task.result()
     finally:
         await api_server.stop()
         await client.close()

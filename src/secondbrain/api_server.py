@@ -11,6 +11,7 @@ class InternalApiServer:
             port=port,
             log_level="info",
             access_log=False,
+            install_signal_handlers=False,
         )
         self._server = uvicorn.Server(config)
 
