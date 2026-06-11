@@ -898,17 +898,12 @@ class CaptureService:
 
         secret_result = screen_text(raw_text)
         if secret_result.is_sensitive:
-            return await self._persist_sensitive_rejection(
-                message,
-                secret_result,
-                advance_reconcile_marker=advance_reconcile_marker,
-            )
+            return await self._persist_sensitive_rejection(message, secret_result)
 
         return await self._persist_accepted_capture(
             message,
             raw_text=raw_text,
             notify_downstream=notify_downstream,
-            advance_reconcile_marker=advance_reconcile_marker,
         )
 
     async def _persist_sensitive_rejection(
@@ -925,8 +920,6 @@ class CaptureService:
             sensitivity_flags=secret_result.flags,
         )
         capture = result.capture
-        if advance_reconcile_marker:
-            self._advance_reconcile_marker(str(message.id))
         if not result.created:
             self._log_duplicate(capture)
             return CaptureDisposition(
@@ -984,8 +977,6 @@ class CaptureService:
             initial_delivery_status=self._initial_delivery_status,
         )
         capture = result.capture
-        if advance_reconcile_marker:
-            self._advance_reconcile_marker(str(message.id))
         if not result.created:
             self._log_duplicate(capture)
             return CaptureDisposition(

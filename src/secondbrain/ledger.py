@@ -53,6 +53,13 @@ def _validate_safe_slug(value: str) -> None:
 
 UNSET = object()
 
+_SAFE_SLUG_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
+
+
+def _validate_safe_slug(value: str) -> None:
+    if not _SAFE_SLUG_RE.match(value):
+        raise ValueError(f"unsafe delivery category string: {value!r}")
+
 
 @dataclass(frozen=True)
 class InsertResult:

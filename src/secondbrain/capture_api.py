@@ -721,3 +721,26 @@ def _acknowledge_failed_response(
         outcome=result.outcome,
         ignored_reason=result.outcome if result.outcome != "changed" else None,
     )
+
+
+def _delivery_mutation_response(
+    capture_service: CaptureService,
+    capture_id: str,
+    result: DeliveryMutationResult,
+) -> DeliveryTransitionResponse:
+    if result.outcome == "conflicting_replay":
+        raise HTTPException(status_code=409, detail="conflicting terminal callback")
+    if result.outcome == "invalid_state":
+        raise HTTPException(status_code=409, detail="capture not in valid state for terminal callback")
+    capture = _get_capture(capture_service, capture_id)
+    return DeliveryTransitionResponse(
+        capture_id=capture_id,
+        delivery_status=capture.delivery_status,
+        delivery_attempts=capture.delivery_attempts,
+        retry_attempts=capture.retry_attempts,
+        changed=result.changed,
+        outcome=result.outcome,
+        ignored_reason="stale_attempt" if result.outcome == "stale_attempt" else None,
+    )
+
+

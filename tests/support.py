@@ -73,7 +73,7 @@ def sqlite_dump(ledger):
 
 
 def sqlite_dump(ledger):
-    return "\n".join(ledger._connection.iterdump())
+    return ledger._runtime.read(lambda conn: "\n".join(conn.iterdump()))
 
 
 def event_types(ledger, capture_id):
