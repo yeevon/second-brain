@@ -72,7 +72,15 @@ docker exec --user root "$CONTAINER" \
   rm -f /tmp/existing-workflows.json
 
 echo ""
-echo "Bind the required credential before activating the harness:"
-echo "  - Test Harness Token  (HTTP Header Auth: X-Second-Brain-Webhook-Token)"
+echo "Manual steps before activating the harness:"
+echo ""
+echo "  a. Open Second Brain - Error Harness."
+echo "  b. Select the 'Harness Webhook' node."
+echo "     Bind credential: Test Harness Token"
+echo "     Type: HTTP Header Auth | Header: X-Second-Brain-Webhook-Token"
+echo "  c. Open Workflow Settings (... menu → Settings)."
+echo "  d. Under 'Error Workflow', select 'Second Brain - Error Handler'."
+echo "     NOTE: the fixture contains a placeholder — this must be set manually in the UI."
+echo "  e. Save, then activate the workflow."
 echo ""
 echo "DO NOT activate this workflow outside local validation."

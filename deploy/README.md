@@ -221,18 +221,36 @@ deploy/bootstrap-n8n.sh
 
 This is idempotent — running it again when both workflows already exist exits cleanly. Both `Second Brain - Error Handler` and `Second Brain - Intake` are imported in **inactive** state. Activate them manually after binding credentials in the UI.
 
-### Bind credentials before activating Second Brain - Intake
+### Bind credentials and wire the Error Workflow before activating
 
-Four credentials must be created in the n8n UI before the intake workflow can be activated:
+Complete these steps in the n8n UI after `bootstrap-n8n.sh` finishes.
+
+#### Step 1 — Second Brain - Error Handler
+
+1. Open the workflow.
+2. Select the `Report Workflow Error to Capture Service` node.
+3. Bind credential: `Capture Service Token` (HTTP Header Auth: `X-Second-Brain-Internal-Token`).
+4. Save the workflow (leave inactive — n8n invokes it automatically on execution failure).
+
+#### Step 2 — Second Brain - Intake
+
+Bind these four credentials:
 
 | Credential name | Type | Header / field |
 | --- | --- | --- |
-| `Intake Webhook Token` | HTTP Header Auth | `X-Second-Brain-Intake-Token` — must match `N8N_INTAKE_WEBHOOK_TOKEN` in capture-service env |
+| `Intake Webhook Token` | HTTP Header Auth | `X-Second-Brain-Intake-Token` — must match `N8N_INTAKE_WEBHOOK_TOKEN` |
 | `Capture Service Token` | HTTP Header Auth | `X-Second-Brain-Internal-Token` — must match `CAPTURE_SERVICE_INTERNAL_TOKEN` |
 | `Gemini API Key` | HTTP Header Auth | `X-Goog-Api-Key` — your Google AI Studio key |
-| `Writer Stub Token` | HTTP Header Auth | `X-Writer-Stub-Token` — must match `WRITER_STUB_INTERNAL_TOKEN` in writer-stub env |
+| `Writer Stub Token` | HTTP Header Auth | `X-Writer-Stub-Token` — must match `WRITER_STUB_INTERNAL_TOKEN` |
 
-After binding all four, open the workflow, verify the node connections, then activate.
+Then wire the Error Workflow:
+
+1. Open Workflow Settings (⋯ menu → Settings).
+2. Under **Error Workflow**, select `Second Brain - Error Handler`.
+3. Save the workflow, then activate it.
+
+> The fixture stores a placeholder in `errorWorkflow`. n8n assigns the real workflow ID on
+> import and only resolves it by name in the UI — the placeholder must be replaced manually.
 
 ### Writer-stub environment file (SB-112+)
 

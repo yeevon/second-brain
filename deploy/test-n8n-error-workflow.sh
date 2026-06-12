@@ -1,52 +1,82 @@
 #!/usr/bin/env bash
 # Local regression script for the SB-113 n8n error workflow.
-# Requires: local stack running, Error Handler imported, Error Harness imported and active.
+#
+# Usage:
+#   TEST_HARNESS_TOKEN=<token> deploy/test-n8n-error-workflow.sh <CAPTURE_ID> <DELIVERY_ATTEMPT>
+#
+# Prerequisites:
+#   - Local stack running (deploy/local-stack-up.sh).
+#   - Error Handler imported (deploy/bootstrap-n8n.sh) with Capture Service Token bound.
+#   - Error Harness imported and active (deploy/bootstrap-n8n-test-fixtures.sh) with
+#     Test Harness Token bound and Error Workflow set to Second Brain - Error Handler.
+#   - CAPTURE_SERVICE_INTERNAL_TOKEN available in .env.
+#   - Capture must be in an active delivery state (FORWARDING / FORWARDED / CLASSIFYING).
+#     Create one: post a harmless Discord note while n8n is stopped, then start n8n.
+#   - TEST_HARNESS_TOKEN: the value you bound to the Test Harness Token credential in n8n.
+#
+# API calls to capture-service run via docker exec inside the backend network.
+# Webhook calls to n8n use the published 127.0.0.1:5678 port.
+#
 # DO NOT run in EC2/staging/production.
 set -euo pipefail
+
+CAPTURE_ID="${1:-}"
+DELIVERY_ATTEMPT="${2:-}"
+
+if [[ -z "$CAPTURE_ID" || -z "$DELIVERY_ATTEMPT" ]]; then
+  echo "Usage: TEST_HARNESS_TOKEN=<token> $(basename "$0") <CAPTURE_ID> <DELIVERY_ATTEMPT>" >&2
+  echo "" >&2
+  echo "CAPTURE_ID      — e.g. SB-20260611-0001" >&2
+  echo "DELIVERY_ATTEMPT — current delivery attempt number (check GET /internal/captures/<id>)" >&2
+  exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 CONTAINER="${CONTAINER:-second-brain-n8n}"
-CAPTURE_SERVICE_URL="${CAPTURE_SERVICE_URL:-http://127.0.0.1:8000}"
 N8N_URL="${N8N_URL:-http://127.0.0.1:5678}"
+ENV_FILE="${ROOT_DIR}/.env"
 ERRORS=0
 
-# Load tokens from local env files — never print them
-ENV_FILE="${ROOT_DIR}/.env"
-N8N_ENV_FILE="${ROOT_DIR}/n8n.local.env"
-WRITER_STUB_ENV_FILE="${ROOT_DIR}/writer-stub.local.env"
+# ── Load tokens ───────────────────────────────────────────────────────────────
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "Missing env file: $ENV_FILE" >&2; exit 1
 fi
-if [[ ! -f "$N8N_ENV_FILE" ]]; then
-  echo "Missing env file: $N8N_ENV_FILE" >&2; exit 1
-fi
 
-CAPTURE_SERVICE_INTERNAL_TOKEN="$(grep '^CAPTURE_SERVICE_INTERNAL_TOKEN=' "$ENV_FILE" | cut -d= -f2-)"
-N8N_WEBHOOK_TOKEN="$(grep '^WRITER_STUB_WEBHOOK_TOKEN=' "$N8N_ENV_FILE" | cut -d= -f2-)"
-
+CAPTURE_SERVICE_INTERNAL_TOKEN="${CAPTURE_SERVICE_INTERNAL_TOKEN:-}"
 if [[ -z "$CAPTURE_SERVICE_INTERNAL_TOKEN" ]]; then
-  echo "CAPTURE_SERVICE_INTERNAL_TOKEN not found in $ENV_FILE" >&2; exit 1
+  CAPTURE_SERVICE_INTERNAL_TOKEN="$(grep '^CAPTURE_SERVICE_INTERNAL_TOKEN=' "$ENV_FILE" | cut -d= -f2- || true)"
+fi
+if [[ -z "$CAPTURE_SERVICE_INTERNAL_TOKEN" ]]; then
+  echo "CAPTURE_SERVICE_INTERNAL_TOKEN not set and not found in $ENV_FILE" >&2; exit 1
 fi
 
-echo "=== SB-113 n8n error workflow regression ==="
-echo ""
-
-# ── Pre-flight: capture-service health ────────────────────────────────────────
-echo "--- Pre-flight: capture-service health ---"
-cs_health="$(curl -s "$CAPTURE_SERVICE_URL/health" 2>/dev/null || true)"
-if echo "$cs_health" | grep -q '"ok"'; then
-  echo "  capture-service: healthy"
-else
-  echo "  FAIL: capture-service not healthy at $CAPTURE_SERVICE_URL" >&2
+TEST_HARNESS_TOKEN="${TEST_HARNESS_TOKEN:-}"
+if [[ -z "$TEST_HARNESS_TOKEN" ]]; then
+  echo "TEST_HARNESS_TOKEN is not set." >&2
+  echo "Export it before running: TEST_HARNESS_TOKEN=<value> $(basename "$0") ..." >&2
   exit 1
 fi
 
-# ── Pre-flight: n8n health ────────────────────────────────────────────────────
+echo "=== SB-113 n8n error workflow regression ==="
+echo "capture_id=${CAPTURE_ID}  delivery_attempt=${DELIVERY_ATTEMPT}"
+echo ""
+
+# ── Helper: call capture-service from inside the backend network ──────────────
+
+cs_curl() {
+  # Usage: cs_curl <extra curl args...>
+  # Runs curl inside the n8n container (which is on the backend network).
+  docker exec "$CONTAINER" curl -sf \
+    --header "X-Second-Brain-Internal-Token: $CAPTURE_SERVICE_INTERNAL_TOKEN" \
+    "$@"
+}
+
+# ── Pre-flight: n8n reachable ─────────────────────────────────────────────────
 echo "--- Pre-flight: n8n health ---"
-n8n_health="$(curl -s "$N8N_URL/healthz" 2>/dev/null || true)"
+n8n_health="$(curl -sf "$N8N_URL/healthz" 2>/dev/null || true)"
 if echo "$n8n_health" | grep -qiE '"status":"ok"|"ok"'; then
   echo "  n8n: healthy"
 else
@@ -54,148 +84,146 @@ else
   exit 1
 fi
 
-# ── Pre-flight: Error Handler workflow present ────────────────────────────────
-echo "--- Pre-flight: Error Handler workflow present ---"
+# ── Pre-flight: capture-service reachable via backend network ─────────────────
+echo "--- Pre-flight: capture-service health ---"
+cs_health="$(cs_curl "http://capture-service:8000/health" 2>/dev/null || true)"
+if echo "$cs_health" | grep -q '"ok"'; then
+  echo "  capture-service: healthy"
+else
+  echo "  FAIL: capture-service not reachable from n8n container" >&2
+  exit 1
+fi
+
+# ── Pre-flight: Error Handler and Error Harness present ───────────────────────
+echo "--- Pre-flight: workflows present ---"
 docker exec "$CONTAINER" \
   n8n export:workflow --all --output=/tmp/check-workflows.json >/dev/null 2>&1
 docker cp "$CONTAINER:/tmp/check-workflows.json" /tmp/check-workflows.json 2>/dev/null
 docker exec --user root "$CONTAINER" rm -f /tmp/check-workflows.json
 
-if jq -r '.[].name' /tmp/check-workflows.json 2>/dev/null | grep -qxF "Second Brain - Error Handler"; then
-  echo "  Error Handler: present"
-else
-  echo "  FAIL: 'Second Brain - Error Handler' workflow not found" >&2
-  echo "  Run: deploy/bootstrap-n8n.sh" >&2
-  ERRORS=$((ERRORS + 1))
-fi
-
-if jq -r '.[].name' /tmp/check-workflows.json 2>/dev/null | grep -qxF "Second Brain - Error Harness"; then
-  echo "  Error Harness: present"
-else
-  echo "  FAIL: 'Second Brain - Error Harness' workflow not found" >&2
-  echo "  Run: deploy/bootstrap-n8n-test-fixtures.sh and activate the harness" >&2
-  ERRORS=$((ERRORS + 1))
-fi
+for wf_name in "Second Brain - Error Handler" "Second Brain - Error Harness"; do
+  if jq -r '.[].name' /tmp/check-workflows.json 2>/dev/null | grep -qxF "$wf_name"; then
+    echo "  ${wf_name}: present"
+  else
+    echo "  FAIL: '${wf_name}' not found" >&2
+    echo "  Run: deploy/bootstrap-n8n.sh (Error Handler) or deploy/bootstrap-n8n-test-fixtures.sh (Harness)" >&2
+    ERRORS=$((ERRORS + 1))
+  fi
+done
 
 if [[ $ERRORS -gt 0 ]]; then
   echo "Pre-flight failed. Aborting." >&2; exit 1
 fi
 
+# ── Pre-flight: capture exists and is in an active delivery state ─────────────
+echo "--- Pre-flight: capture state ---"
+capture_state="$(cs_curl "http://capture-service:8000/internal/captures/$CAPTURE_ID" 2>/dev/null || true)"
+if [[ -z "$capture_state" ]]; then
+  echo "  FAIL: capture $CAPTURE_ID not found or capture-service unreachable" >&2
+  exit 1
+fi
+
+current_ds="$(echo "$capture_state" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("delivery_status",""))' 2>/dev/null || true)"
+current_attempt="$(echo "$capture_state" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("delivery_attempts",""))' 2>/dev/null || true)"
+
+echo "  delivery_status=${current_ds}  delivery_attempts=${current_attempt}"
+
+if [[ "$current_ds" == "COMPLETE" || "$current_ds" == "FAILED" ]]; then
+  echo "  FAIL: capture is already in terminal state ${current_ds}" >&2
+  echo "  Use a capture in FORWARDING, FORWARDED, or CLASSIFYING state." >&2
+  exit 1
+fi
+
+if [[ "$current_attempt" != "$DELIVERY_ATTEMPT" ]]; then
+  echo "  WARN: provided delivery_attempt=${DELIVERY_ATTEMPT} does not match current ${current_attempt}" >&2
+  echo "  Continuing with delivery_attempt=${current_attempt} from the ledger." >&2
+  DELIVERY_ATTEMPT="$current_attempt"
+fi
+
 echo ""
 
-# ── Test 1: Create a test capture ─────────────────────────────────────────────
-echo "--- Test 1: Create test capture ---"
-
-CAPTURE_RESPONSE="$(curl -sf \
+# ── Test 1: trigger gemini_timeout via harness ────────────────────────────────
+echo "--- Test 1: trigger gemini_timeout via harness ---"
+curl -sf \
   --request POST \
   --header "Content-Type: application/json" \
-  --header "X-Second-Brain-Internal-Token: $CAPTURE_SERVICE_INTERNAL_TOKEN" \
-  --data '{"discord_message_id":"test-err-1","discord_channel_id":"c1","discord_guild_id":"g1","discord_author_id":"u1","raw_text":"SB-113 error workflow regression test","has_attachments":false,"attachment_metadata":[]}' \
-  "$CAPTURE_SERVICE_URL/internal/captures" 2>/dev/null || true)"
+  --header "X-Second-Brain-Webhook-Token: $TEST_HARNESS_TOKEN" \
+  --data "{\"capture_id\":\"$CAPTURE_ID\",\"delivery_attempt\":$DELIVERY_ATTEMPT,\"test_case\":\"gemini_timeout\"}" \
+  "$N8N_URL/webhook/second-brain-error-harness" >/dev/null 2>&1 \
+  || { echo "  WARN: harness webhook returned non-200 (execution may still proceed asynchronously)"; }
 
-if [[ -z "$CAPTURE_RESPONSE" ]]; then
-  echo "  FAIL: could not create test capture" >&2
-  ERRORS=$((ERRORS + 1))
-else
-  CAPTURE_ID="$(echo "$CAPTURE_RESPONSE" | python3 -c 'import sys,json; print(json.load(sys.stdin)["capture_id"])' 2>/dev/null || true)"
-  echo "  capture_id: $CAPTURE_ID"
+echo "  harness triggered — waiting 4s for error workflow to complete..."
+sleep 4
 
-  # ── Test 2: Advance delivery to FORWARDING ─────────────────────────────────
-  echo "--- Test 2: Advance delivery to FORWARDING ---"
-  FORWARD_RESPONSE="$(curl -sf \
-    --request POST \
-    --header "Content-Type: application/json" \
-    --header "X-Second-Brain-Internal-Token: $CAPTURE_SERVICE_INTERNAL_TOKEN" \
-    --data '{"delivery_attempt":1}' \
-    "$CAPTURE_SERVICE_URL/internal/captures/$CAPTURE_ID/delivery/acknowledge-forwarded" 2>/dev/null || true)"
-  if echo "$FORWARD_RESPONSE" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d.get("outcome")=="changed"' 2>/dev/null; then
-    echo "  delivery advanced to FORWARDED: ok"
-  else
-    echo "  SKIP: could not advance to FORWARDED (capture may not be in FORWARDING state)"
-  fi
+# ── Test 2: verify RETRY_WAIT ─────────────────────────────────────────────────
+echo "--- Test 2: verify RETRY_WAIT state ---"
+capture_state="$(cs_curl "http://capture-service:8000/internal/captures/$CAPTURE_ID" 2>/dev/null || true)"
 
-  # ── Test 3: Force gemini_timeout via harness ───────────────────────────────
-  echo "--- Test 3: Force gemini_timeout via harness ---"
-  HARNESS_RESPONSE="$(curl -sf \
-    --request POST \
-    --header "Content-Type: application/json" \
-    --header "X-Second-Brain-Webhook-Token: $N8N_WEBHOOK_TOKEN" \
-    --data "{\"capture_id\":\"$CAPTURE_ID\",\"delivery_attempt\":1,\"test_case\":\"gemini_timeout\"}" \
-    "$N8N_URL/webhook/second-brain-error-harness" 2>/dev/null || echo "{}")"
-  echo "  harness triggered"
-
-  # Wait for error workflow to process
-  sleep 3
-
-  # ── Test 4: Verify RETRY_WAIT state ───────────────────────────────────────
-  echo "--- Test 4: Verify RETRY_WAIT state ---"
-  CAPTURE_STATE="$(curl -sf \
-    --header "X-Second-Brain-Internal-Token: $CAPTURE_SERVICE_INTERNAL_TOKEN" \
-    "$CAPTURE_SERVICE_URL/internal/captures/$CAPTURE_ID" 2>/dev/null || true)"
-
-  if echo "$CAPTURE_STATE" | python3 -c '
+if echo "$capture_state" | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
 assert d["delivery_status"] == "RETRY_WAIT", f"expected RETRY_WAIT got {d[\"delivery_status\"]}"
 assert d["retry_attempts"] >= 1, f"expected retry_attempts >= 1 got {d[\"retry_attempts\"]}"
 assert d["next_attempt_at"] is not None, "expected next_attempt_at to be set"
 assert d["raw_text"] is not None, "raw_text must not be null"
-print(f"  delivery_status={d[\"delivery_status\"]} retry_attempts={d[\"retry_attempts\"]} PASS")
+print(f"  delivery_status=RETRY_WAIT retry_attempts={d[\"retry_attempts\"]} PASS")
 ' 2>/dev/null; then
-    :
-  else
-    echo "  FAIL: capture not in RETRY_WAIT after gemini_timeout" >&2
-    ERRORS=$((ERRORS + 1))
-  fi
-
-  # ── Test 5: Replay same error — retry count must not increment again ────────
-  echo "--- Test 5: Replay gemini_timeout — idempotency ---"
-  REPORT_REPLAY="$(curl -sf \
-    --request POST \
-    --header "Content-Type: application/json" \
-    --header "X-Second-Brain-Internal-Token: $CAPTURE_SERVICE_INTERNAL_TOKEN" \
-    --data "{\"delivery_attempt\":1,\"disposition\":\"retryable\",\"error_type\":\"gemini_timeout\",\"reason_type\":\"workflow_error\",\"workflow_id\":\"test_workflow\",\"workflow_name\":\"second_brain_intake\",\"stage\":\"gemini\"}" \
-    "$CAPTURE_SERVICE_URL/internal/captures/$CAPTURE_ID/delivery/report-workflow-error" 2>/dev/null || true)"
-
-  if echo "$REPORT_REPLAY" | python3 -c '
-import sys, json
-d = json.load(sys.stdin)
-assert d["outcome"] in ("ignored_retry_already_scheduled", "ignored_already_terminal", "ignored_stale_attempt"), f"unexpected outcome: {d[\"outcome\"]}"
-print(f"  idempotency outcome={d[\"outcome\"]} PASS")
-' 2>/dev/null; then
-    :
-  else
-    echo "  FAIL: replay did not return ignored outcome" >&2
-    ERRORS=$((ERRORS + 1))
-  fi
-
-  # ── Test 6: raw_text preserved ────────────────────────────────────────────
-  echo "--- Test 6: raw_text preserved ---"
-  RAW_TEXT="$(curl -sf \
-    --header "X-Second-Brain-Internal-Token: $CAPTURE_SERVICE_INTERNAL_TOKEN" \
-    "$CAPTURE_SERVICE_URL/internal/captures/$CAPTURE_ID" 2>/dev/null \
-    | python3 -c 'import sys,json; print(json.load(sys.stdin).get("raw_text",""))' 2>/dev/null || true)"
-  if [[ -n "$RAW_TEXT" ]]; then
-    echo "  raw_text present: PASS"
-  else
-    echo "  FAIL: raw_text missing or null" >&2
-    ERRORS=$((ERRORS + 1))
-  fi
+  :
+else
+  echo "  FAIL: capture not in RETRY_WAIT after gemini_timeout" >&2
+  echo "  Current state: $capture_state" >&2
+  ERRORS=$((ERRORS + 1))
 fi
 
-# ── Test 7: Orphan error — no capture mutation ────────────────────────────────
-echo "--- Test 7: Orphan error via harness ---"
+# ── Test 3: replay — idempotency ──────────────────────────────────────────────
+echo "--- Test 3: replay gemini_timeout — idempotency ---"
+report_replay="$(cs_curl \
+  --request POST \
+  --header "Content-Type: application/json" \
+  --data "{\"delivery_attempt\":$DELIVERY_ATTEMPT,\"disposition\":\"retryable\",\"error_type\":\"gemini_timeout\",\"reason_type\":\"workflow_error\",\"workflow_id\":\"test_workflow\",\"workflow_name\":\"second_brain_intake\",\"stage\":\"gemini\"}" \
+  "http://capture-service:8000/internal/captures/$CAPTURE_ID/delivery/report-workflow-error" \
+  2>/dev/null || true)"
+
+if echo "$report_replay" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+assert d["outcome"] in ("ignored_retry_already_scheduled", "ignored_already_terminal", "ignored_stale_attempt"), \
+    f"unexpected outcome: {d[\"outcome\"]}"
+print(f"  idempotency outcome={d[\"outcome\"]} PASS")
+' 2>/dev/null; then
+  :
+else
+  echo "  FAIL: replay did not return an ignored outcome" >&2
+  echo "  Response: $report_replay" >&2
+  ERRORS=$((ERRORS + 1))
+fi
+
+# ── Test 4: raw_text preserved ────────────────────────────────────────────────
+echo "--- Test 4: raw_text preserved ---"
+raw_text="$(cs_curl "http://capture-service:8000/internal/captures/$CAPTURE_ID" 2>/dev/null \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin).get("raw_text",""))' 2>/dev/null || true)"
+if [[ -n "$raw_text" ]]; then
+  echo "  raw_text present: PASS"
+else
+  echo "  FAIL: raw_text missing or null" >&2
+  ERRORS=$((ERRORS + 1))
+fi
+
+# ── Test 5: orphan error — no capture mutation ────────────────────────────────
+echo "--- Test 5: orphan error via harness ---"
 curl -sf \
   --request POST \
   --header "Content-Type: application/json" \
-  --header "X-Second-Brain-Webhook-Token: $N8N_WEBHOOK_TOKEN" \
+  --header "X-Second-Brain-Webhook-Token: $TEST_HARNESS_TOKEN" \
   --data '{"test_case":"orphan_unhandled_exception"}' \
-  "$N8N_URL/webhook/second-brain-error-harness" >/dev/null 2>&1 || true
-echo "  orphan harness triggered (no capture mutation expected)"
+  "$N8N_URL/webhook/second-brain-error-harness" >/dev/null 2>&1 \
+  || true
+echo "  orphan harness triggered — no capture mutation expected"
 
 # ── Log leak check ────────────────────────────────────────────────────────────
 echo "--- Log leak check ---"
-if docker logs "$CONTAINER" --since=60s 2>&1 | grep -qi "password\|api_key\|raw_text\|stack\|traceback"; then
+sleep 2
+if docker logs "$CONTAINER" --since=30s 2>&1 | grep -qi "password\|api_key\|raw_text\|stack\|traceback"; then
   echo "  FAIL: potential secret or raw capture text found in n8n logs" >&2
   ERRORS=$((ERRORS + 1))
 else
