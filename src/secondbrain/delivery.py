@@ -92,22 +92,22 @@ async def _run_one_dispatch_pass(
                 delivery_attempt=attempt,
                 error_type=error_type,
             )
-            try:
-                disposition = ledger.schedule_retry(
-                    capture_id=capture.capture_id,
-                    delivery_attempt=attempt,
-                    now=datetime.now(UTC),
-                    error_type=error_type,
-                    reason_type="webhook_failure",
-                    max_attempts=settings.delivery_retry_max_attempts,
-                    base_delay_seconds=settings.delivery_retry_base_delay_seconds,
-                    max_delay_seconds=settings.delivery_retry_max_delay_seconds,
-                )
-            except ValueError:
+            disposition = ledger.schedule_retry(
+                capture_id=capture.capture_id,
+                delivery_attempt=attempt,
+                now=datetime.now(UTC),
+                error_type=error_type,
+                reason_type="webhook_failure",
+                max_attempts=settings.delivery_retry_max_attempts,
+                base_delay_seconds=settings.delivery_retry_base_delay_seconds,
+                max_delay_seconds=settings.delivery_retry_max_delay_seconds,
+            )
+            if disposition.outcome.startswith("ignored_"):
                 log_metadata(
                     "stale_delivery_retry_ignored",
                     capture_id=capture.capture_id,
                     delivery_attempt=attempt,
+                    outcome=disposition.outcome,
                 )
                 continue
 

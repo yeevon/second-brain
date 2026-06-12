@@ -4,12 +4,18 @@ import re
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from secondbrain.models import Classification
 
 
 _SAFE_SLUG_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
+
+
+class StrictInternalRequest(BaseModel):
+    """Base class for all n8n-facing callback request bodies. Rejects unknown fields."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 def _validate_safe_slug(value: str) -> str:
@@ -81,25 +87,25 @@ class MarkFailedRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
-class AcknowledgeForwardedRequest(BaseModel):
+class AcknowledgeForwardedRequest(StrictInternalRequest):
     delivery_attempt: int = Field(ge=1)
 
 
-class AcknowledgeClassifyingRequest(BaseModel):
+class AcknowledgeClassifyingRequest(StrictInternalRequest):
     delivery_attempt: int = Field(ge=1)
 
 
-class RenewLeaseRequest(BaseModel):
+class RenewLeaseRequest(StrictInternalRequest):
     delivery_attempt: int = Field(ge=1)
 
 
-class AcknowledgeFiledRequest(BaseModel):
+class AcknowledgeFiledRequest(StrictInternalRequest):
     delivery_attempt: int = Field(ge=1)
     note_path: str = Field(min_length=1, max_length=1000)
     git_commit_hash: str | None = Field(default=None, max_length=100)
 
 
-class AcknowledgeInboxRequest(BaseModel):
+class AcknowledgeInboxRequest(StrictInternalRequest):
     delivery_attempt: int = Field(ge=1)
     note_path: str = Field(min_length=1, max_length=1000)
     git_commit_hash: str | None = Field(default=None, max_length=100)
@@ -113,7 +119,7 @@ class AcknowledgeInboxRequest(BaseModel):
         return v
 
 
-class ScheduleRetryRequest(BaseModel):
+class ScheduleRetryRequest(StrictInternalRequest):
     delivery_attempt: int = Field(ge=1)
     error_type: str = Field(min_length=1, max_length=100)
     reason_type: str = Field(default="webhook_failure", max_length=100)
@@ -124,7 +130,7 @@ class ScheduleRetryRequest(BaseModel):
         return _validate_safe_slug(v)
 
 
-class AcknowledgeDeliveryFailedRequest(BaseModel):
+class AcknowledgeDeliveryFailedRequest(StrictInternalRequest):
     delivery_attempt: int = Field(ge=1)
     reason_type: str = Field(default="", max_length=100)
 
@@ -134,6 +140,39 @@ class AcknowledgeDeliveryFailedRequest(BaseModel):
         if v:
             return _validate_safe_slug(v)
         return v
+
+
+class DownstreamCaptureResponse(BaseModel):
+    """Minimal capture envelope exposed to n8n — no raw secrets, no audit fields."""
+
+    capture_id: str
+    raw_text: str | None  # null when is_sensitive=True
+    is_sensitive: bool
+    has_attachments: bool
+    delivery_attempt: int
+    status: str
+    delivery_status: str
+
+
+class SecurityScreenRequest(StrictInternalRequest):
+    text: str = Field(min_length=1, max_length=10000)
+
+
+class SecurityScreenResponse(BaseModel):
+    is_sensitive: bool
+    safe_category_list: list[str]
+
+
+class ClassificationValidationRequest(StrictInternalRequest):
+    classification: dict  # raw dict from Gemini — validated by the endpoint
+    delivery_attempt: int = Field(ge=1)
+
+
+class ClassificationValidationResponse(BaseModel):
+    valid: bool
+    route: Literal["file", "inbox"] | None
+    confidence_met: bool
+    errors: list[str]
 
 
 class EditReceiptRequest(BaseModel):

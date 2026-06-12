@@ -3,7 +3,7 @@ from __future__ import annotations
 from secrets import compare_digest
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Header
 
 from secondbrain.api_models import (
     AcknowledgeClassifyingRequest,
@@ -12,12 +12,17 @@ from secondbrain.api_models import (
     AcknowledgeForwardedRequest,
     AcknowledgeInboxRequest,
     CaptureResponse,
+    ClassificationValidationRequest,
+    ClassificationValidationResponse,
     DeliveryTransitionResponse,
+    DownstreamCaptureResponse,
     EditReceiptRequest,
     HealthResponse,
     ReceiptDeliveryResponse,
     RenewLeaseRequest,
     ScheduleRetryRequest,
+    SecurityScreenRequest,
+    SecurityScreenResponse,
 )
 from secondbrain.capture_service import (
     CaptureNotFoundError,
@@ -66,8 +71,89 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
         return _capture_response(_get_capture(capture_service, capture_id))
 
     # ------------------------------------------------------------------
+    # Minimal downstream capture envelope (n8n fetch)
+    # Returns only the 7 fields n8n needs — never exposes audit fields.
+    # ------------------------------------------------------------------
+
+    @app.get(
+        "/internal/downstream/captures/{capture_id}",
+        response_model=DownstreamCaptureResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def get_downstream_capture(capture_id: str):
+        capture = _get_capture(capture_service, capture_id)
+        return DownstreamCaptureResponse(
+            capture_id=capture.capture_id,
+            raw_text=None if capture.is_sensitive else capture.raw_text,
+            is_sensitive=capture.is_sensitive,
+            has_attachments=capture.has_attachments,
+            delivery_attempt=capture.delivery_attempts,
+            status=capture.status,
+            delivery_status=capture.delivery_status,
+        )
+
+    # ------------------------------------------------------------------
+    # Security screen (defence-in-depth re-screen by n8n before filing)
+    # ------------------------------------------------------------------
+
+    @app.post(
+        "/internal/security/screen",
+        response_model=SecurityScreenResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def security_screen(request: SecurityScreenRequest):
+        from secondbrain.secret_screen import screen_text
+        result = screen_text(request.text)
+        return SecurityScreenResponse(
+            is_sensitive=result.is_sensitive,
+            safe_category_list=list(result.flags),
+        )
+
+    # ------------------------------------------------------------------
+    # Classification contract validation
+    # Validates Gemini output against our schema and applies the
+    # confidence threshold to return an authoritative routing decision.
+    # ------------------------------------------------------------------
+
+    @app.post(
+        "/internal/contracts/classification/validate",
+        response_model=ClassificationValidationResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def validate_classification(request: ClassificationValidationRequest):
+        from secondbrain.models import Classification
+        from pydantic import ValidationError
+
+        errors: list[str] = []
+        route: str | None = None
+        valid = False
+        confidence_met = False
+
+        try:
+            classification = Classification.model_validate(request.classification)
+            valid = True
+            threshold = capture_service.settings.classification_confidence_threshold
+            if threshold is None:
+                threshold = 0.75
+            confidence_met = classification.confidence >= threshold
+            if classification.needs_clarification or not confidence_met:
+                route = "inbox"
+            else:
+                route = "file"
+        except ValidationError as exc:
+            for err in exc.errors():
+                loc = " -> ".join(str(p) for p in err["loc"])
+                errors.append(f"{loc}: {err['msg']}")
+
+        return ClassificationValidationResponse(
+            valid=valid,
+            route=route,
+            confidence_met=confidence_met,
+            errors=errors,
+        )
+
+    # ------------------------------------------------------------------
     # Attempt-aware downstream delivery callback routes
-    # All routes validate delivery_attempt before mutating state.
     # ------------------------------------------------------------------
 
     @app.post(
@@ -81,7 +167,8 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             capture_id=capture_id,
             delivery_attempt=request.delivery_attempt,
         )
-        return _non_terminal_delivery_response(capture_service, capture_id, result)
+        # Atomic winner gate: HTTP 200 for all 4 outcomes
+        return _acknowledge_forwarded_response(capture_service, capture_id, result)
 
     @app.post(
         "/internal/captures/{capture_id}/delivery/acknowledge-classifying",
@@ -147,23 +234,23 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
     )
     async def schedule_delivery_retry(capture_id: str, request: ScheduleRetryRequest):
         _get_capture(capture_service, capture_id)
-        try:
-            disposition = await capture_service.schedule_delivery_retry(
-                capture_id=capture_id,
-                delivery_attempt=request.delivery_attempt,
-                error_type=request.error_type,
-                reason_type=request.reason_type,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail="stale or invalid delivery retry request") from exc
+        disposition = await capture_service.schedule_delivery_retry(
+            capture_id=capture_id,
+            delivery_attempt=request.delivery_attempt,
+            error_type=request.error_type,
+            reason_type=request.reason_type,
+        )
         capture = _get_capture(capture_service, capture_id)
+        outcome = disposition.outcome or (
+            "retry_scheduled" if disposition.retry_scheduled else "terminal_failure"
+        )
         return DeliveryTransitionResponse(
             capture_id=capture_id,
             delivery_status=capture.delivery_status,
             delivery_attempts=capture.delivery_attempts,
             retry_attempts=capture.retry_attempts,
-            changed=True,
-            outcome="retry_scheduled" if disposition.retry_scheduled else "terminal_failure",
+            changed=not outcome.startswith("ignored_"),
+            outcome=outcome,
         )
 
     @app.post(
@@ -178,7 +265,7 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             delivery_attempt=request.delivery_attempt,
             reason_type=request.reason_type,
         )
-        return _non_terminal_delivery_response(capture_service, capture_id, result)
+        return _acknowledge_failed_response(capture_service, capture_id, result)
 
     @app.post(
         "/internal/receipts/{capture_id}/edit",
@@ -237,6 +324,24 @@ def _capture_response(capture: CaptureRecord) -> CaptureResponse:
     )
 
 
+def _acknowledge_forwarded_response(
+    capture_service: CaptureService,
+    capture_id: str,
+    result: DeliveryMutationResult,
+) -> DeliveryTransitionResponse:
+    """Atomic winner gate: HTTP 200 for all 4 outcomes."""
+    capture = _get_capture(capture_service, capture_id)
+    return DeliveryTransitionResponse(
+        capture_id=capture_id,
+        delivery_status=capture.delivery_status,
+        delivery_attempts=capture.delivery_attempts,
+        retry_attempts=capture.retry_attempts,
+        changed=result.changed,
+        outcome=result.outcome,
+        ignored_reason=result.outcome if result.outcome != "changed" else None,
+    )
+
+
 def _non_terminal_delivery_response(
     capture_service: CaptureService,
     capture_id: str,
@@ -277,3 +382,21 @@ def _delivery_mutation_response(
     )
 
 
+def _acknowledge_failed_response(
+    capture_service: CaptureService,
+    capture_id: str,
+    result: DeliveryMutationResult,
+) -> DeliveryTransitionResponse:
+    """HTTP 409 only for conflicting_replay; HTTP 200 for everything else."""
+    if result.outcome == "conflicting_replay":
+        raise HTTPException(status_code=409, detail="conflicting terminal failure reason")
+    capture = _get_capture(capture_service, capture_id)
+    return DeliveryTransitionResponse(
+        capture_id=capture_id,
+        delivery_status=capture.delivery_status,
+        delivery_attempts=capture.delivery_attempts,
+        retry_attempts=capture.retry_attempts,
+        changed=result.changed,
+        outcome=result.outcome,
+        ignored_reason=result.outcome if result.outcome != "changed" else None,
+    )

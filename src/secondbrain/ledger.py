@@ -1108,6 +1108,18 @@ class Ledger:
             return _result("stale_attempt")
 
         current_ds = row["delivery_status"]
+
+        # Replay safety: already terminally failed
+        if current_ds == DELIVERY_FAILED:
+            stored_reason = row["last_error"] or ""
+            if stored_reason == (reason or ""):
+                return _result("idempotent_replay")
+            return _result("conflicting_replay")
+
+        # Replay safety: already succeeded (complete)
+        if current_ds == COMPLETE:
+            return _result("ignored_already_terminal")
+
         if current_ds not in (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING):
             return _result("invalid_state")
 
@@ -1158,12 +1170,55 @@ class Ledger:
 
         row = self._get_by_capture_id(conn, capture_id)
         current_ds = row["delivery_status"]
-        if current_ds not in (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING):
-            raise ValueError(f"cannot schedule retry from delivery_status={current_ds!r}")
+
+        # Replay safety: stale delivery attempt
         if row["delivery_attempts"] != delivery_attempt:
-            raise ValueError(
-                f"stale delivery_attempt: got {delivery_attempt}, "
-                f"current={row['delivery_attempts']}"
+            return RetryDisposition(
+                capture_id=capture_id,
+                delivery_status=current_ds,
+                delivery_attempts=row["delivery_attempts"],
+                next_attempt_at=None,
+                retry_scheduled=False,
+                failed_terminally=False,
+                outcome="ignored_stale_attempt",
+            )
+
+        # Replay safety: already terminal
+        if current_ds in (COMPLETE, DELIVERY_FAILED):
+            return RetryDisposition(
+                capture_id=capture_id,
+                delivery_status=current_ds,
+                delivery_attempts=row["delivery_attempts"],
+                next_attempt_at=None,
+                retry_scheduled=False,
+                failed_terminally=False,
+                outcome="ignored_already_terminal",
+            )
+
+        # Replay safety: already waiting for retry on this same attempt
+        if current_ds == RETRY_WAIT:
+            from datetime import datetime as _dt
+            raw_next = row["next_attempt_at"]
+            next_dt = _dt.fromisoformat(raw_next) if raw_next else None
+            return RetryDisposition(
+                capture_id=capture_id,
+                delivery_status=RETRY_WAIT,
+                delivery_attempts=row["delivery_attempts"],
+                next_attempt_at=next_dt,
+                retry_scheduled=True,
+                failed_terminally=False,
+                outcome="ignored_retry_already_scheduled",
+            )
+
+        if current_ds not in (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING):
+            return RetryDisposition(
+                capture_id=capture_id,
+                delivery_status=current_ds,
+                delivery_attempts=row["delivery_attempts"],
+                next_attempt_at=None,
+                retry_scheduled=False,
+                failed_terminally=False,
+                outcome="ignored_already_terminal",
             )
 
         now_ts = _iso(now)
@@ -1201,6 +1256,7 @@ class Ledger:
                 next_attempt_at=None,
                 retry_scheduled=False,
                 failed_terminally=True,
+                outcome="terminal_failure",
             )
 
         delay = calculate_retry_delay_seconds(
@@ -1240,6 +1296,7 @@ class Ledger:
             next_attempt_at=next_attempt,
             retry_scheduled=True,
             failed_terminally=False,
+            outcome="retry_scheduled",
         )
 
     def _normalize_delivery_for_local_full(self, conn: sqlite3.Connection) -> int:
@@ -1708,7 +1765,9 @@ class Ledger:
             """
             SELECT derived_note_path
             FROM captures
-            WHERE status IN (?, ?) AND derived_note_path IS NOT NULL
+            WHERE status IN (?, ?)
+              AND derived_note_path IS NOT NULL
+              AND derived_note_path NOT LIKE 'stub://%'
             ORDER BY updated_at DESC, id DESC
             LIMIT 1
             """,

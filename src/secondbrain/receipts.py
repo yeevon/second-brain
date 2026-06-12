@@ -106,7 +106,11 @@ def format_saved_receipt(
     downstream_processing_enabled: bool = True,
 ) -> str:
     if downstream_processing_enabled:
-        content = f"⏳ {capture.capture_id} received.\nYour note is saved. Processing…"
+        content = (
+            f"⏳ {capture.capture_id} received.\n"
+            "Your note is safely captured.\n"
+            "Queued for downstream filing."
+        )
     else:
         content = (
             f"⏳ {capture.capture_id} received.\n"
@@ -194,6 +198,26 @@ def format_delivery_retry_exhausted_receipt(capture_id: str) -> str:
         "Your original note is safe in the local ledger.\n"
         "Manual retry is available."
     )
+
+
+def format_stub_filed_receipt(capture_id: str, *, has_attachments: bool) -> str:
+    content = (
+        f"✅ {capture_id} filed (stub).\n"
+        "Vault write is not yet enabled. Note is durably captured in the ledger."
+    )
+    if has_attachments:
+        content += f"\n{ATTACHMENT_WARNING}"
+    return content
+
+
+def format_stub_inbox_receipt(capture_id: str, *, has_attachments: bool) -> str:
+    content = (
+        f"⚠️ {capture_id} saved to inbox (stub).\n"
+        "Vault write is not yet enabled. Note is durably captured in the ledger."
+    )
+    if has_attachments:
+        content += f"\n{ATTACHMENT_WARNING}"
+    return content
 
 
 def format_manual_retry_accepted_receipt(capture_id: str) -> str:

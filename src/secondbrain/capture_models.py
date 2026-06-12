@@ -105,6 +105,9 @@ class RetryDisposition:
     next_attempt_at: datetime | None
     retry_scheduled: bool
     failed_terminally: bool
+    # Populated for replay/stale cases: "retry_scheduled", "terminal_failure",
+    # "ignored_stale_attempt", "ignored_already_terminal", "ignored_retry_already_scheduled"
+    outcome: str = ""
 
 
 @dataclass(frozen=True)
@@ -143,4 +146,5 @@ class DeliveryMutationResult:
         "stale_attempt",
         "invalid_state",
         "conflicting_replay",
+        "ignored_already_terminal",
     ]

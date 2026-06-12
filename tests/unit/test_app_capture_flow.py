@@ -79,7 +79,8 @@ async def test_capture_handler_persists_receipts_and_enqueues_capture(tmp_path):
     assert capture.receipt_message_id == "9001"
     assert message.channel.last_content == (
         f"⏳ {capture.capture_id} received.\n"
-        "Your note is saved. Processing…"
+        "Your note is safely captured.\n"
+        "Queued for downstream filing."
     )
 
 

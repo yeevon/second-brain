@@ -35,6 +35,36 @@ services:
       retries: 5
       start_period: 30s
 
+  writer-stub:
+    build:
+      context: writer-stub
+      dockerfile: Dockerfile
+    container_name: second-brain-writer-stub
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${WRITER_STUB_ENV_FILE:?WRITER_STUB_ENV_FILE must be set}
+    expose:
+      - "8001"
+    networks:
+      - backend
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health').read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
 secrets:
   n8n_encryption_key:
     file: ${N8N_ENCRYPTION_KEY_FILE:?N8N_ENCRYPTION_KEY_FILE must be set}

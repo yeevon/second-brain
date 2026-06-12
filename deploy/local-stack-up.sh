@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 N8N_ENV_FILE_DEFAULT="$ROOT_DIR/n8n.local.env"
 N8N_KEY_FILE_DEFAULT="$ROOT_DIR/n8n-encryption-key.local"
+WRITER_STUB_ENV_FILE_DEFAULT="$ROOT_DIR/writer-stub.local.env"
 
 if [[ ! -f "${N8N_ENV_FILE:-$N8N_ENV_FILE_DEFAULT}" ]]; then
   echo "n8n env file missing: ${N8N_ENV_FILE:-$N8N_ENV_FILE_DEFAULT}" >&2
@@ -18,12 +19,19 @@ if [[ ! -f "${N8N_ENCRYPTION_KEY_FILE:-$N8N_KEY_FILE_DEFAULT}" ]]; then
   exit 1
 fi
 
+if [[ ! -f "${WRITER_STUB_ENV_FILE:-$WRITER_STUB_ENV_FILE_DEFAULT}" ]]; then
+  echo "writer-stub env file missing: ${WRITER_STUB_ENV_FILE:-$WRITER_STUB_ENV_FILE_DEFAULT}" >&2
+  echo "Copy deploy/writer-stub.env.example and fill in any required values." >&2
+  exit 1
+fi
+
 export CAPTURE_SERVICE_ENV_FILE="${CAPTURE_SERVICE_ENV_FILE:-$ROOT_DIR/.env}"
 export CAPTURE_DATA_SOURCE=second-brain-local-data
 export N8N_IMAGE_TAG="${N8N_IMAGE_TAG:?N8N_IMAGE_TAG must be set}"
 export N8N_ENV_FILE="${N8N_ENV_FILE:-$N8N_ENV_FILE_DEFAULT}"
 export N8N_ENCRYPTION_KEY_FILE="${N8N_ENCRYPTION_KEY_FILE:-$N8N_KEY_FILE_DEFAULT}"
 export N8N_DATA_SOURCE=second-brain-local-n8n-data
+export WRITER_STUB_ENV_FILE="${WRITER_STUB_ENV_FILE:-$WRITER_STUB_ENV_FILE_DEFAULT}"
 export COMPOSE_FILE=compose.yaml:compose.local.yaml:compose.n8n.yaml
 
 cd "$ROOT_DIR"
@@ -46,11 +54,11 @@ docker run \
 
 docker volume create second-brain-local-n8n-data >/dev/null
 
-docker compose up -d capture-service n8n
+docker compose up -d --build capture-service n8n writer-stub
 
 echo "Waiting for containers to become healthy..."
 
-for container in second-brain-capture-service second-brain-n8n; do
+for container in second-brain-capture-service second-brain-n8n second-brain-writer-stub; do
   health=""
   for _ in $(seq 1 60); do
     health="$(
@@ -72,6 +80,7 @@ done
 
 echo "capture-service local container is healthy"
 echo "n8n local container is healthy"
+echo "writer-stub local container is healthy"
 echo ""
 echo "Open the n8n editor through an SSH tunnel or at http://127.0.0.1:5678 locally."
 echo "Run deploy/bootstrap-n8n.sh after creating the owner account."

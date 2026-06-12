@@ -99,6 +99,7 @@ class CaptureOnlyStartup:
         self.periodic_task: asyncio.Task | None = None
         self.reaper_task: asyncio.Task | None = None
         self.heartbeat_task: asyncio.Task | None = None
+        self.delivery_task: asyncio.Task | None = None
 
     async def start_once(self, client) -> ReconcileResult | None:
         async with self._startup_lock:
@@ -107,6 +108,32 @@ class CaptureOnlyStartup:
             result = await self.capture_service.startup_reconcile(client)
             self._started = True
             return result
+
+
+def ensure_delivery_dispatcher_task(
+    *,
+    startup,
+    capture_service: CaptureService,
+    settings,
+) -> None:
+    task = startup.delivery_task
+    if task is not None and not task.done():
+        return
+    from secondbrain.delivery import run_delivery_dispatcher
+    from secondbrain.n8n_delivery import N8nWebhookDeliveryClient
+    downstream_client = N8nWebhookDeliveryClient(
+        webhook_url=settings.n8n_intake_webhook_url,
+        webhook_token=settings.n8n_intake_webhook_token,
+        timeout_seconds=settings.delivery_webhook_timeout_seconds,
+    )
+    startup.delivery_task = asyncio.create_task(
+        run_delivery_dispatcher(
+            settings=settings,
+            ledger=capture_service._ledger,
+            downstream_client=downstream_client,
+            receipt_edit_client=capture_service,
+        )
+    )
 
 
 def ensure_stale_lease_reaper_task(
@@ -306,6 +333,12 @@ async def run_capture_only_runtime(settings: Settings) -> None:
             startup=startup,
             capture_service=capture_service,
         )
+        if settings.downstream_delivery_enabled:
+            ensure_delivery_dispatcher_task(
+                startup=startup,
+                capture_service=capture_service,
+                settings=settings,
+            )
         if reconcile_result is not None:
             capture_service.record_capture_service_ready(
                 instance_id=instance_id,
@@ -323,7 +356,10 @@ async def run_capture_only_runtime(settings: Settings) -> None:
         capture_service=capture_service,
     )
     print("capture-service runtime mode: capture-only")
-    print("downstream processing: disabled")
+    if settings.downstream_delivery_enabled:
+        print("downstream processing: enabled (n8n webhook delivery)")
+    else:
+        print("downstream processing: disabled")
     print("starting Discord listener")
     print(f"  guild_id: {settings.discord_guild_id}")
     print(f"  capture_channel_id: {settings.discord_capture_channel_id}")
@@ -386,7 +422,7 @@ async def run_service_runtime(
         await api_server.stop()
         await client.close()
 
-        for attr in ("periodic_task", "worker_task", "reaper_task", "heartbeat_task"):
+        for attr in ("periodic_task", "worker_task", "reaper_task", "heartbeat_task", "delivery_task"):
             task = getattr(startup, attr, None)
             if task is not None and not task.done():
                 task.cancel()

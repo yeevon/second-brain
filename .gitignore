@@ -4,6 +4,7 @@
 capture-service.local.env
 n8n.local.env
 n8n-encryption-key.local
+writer-stub.local.env
 .runtime/
 __pycache__/
 *.pyc

@@ -219,7 +219,45 @@ After creating the owner account in the UI, run on EC2:
 deploy/bootstrap-n8n.sh
 ```
 
-This is idempotent — running it again when `Second Brain - Error Handler` already exists exits cleanly. Imported workflows start in **inactive** state; activate them manually after binding credentials in the UI.
+This is idempotent — running it again when both workflows already exist exits cleanly. Both `Second Brain - Error Handler` and `Second Brain - Intake` are imported in **inactive** state. Activate them manually after binding credentials in the UI.
+
+### Bind credentials before activating Second Brain - Intake
+
+Four credentials must be created in the n8n UI before the intake workflow can be activated:
+
+| Credential name | Type | Header / field |
+| --- | --- | --- |
+| `Intake Webhook Token` | HTTP Header Auth | `X-Second-Brain-Intake-Token` — must match `N8N_INTAKE_WEBHOOK_TOKEN` in capture-service env |
+| `Capture Service Token` | HTTP Header Auth | `X-Second-Brain-Internal-Token` — must match `CAPTURE_SERVICE_INTERNAL_TOKEN` |
+| `Gemini API Key` | HTTP Header Auth | `X-Goog-Api-Key` — your Google AI Studio key |
+| `Writer Stub Token` | HTTP Header Auth | `X-Writer-Stub-Token` — must match `WRITER_STUB_INTERNAL_TOKEN` in writer-stub env |
+
+After binding all four, open the workflow, verify the node connections, then activate.
+
+### Writer-stub environment file (SB-112+)
+
+Create `/opt/second-brain/config/writer-stub.env` from `deploy/writer-stub.env.example`:
+
+```dotenv
+WRITER_STUB_INTERNAL_TOKEN=<at least 32 random characters>
+CAPTURE_SERVICE_URL=http://capture-service:8000
+CAPTURE_SERVICE_INTERNAL_TOKEN=<same value as in capture-service.env>
+```
+
+The `WRITER_STUB_INTERNAL_TOKEN` is the shared secret between n8n and writer-stub (the `Writer Stub Token` credential above). Never print or commit it.
+
+### Enable downstream delivery in capture-service (SB-112+)
+
+Add to `/opt/second-brain/config/capture-service.env`:
+
+```dotenv
+DOWNSTREAM_DELIVERY_ENABLED=true
+N8N_INTAKE_WEBHOOK_URL=http://n8n:5678/webhook/second-brain-intake
+N8N_INTAKE_WEBHOOK_TOKEN=<same value as Intake Webhook Token credential>
+DELIVERY_WEBHOOK_TIMEOUT_SECONDS=10
+```
+
+Leave `DOWNSTREAM_DELIVERY_ENABLED=false` until the intake workflow is active and credentials are bound. Enabling it before the workflow is ready causes delivery attempts to fail and queue retries.
 
 ### n8n environment file
 

@@ -23,6 +23,7 @@ export N8N_IMAGE_TAG="${N8N_IMAGE_TAG:?N8N_IMAGE_TAG must be set}"
 export N8N_ENV_FILE="${N8N_ENV_FILE:-/opt/second-brain/config/n8n.env}"
 export N8N_ENCRYPTION_KEY_FILE="${N8N_ENCRYPTION_KEY_FILE:-/opt/second-brain/config/n8n-encryption-key}"
 export N8N_DATA_SOURCE="${N8N_DATA_SOURCE:-$DATA_DIR/n8n}"
+export WRITER_STUB_ENV_FILE="${WRITER_STUB_ENV_FILE:-/opt/second-brain/config/writer-stub.env}"
 export COMPOSE_FILE=compose.yaml:compose.n8n.yaml
 
 N8N_DATA_DIR="$N8N_DATA_SOURCE"
@@ -43,6 +44,11 @@ fi
 
 if [[ ! -s "$N8N_ENCRYPTION_KEY_FILE" ]]; then
   echo "n8n encryption key file is empty: $N8N_ENCRYPTION_KEY_FILE" >&2
+  exit 1
+fi
+
+if [[ ! -f "$WRITER_STUB_ENV_FILE" ]]; then
+  echo "writer-stub env file missing: $WRITER_STUB_ENV_FILE" >&2
   exit 1
 fi
 

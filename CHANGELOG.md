@@ -6,6 +6,34 @@ All notable changes to this project are documented here.
 
 ## Milestone 3 — Move classification into n8n
 
+### SB-112 — At-least-once webhook delivery from capture-service to n8n
+
+Implemented the full webhook delivery pipeline between capture-service and n8n, including a writer-stub container that breaks the n8n concurrency deadlock.
+
+- **`src/secondbrain/n8n_delivery.py`** — `N8nWebhookDeliveryClient` posts `{capture_id, delivery_attempt}` envelopes to the n8n intake webhook with `X-Second-Brain-Intake-Token` authentication. Raises on 4xx/5xx so the dispatcher can schedule a retry.
+- **`src/secondbrain/config.py`** — `DOWNSTREAM_DELIVERY_ENABLED` feature flag (default `false`). When enabled, `N8N_INTAKE_WEBHOOK_URL` (must start with `http://n8n:5678/webhook/second-brain-intake`) and `N8N_INTAKE_WEBHOOK_TOKEN` (min 32 chars) become required.
+- **`src/secondbrain/app.py`** — `ensure_delivery_dispatcher_task` wires the dispatcher loop when delivery is enabled. `reconcile_once` calls it on each reconciliation pass.
+- **`src/secondbrain/ledger.py`** — `_schedule_retry` now returns typed `RetryDisposition` with an `outcome` field instead of raising `ValueError`. Returns `ignored_stale_attempt`, `ignored_already_terminal`, or `ignored_retry_already_scheduled` for replay-safe cases. `_mark_delivery_failed_terminally` detects `idempotent_replay` (same attempt, same reason) and `conflicting_replay` (same attempt, different reason) when a capture is already `DELIVERY_FAILED`, and `ignored_already_terminal` for captures that already reached `COMPLETE`.
+- **`src/secondbrain/capture_models.py`** — `RetryDisposition.outcome` field added. `DeliveryMutationResult.outcome` extended with `ignored_already_terminal` and `conflicting_replay` variants.
+- **`src/secondbrain/delivery.py`** — Removed `try/except ValueError`; now checks `disposition.outcome.startswith("ignored_")` and skips silently.
+- **`src/secondbrain/capture_api.py`** — `_acknowledge_forwarded_response()` returns HTTP 200 for all four outcomes (`changed`, `idempotent_replay`, `stale_attempt`, `invalid_state`) — the atomic winner gate prevents n8n from seeing 409 on legitimate retries. `_acknowledge_failed_response()` returns HTTP 409 only for `conflicting_replay`. Three new internal endpoints: `GET /internal/downstream/captures/{id}`, `POST /internal/security/screen`, `POST /internal/contracts/classification/validate`. All n8n-facing models inherit `StrictInternalRequest` (`extra="forbid"`).
+- **`src/secondbrain/api_models.py`** — `StrictInternalRequest` base class. `DownstreamCaptureResponse`, `SecurityScreenRequest/Response`, `ClassificationValidationRequest/Response` added. Sensitive captures return `raw_text=None`.
+- **`src/secondbrain/status.py`** — `captures_filed_today` and `last_successful_vault_write` queries exclude `derived_note_path LIKE 'stub://%'` so writer-stub filings do not pollute real vault metrics.
+- **`src/secondbrain/receipts.py`** — `format_saved_receipt` updated: downstream-enabled variant now reads "Your note is safely captured. / Queued for downstream filing." `format_stub_filed_receipt` and `format_stub_inbox_receipt` added for writer-stub terminal paths.
+- **`writer-stub/`** — Standalone FastAPI container (UID 10002, port 8001, no published host port). Receives `POST /write` and `POST /inbox` from n8n; writes `stub://<capture_id>` paths back to capture-service. Prevents the n8n concurrency deadlock (`N8N_CONCURRENCY_PRODUCTION_LIMIT=1` blocks n8n from calling itself while processing).
+- **`compose.n8n.yaml`** — `second-brain-writer-stub` service added: builds from `writer-stub/`, `expose: ["8001"]`, `cap_drop: ALL`, joined to backend network, Python urllib healthcheck.
+- **`n8n/workflows/second-brain-intake.json`** — `Second Brain - Intake` workflow fixture: webhook at `second-brain-intake` with `responseMode: responseNode`, immediate 202 response, screen → route → Gemini classify → validate → writer-stub, acknowledge-forwarded. `saveDataSuccessExecution: none`, `saveDataErrorExecution: none`, `active: false`.
+- **`deploy/bootstrap-n8n.sh`** — Extended to bootstrap `Second Brain - Intake` alongside `Second Brain - Error Handler`. Both are idempotent by name, strip `id`/`versionId`, import inactive, and verify by name after import.
+- **`deploy/writer-stub.env.example`** — Template with `WRITER_STUB_INTERNAL_TOKEN`, `CAPTURE_SERVICE_URL`, `CAPTURE_SERVICE_INTERNAL_TOKEN`.
+- **`.env.example`** / **`deploy/capture-service.env.example`** — `DOWNSTREAM_DELIVERY_ENABLED`, `N8N_INTAKE_WEBHOOK_URL`, `N8N_INTAKE_WEBHOOK_TOKEN`, `DELIVERY_WEBHOOK_TIMEOUT_SECONDS` added.
+- **`deploy/local-stack-up.sh`** / **`deploy/deploy.sh`** — Updated to pass `WRITER_STUB_ENV_FILE` and verify writer-stub health.
+- **`tests/architecture/test_n8n_intake_workflow.py`** — 30 architecture assertions: fixture validity, webhook path and auth, all capture-service and writer-stub URLs, Gemini URL, no localhost, PLACEHOLDER credentials only, no restricted node types, execution retention settings.
+- **`tests/unit/test_n8n_delivery.py`** — Config validation for `DOWNSTREAM_DELIVERY_ENABLED` and delivery client behavior (envelope shape, auth header, error propagation).
+- **`tests/unit/test_retry_replay_safety.py`** — Replay-safety outcomes for `_schedule_retry` and `_mark_delivery_failed_terminally`.
+- **`tests/unit/test_stub_exclusion.py`** — `stub://` exclusion in `captures_filed_today` and `last_successful_vault_write`; stub receipt formatters.
+
+---
+
 ### SB-111 — Deploy a secured n8n foundation
 
 Added n8n as a Compose overlay alongside capture-service. Key changes:
