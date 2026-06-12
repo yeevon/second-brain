@@ -95,15 +95,43 @@ cs_fetch() {
   " 2>/dev/null
 }
 
-# ── Cleanup: mark synthetic capture terminal on exit ─────────────────────────
+# ── Cleanup: mark synthetic capture DELIVERY_FAILED via direct SQL ────────────
+# The production workflow-error API cannot be used for cleanup: it rejects a
+# terminal disposition after a prior retryable report for the same attempt as
+# ignored_conflicting_replay. Direct SQL bypasses that guard safely because the
+# synthetic capture was itself created via direct SQL (local-only test helper).
 
 cleanup() {
-  if [[ -n "$CAPTURE_ID" && -n "$DELIVERY_ATTEMPT" ]]; then
-    cs_fetch \
-      "http://capture-service:8000/internal/captures/$CAPTURE_ID/delivery/report-workflow-error" \
-      "POST" \
-      "{\"delivery_attempt\":${DELIVERY_ATTEMPT},\"disposition\":\"terminal\",\"error_type\":\"contract_violation\",\"reason_type\":\"test_cleanup\",\"workflow_id\":\"test\",\"workflow_name\":\"second_brain_intake\",\"stage\":\"workflow_unknown\"}" \
-      >/dev/null 2>&1 || true
+  if [[ -n "$CAPTURE_ID" ]]; then
+    docker exec -i \
+      -e "CLEANUP_CAPTURE_ID=$CAPTURE_ID" \
+      "$CS_CONTAINER" python3 - <<'PYEOF' >/dev/null 2>&1 || true
+import sqlite3, os, json
+from datetime import UTC, datetime
+
+ledger_path = os.environ.get('LEDGER_PATH', '/var/lib/second-brain/ledger.sqlite3')
+capture_id = os.environ['CLEANUP_CAPTURE_ID']
+now_iso = datetime.now(UTC).isoformat()
+
+with sqlite3.connect(ledger_path, timeout=10) as conn:
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute(
+        """UPDATE captures
+           SET status='FAILED', delivery_status='DELIVERY_FAILED',
+               processing_lease_until=NULL, next_attempt_at=NULL,
+               last_error='test_cleanup', updated_at=?
+           WHERE capture_id=?""",
+        (now_iso, capture_id),
+    )
+    conn.execute(
+        """INSERT INTO capture_events
+               (capture_id, event_type, event_payload_json, created_at)
+           VALUES (?, 'TEST_CLEANUP', ?, ?)""",
+        (capture_id, json.dumps({"reason": "test_cleanup"}), now_iso),
+    )
+    conn.commit()
+PYEOF
   fi
   rm -f "$TMP_WF"
 }
@@ -170,46 +198,71 @@ echo ""
 echo "--- Step 1: create synthetic test capture ---"
 
 # Runs entirely inside the capture-service container via its Python environment.
-# No test endpoint added to production code; uses the ledger API directly.
+# No test endpoint added to production code.
+#
+# Uses a single atomic SQLite transaction that inserts the capture directly in
+# FORWARDING state — there is no PENDING_FORWARD intermediate, so the
+# dispatcher cannot race between insert and claim.
+#
+# The -i flag on docker exec is required so the heredoc reaches python3 stdin.
 create_result="$(
-  docker exec -e "DISCORD_MSG_ID=$DISCORD_MSG_ID" "$CS_CONTAINER" python3 - <<'PYEOF'
-import sys, os
-from pathlib import Path
+  docker exec -i \
+    -e "DISCORD_MSG_ID=$DISCORD_MSG_ID" \
+    "$CS_CONTAINER" python3 - <<'PYEOF'
+import sys, os, json, sqlite3
 from datetime import UTC, datetime, timedelta
-
-sys.path.insert(0, '/app/src')
-from secondbrain.ledger import Ledger
 
 ledger_path = os.environ.get('LEDGER_PATH', '/var/lib/second-brain/ledger.sqlite3')
 msg_id = os.environ['DISCORD_MSG_ID']
+now = datetime.now(UTC)
+now_iso = now.isoformat()
+lease_iso = (now + timedelta(hours=2)).isoformat()
+delivery_attempts = 1
 
-ledger = Ledger(Path(ledger_path))
-try:
-    now = datetime.now(UTC)
-    result = ledger.insert_accepted_capture(
-        discord_message_id=msg_id,
-        discord_channel_id='0',
-        discord_guild_id='0',
-        discord_author_id='0',
-        raw_text='SB-113 error workflow regression test — safe to delete',
-        has_attachments=False,
-        received_at=now,
-    )
-    capture_id = result.capture.capture_id
+with sqlite3.connect(ledger_path, timeout=15) as conn:
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=15000")
 
-    claimed = ledger.claim_due_deliveries(
-        now=now,
-        lease_until=now + timedelta(hours=2),
-        batch_size=25,
-    )
-    match = next((c for c in claimed if c.capture_id == capture_id), None)
-    if not match:
-        print(f'ERROR: failed to claim {capture_id}', file=sys.stderr)
+    if conn.execute(
+        "SELECT 1 FROM captures WHERE discord_message_id=?", (msg_id,)
+    ).fetchone():
+        print(f'ERROR: discord_message_id {msg_id} already exists', file=sys.stderr)
         sys.exit(1)
 
-    print(f'{match.capture_id}:{match.delivery_attempts}')
-finally:
-    ledger.close()
+    # Generate capture_id matching ledger pattern: SB-YYYYMMDD-NNNN
+    prefix = f"SB-{now.strftime('%Y%m%d')}-"
+    row = conn.execute(
+        "SELECT capture_id FROM captures WHERE capture_id LIKE ? ORDER BY capture_id DESC LIMIT 1",
+        (f"{prefix}%",),
+    ).fetchone()
+    next_number = (int(row["capture_id"].rsplit("-", 1)[1]) + 1) if row else 1
+    capture_id = f"{prefix}{next_number:04d}"
+
+    # Insert directly in FORWARDING state — atomic, no dispatcher race
+    conn.execute(
+        """INSERT INTO captures (
+               capture_id, discord_message_id, discord_channel_id, discord_guild_id,
+               discord_author_id, raw_text, is_sensitive, has_attachments,
+               attachment_metadata_json, received_at, status, delivery_status,
+               delivery_attempts, processing_lease_until, updated_at
+           ) VALUES (?, ?, '0', '0', '0', ?, 0, 0, '[]', ?, 'RECEIVED', 'FORWARDING', ?, ?, ?)""",
+        (capture_id, msg_id,
+         'SB-113 error workflow regression test — safe to delete',
+         now_iso, delivery_attempts, lease_iso, now_iso),
+    )
+    conn.execute(
+        "INSERT INTO capture_events (capture_id, event_type, event_payload_json, created_at) VALUES (?, ?, ?, ?)",
+        (capture_id, 'CAPTURE_RECEIVED', json.dumps({"status": "RECEIVED"}), now_iso),
+    )
+    conn.execute(
+        "INSERT INTO capture_events (capture_id, event_type, event_payload_json, created_at) VALUES (?, ?, ?, ?)",
+        (capture_id, 'DELIVERY_ATTEMPT_CLAIMED',
+         json.dumps({"delivery_attempt": delivery_attempts, "lease_until": lease_iso}), now_iso),
+    )
+    conn.commit()
+
+print(f'{capture_id}:{delivery_attempts}')
 PYEOF
 )"
 
