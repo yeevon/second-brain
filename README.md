@@ -91,6 +91,10 @@ writer-service/
     unit/                            # auth, validation, Markdown generation, idempotency, flock, git_ops
     integration/                     # filing, idempotent replay, inbox routing, Git sync, Git failures
 
+writer-stub/
+  app.py              # standalone FastAPI stub that receives /write and /inbox from n8n
+  Dockerfile          # Python 3.13-slim, UID 10002, port 8001
+
 deploy/
   container-entrypoint.sh           # EBS sentinel check before container start
   provision-host.sh                  # EC2 host setup (includes vault clone and SSH key setup)
