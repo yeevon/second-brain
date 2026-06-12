@@ -3,7 +3,6 @@ services:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:?N8N_IMAGE_TAG must be set}
     container_name: second-brain-n8n
     restart: unless-stopped
-    init: true
     env_file:
       - ${N8N_ENV_FILE:?N8N_ENV_FILE must be set}
     environment:
