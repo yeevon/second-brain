@@ -198,7 +198,7 @@ n8n is added alongside capture-service as of SB-111. Key facts about the foundat
 - **Persistent** — workflows, credentials, and the owner account survive container restarts. State lives on EBS at `/opt/second-brain/data/n8n`.
 - **Single instance** — one n8n process with `N8N_CONCURRENCY_PRODUCTION_LIMIT=1`. No workers, no queue mode.
 - **SQLite during foundation phase** — n8n uses its own internal SQLite database. PostgreSQL migration is future work, required before adding horizontal scaling or queue workers.
-- **Explicit encryption key** — n8n credentials are encrypted with a key stored at `/opt/second-brain/config/n8n-encryption-key`. Generate once with `openssl rand -hex 32`. Losing the key loses all stored credentials.
+- **Explicit encryption key** — n8n credentials are encrypted with a key stored at `/opt/second-brain/config/n8n-encryption-key`. Generate once with `printf '%s' "$(openssl rand -hex 32)"`. Losing the key loses all stored credentials.
 - **Private SSH-tunnel access** — the UI is accessible only through an SSH tunnel. Port 5678 is bound to `127.0.0.1` only; no public security-group rule is added.
 - **Execution payloads not retained globally** — `EXECUTIONS_DATA_SAVE_ON_ERROR=none` and `EXECUTIONS_DATA_SAVE_ON_SUCCESS=none` are the global defaults. Raw capture text must never appear in n8n storage.
 - **Error Trigger workflow** — `Second Brain - Error Handler` is bootstrapped once via `deploy/bootstrap-n8n.sh`. It normalizes safe metadata only; never retains capture text, stack traces, or raw exception messages.
@@ -339,11 +339,11 @@ Create `/opt/second-brain/config/n8n.env` from `deploy/n8n.env.example`. Do not 
 ### n8n encryption key
 
 ```bash
-install -m 600 /dev/null /opt/second-brain/config/n8n-encryption-key
-nano /opt/second-brain/config/n8n-encryption-key
+printf '%s' "$(openssl rand -hex 32)" \
+  | install -m 600 /dev/stdin /opt/second-brain/config/n8n-encryption-key
 ```
 
-Populate only the generated value. Do not print, log, or commit the key.
+This writes the key without a trailing newline, which n8n requires. Do not print, log, or commit the key.
 
 ### Additional verify.sh checks (SB-111)
 
