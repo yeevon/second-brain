@@ -35,6 +35,7 @@ from secondbrain.capture_models import (
     RequeuedLease,
     RetryDisposition,
     TransitionResult,
+    WorkflowErrorOutcome,
 )
 from secondbrain.sqlite_runtime import SQLiteRuntime
 
@@ -378,6 +379,43 @@ class Ledger:
                 capture_id=capture_id,
                 delivery_attempt=delivery_attempt,
                 reason=reason,
+            ),
+        )
+
+    def report_workflow_error(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        disposition: str,
+        error_type: str,
+        reason_type: str,
+        workflow_id: str,
+        workflow_name: str,
+        execution_id: str | None,
+        stage: str,
+        max_attempts: int,
+        base_delay_seconds: int,
+        max_delay_seconds: int,
+    ) -> WorkflowErrorOutcome:
+        now = _now()
+        return self._write(
+            "report_workflow_error",
+            lambda conn: self._report_workflow_error(
+                conn,
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                disposition=disposition,
+                error_type=error_type,
+                reason_type=reason_type,
+                workflow_id=workflow_id,
+                workflow_name=workflow_name,
+                execution_id=execution_id,
+                stage=stage,
+                max_attempts=max_attempts,
+                base_delay_seconds=base_delay_seconds,
+                max_delay_seconds=max_delay_seconds,
+                now=now,
             ),
         )
 
@@ -1298,6 +1336,140 @@ class Ledger:
             failed_terminally=False,
             outcome="retry_scheduled",
         )
+
+    def _report_workflow_error(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        disposition: str,
+        error_type: str,
+        reason_type: str,
+        workflow_id: str,
+        workflow_name: str,
+        execution_id: str | None,
+        stage: str,
+        max_attempts: int,
+        base_delay_seconds: int,
+        max_delay_seconds: int,
+        now: datetime,
+    ) -> WorkflowErrorOutcome:
+        row = self._get_by_capture_id(conn, capture_id)
+        current_ds = row["delivery_status"]
+        current_attempts = row["delivery_attempts"]
+        retry_attempts = row["retry_attempts"] if "retry_attempts" in row.keys() else 0
+
+        # Stale attempt: request's attempt doesn't match the active attempt
+        if delivery_attempt != current_attempts:
+            return WorkflowErrorOutcome(
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                delivery_status=current_ds,
+                retry_attempts=retry_attempts,
+                outcome="ignored_stale_attempt",
+            )
+
+        # Check for a prior N8N_WORKFLOW_ERROR_REPORTED event for this attempt
+        prior_row = conn.execute(
+            """
+            SELECT event_payload_json FROM capture_events
+            WHERE capture_id = ?
+              AND event_type = 'N8N_WORKFLOW_ERROR_REPORTED'
+              AND CAST(json_extract(event_payload_json, '$.delivery_attempt') AS INTEGER) = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (capture_id, delivery_attempt),
+        ).fetchone()
+
+        if prior_row is not None:
+            prior_payload = json.loads(prior_row["event_payload_json"])
+            prior_disposition = prior_payload.get("disposition")
+
+            # Conflicting replay: different disposition for same attempt
+            if prior_disposition != disposition:
+                return WorkflowErrorOutcome(
+                    capture_id=capture_id,
+                    delivery_attempt=delivery_attempt,
+                    delivery_status=current_ds,
+                    retry_attempts=retry_attempts,
+                    outcome="ignored_conflicting_replay",
+                )
+
+            # Idempotent replay: same disposition already reported
+            if disposition == "retryable":
+                outcome = "ignored_retry_already_scheduled" if current_ds == RETRY_WAIT else "ignored_already_terminal"
+            else:
+                outcome = "ignored_already_terminal"
+            return WorkflowErrorOutcome(
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                delivery_status=current_ds,
+                retry_attempts=retry_attempts,
+                outcome=outcome,
+            )
+
+        # No prior event — already in a terminal delivery state
+        if current_ds in (COMPLETE, DELIVERY_FAILED):
+            return WorkflowErrorOutcome(
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                delivery_status=current_ds,
+                retry_attempts=retry_attempts,
+                outcome="ignored_already_terminal",
+            )
+
+        # Append the audit event before applying the transition
+        event_payload: dict[str, Any] = {
+            "delivery_attempt": delivery_attempt,
+            "disposition": disposition,
+            "error_type": error_type,
+            "reason_type": reason_type,
+            "workflow_id": workflow_id,
+            "workflow_name": workflow_name,
+            "stage": stage,
+        }
+        if execution_id is not None:
+            event_payload["execution_id"] = execution_id
+        self._append_event(conn, capture_id, "N8N_WORKFLOW_ERROR_REPORTED", event_payload)
+
+        if disposition == "retryable":
+            retry_disp = self._schedule_retry(
+                conn,
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                now=now,
+                error_type=error_type,
+                reason_type=reason_type,
+                max_attempts=max_attempts,
+                base_delay_seconds=base_delay_seconds,
+                max_delay_seconds=max_delay_seconds,
+            )
+            updated = self._get_by_capture_id(conn, capture_id)
+            return WorkflowErrorOutcome(
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                delivery_status=retry_disp.delivery_status,
+                retry_attempts=updated["retry_attempts"] if "retry_attempts" in updated.keys() else 0,
+                outcome=retry_disp.outcome,
+            )
+        else:  # terminal
+            fail_result = self._mark_delivery_failed_terminally(
+                conn,
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                reason=reason_type,
+            )
+            updated = self._get_by_capture_id(conn, capture_id)
+            outcome = "terminal_failure" if fail_result.outcome == "changed" else fail_result.outcome
+            return WorkflowErrorOutcome(
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                delivery_status=fail_result.delivery_status,
+                retry_attempts=updated["retry_attempts"] if "retry_attempts" in updated.keys() else 0,
+                outcome=outcome,
+            )
 
     def _normalize_delivery_for_local_full(self, conn: sqlite3.Connection) -> int:
         """Normalize all non-terminal delivery states to NOT_APPLICABLE for local-full mode."""

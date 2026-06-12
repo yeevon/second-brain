@@ -20,9 +20,11 @@ from secondbrain.api_models import (
     HealthResponse,
     ReceiptDeliveryResponse,
     RenewLeaseRequest,
+    ReportWorkflowErrorRequest,
     ScheduleRetryRequest,
     SecurityScreenRequest,
     SecurityScreenResponse,
+    WorkflowErrorResponse,
 )
 from secondbrain.capture_service import (
     CaptureNotFoundError,
@@ -266,6 +268,32 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             reason_type=request.reason_type,
         )
         return _acknowledge_failed_response(capture_service, capture_id, result)
+
+    @app.post(
+        "/internal/captures/{capture_id}/delivery/report-workflow-error",
+        response_model=WorkflowErrorResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def report_workflow_error(capture_id: str, request: ReportWorkflowErrorRequest):
+        _get_capture(capture_service, capture_id)
+        outcome = await capture_service.report_workflow_error(
+            capture_id=capture_id,
+            delivery_attempt=request.delivery_attempt,
+            disposition=request.disposition,
+            error_type=request.error_type,
+            reason_type=request.reason_type,
+            workflow_id=request.workflow_id,
+            workflow_name=request.workflow_name,
+            execution_id=request.execution_id,
+            stage=request.stage,
+        )
+        return WorkflowErrorResponse(
+            capture_id=outcome.capture_id,
+            delivery_attempt=outcome.delivery_attempt,
+            delivery_status=outcome.delivery_status,
+            retry_attempts=outcome.retry_attempts,
+            outcome=outcome.outcome,
+        )
 
     @app.post(
         "/internal/receipts/{capture_id}/edit",

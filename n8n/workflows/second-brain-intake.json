@@ -678,7 +678,8 @@
     "saveDataSuccessExecution": "none",
     "saveDataErrorExecution": "none",
     "saveManualExecutions": false,
-    "saveExecutionProgress": false
+    "saveExecutionProgress": false,
+    "errorWorkflow": "PLACEHOLDER_SECOND_BRAIN_ERROR_HANDLER"
   },
   "meta": {
     "templateCredsSetupCompleted": false

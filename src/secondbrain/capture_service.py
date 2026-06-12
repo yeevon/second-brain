@@ -20,6 +20,7 @@ from secondbrain.capture_models import (
     DeliveryMutationResult,
     RetryDisposition,
     TransitionResult,
+    WorkflowErrorOutcome,
 )
 from secondbrain.discord_capture import extract_attachment_metadata, should_capture_message
 from secondbrain.ledger import UNSET, Ledger
@@ -596,6 +597,48 @@ class CaptureService:
                 content=_FAILED_RECEIPT.format(capture_id=capture_id),
             )
         return result
+
+    async def report_workflow_error(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        disposition: str,
+        error_type: str,
+        reason_type: str,
+        workflow_id: str,
+        workflow_name: str,
+        execution_id: str | None,
+        stage: str,
+    ) -> WorkflowErrorOutcome:
+        from secondbrain.delivery import _RETRY_RECEIPT, _FAILED_RECEIPT, _edit_receipt_best_effort
+        outcome = self._ledger.report_workflow_error(
+            capture_id=capture_id,
+            delivery_attempt=delivery_attempt,
+            disposition=disposition,
+            error_type=error_type,
+            reason_type=reason_type,
+            workflow_id=workflow_id,
+            workflow_name=workflow_name,
+            execution_id=execution_id,
+            stage=stage,
+            max_attempts=self.settings.delivery_retry_max_attempts,
+            base_delay_seconds=self.settings.delivery_retry_base_delay_seconds,
+            max_delay_seconds=self.settings.delivery_retry_max_delay_seconds,
+        )
+        if outcome.outcome == "retry_scheduled":
+            await _edit_receipt_best_effort(
+                self,
+                capture_id=capture_id,
+                content=_RETRY_RECEIPT.format(capture_id=capture_id),
+            )
+        elif outcome.outcome == "terminal_failure":
+            await _edit_receipt_best_effort(
+                self,
+                capture_id=capture_id,
+                content=_FAILED_RECEIPT.format(capture_id=capture_id),
+            )
+        return outcome
 
     def manual_retry_capture(self, *, capture_id: str) -> bool:
         from datetime import UTC, datetime

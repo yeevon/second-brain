@@ -135,6 +135,15 @@ class LeaseReaperResult:
 
 
 @dataclass(frozen=True)
+class WorkflowErrorOutcome:
+    capture_id: str
+    delivery_attempt: int
+    delivery_status: str
+    retry_attempts: int
+    outcome: str
+
+
+@dataclass(frozen=True)
 class DeliveryMutationResult:
     capture_id: str
     delivery_status: str

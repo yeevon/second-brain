@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from secondbrain.models import Classification
 
@@ -140,6 +140,56 @@ class AcknowledgeDeliveryFailedRequest(StrictInternalRequest):
         if v:
             return _validate_safe_slug(v)
         return v
+
+
+class ReportWorkflowErrorRequest(StrictInternalRequest):
+    delivery_attempt: int = Field(ge=1)
+    disposition: Literal["retryable", "terminal"]
+    error_type: str = Field(min_length=1, max_length=100)
+    reason_type: str = Field(default="workflow_error", max_length=100)
+    workflow_id: str = Field(min_length=1, max_length=100)
+    workflow_name: str = Field(min_length=1, max_length=100)
+    execution_id: str | None = Field(default=None, max_length=100)
+    stage: str = Field(min_length=1, max_length=100)
+
+    @field_validator("error_type", "reason_type", "workflow_id", "workflow_name", "stage")
+    @classmethod
+    def validate_safe_slug_fields(cls, v: str) -> str:
+        return _validate_safe_slug(v)
+
+    @field_validator("execution_id")
+    @classmethod
+    def validate_execution_id(cls, v: str | None) -> str | None:
+        if v is not None:
+            return _validate_safe_slug(v)
+        return v
+
+    @model_validator(mode="after")
+    def validate_disposition_and_stage(self) -> "ReportWorkflowErrorRequest":
+        from secondbrain.downstream_errors import (
+            ALLOWED_STAGES,
+            RETRYABLE_DOWNSTREAM_ERRORS,
+            TERMINAL_DOWNSTREAM_ERRORS,
+        )
+        if self.disposition == "retryable" and self.error_type not in RETRYABLE_DOWNSTREAM_ERRORS:
+            raise ValueError(
+                f"error_type {self.error_type!r} is not a known retryable error"
+            )
+        if self.disposition == "terminal" and self.error_type not in TERMINAL_DOWNSTREAM_ERRORS:
+            raise ValueError(
+                f"error_type {self.error_type!r} is not a known terminal error"
+            )
+        if self.stage not in ALLOWED_STAGES:
+            raise ValueError(f"stage {self.stage!r} is not an allowlisted stage")
+        return self
+
+
+class WorkflowErrorResponse(BaseModel):
+    capture_id: str
+    delivery_attempt: int
+    delivery_status: str
+    retry_attempts: int
+    outcome: str
 
 
 class DownstreamCaptureResponse(BaseModel):
