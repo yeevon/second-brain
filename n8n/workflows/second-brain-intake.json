@@ -438,35 +438,49 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://writer-stub:8001/inbox",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.capture_id }}/delivery/acknowledge-failed",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "bodyParameters": {
           "parameters": [
             {
-              "name": "capture_id",
-              "value": "={{ $('Intake Webhook').first().json.capture_id }}"
-            },
-            {
               "name": "delivery_attempt",
               "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+            },
+            {
+              "name": "reason_type",
+              "value": "defense_in_depth_secret_detected"
             }
           ]
         },
         "options": {}
       },
       "id": "a1b2c3d4-dddd-dddd-dddd-dddddddddddd",
-      "name": "Inbox (sensitive)",
+      "name": "Acknowledge Failed (sensitive)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [1220, 460],
       "credentials": {
         "httpHeaderAuth": {
-          "id": "PLACEHOLDER_WRITER_STUB_TOKEN",
-          "name": "Writer Stub Token"
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
         }
       }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"received\": true, \"status\": \"blocked\"}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "a1b2c3d4-0006-0006-0006-000600060006",
+      "name": "Respond 202 Blocked",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1460, 460]
     }
   ],
   "pinData": {},
@@ -508,7 +522,7 @@
       "main": [
         [
           {
-            "node": "Inbox (sensitive)",
+            "node": "Acknowledge Failed (sensitive)",
             "type": "main",
             "index": 0
           }
@@ -516,6 +530,17 @@
         [
           {
             "node": "Claim Attempt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Acknowledge Failed (sensitive)": {
+      "main": [
+        [
+          {
+            "node": "Respond 202 Blocked",
             "type": "main",
             "index": 0
           }

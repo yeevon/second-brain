@@ -153,7 +153,8 @@ def test_intake_validate_classification_url_is_correct():
 
 def test_intake_acknowledge_forwarded_url_is_correct():
     fixture_text = FIXTURE_PATH.read_text()
-    assert "http://capture-service:8000/internal/downstream/acknowledge-forwarded" in fixture_text
+    assert "http://capture-service:8000/internal/captures/" in fixture_text
+    assert "/delivery/acknowledge-forwarded" in fixture_text
 
 
 # ── Writer-stub URLs ──────────────────────────────────────────────────────────
