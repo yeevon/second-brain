@@ -211,9 +211,41 @@ deploy/open-n8n-tunnel.sh <EC2_HOST>
 
 Then open `http://127.0.0.1:5678` in the browser. The tunnel must remain open while using the editor.
 
+### Local Docker lifecycle
+
+`compose.override.yaml` is auto-loaded by Docker Compose when no `COMPOSE_FILE` is set.
+It provides local-safe defaults for all required variables and includes n8n and
+writer-stub. After completing first-time setup, plain Docker commands work:
+
+```bash
+docker compose up -d     # start all services
+docker compose down      # stop all services
+docker compose logs -f   # follow logs
+docker compose ps        # check status
+```
+
+No shell exports required. Production `deploy.sh` sets `COMPOSE_FILE=compose.yaml:compose.n8n.yaml`
+explicitly, which prevents `compose.override.yaml` from being loaded there.
+
+### First-time local setup
+
+Run once per fresh checkout (or after `docker compose down -v`):
+
+```bash
+deploy/local-stack-up.sh
+```
+
+This validates that `.env`, `n8n.local.env`, `n8n-encryption-key.local`, and
+`writer-stub.local.env` exist, builds the images, and waits for all three containers
+to become healthy. The EBS sentinel marker is created automatically by the container
+entrypoint on first start — no separate `docker run` step required.
+
+After healthy containers, follow the n8n bootstrap steps below, then run
+`deploy/bootstrap-n8n.sh`.
+
 ### Local SB-113 error workflow validation
 
-After `deploy/local-stack-up.sh`, run once to set up error workflow testing:
+Run once after first-time setup to wire the error workflows:
 
 ```bash
 deploy/setup-local-n8n.sh
@@ -231,7 +263,8 @@ deploy/test-n8n-error-workflow.sh
 
 The script creates its own synthetic test capture, advances it to FORWARDING without
 racing the dispatcher, fires the harness, and verifies RETRY_WAIT, idempotency,
-raw-text preservation, and orphan behavior.
+raw-text preservation, and orphan behavior. No CAPTURE_ID, DELIVERY_ATTEMPT, or
+token input required.
 
 ### Bootstrap workflows after first login
 

@@ -1,19 +1,11 @@
 #!/usr/bin/env bash
+# Stop the local stack. Named volumes are preserved.
+# Equivalent to `docker compose down` — kept as a convenience alias.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-export CAPTURE_SERVICE_ENV_FILE="${CAPTURE_SERVICE_ENV_FILE:-$ROOT_DIR/.env}"
-export CAPTURE_DATA_SOURCE=second-brain-local-data
-export N8N_IMAGE_TAG="${N8N_IMAGE_TAG:-placeholder}"
-export N8N_ENV_FILE="${N8N_ENV_FILE:-$ROOT_DIR/n8n.local.env}"
-export N8N_ENCRYPTION_KEY_FILE="${N8N_ENCRYPTION_KEY_FILE:-$ROOT_DIR/n8n-encryption-key.local}"
-export N8N_DATA_SOURCE=second-brain-local-n8n-data
-export WRITER_STUB_ENV_FILE="${WRITER_STUB_ENV_FILE:-$ROOT_DIR/writer-stub.local.env}"
-export COMPOSE_FILE=compose.yaml:compose.local.yaml:compose.n8n.yaml
-
 cd "$ROOT_DIR"
 
-docker compose stop capture-service n8n writer-stub
+docker compose down
 
 echo "capture-service, n8n, and writer-stub stopped. Named volumes preserved."

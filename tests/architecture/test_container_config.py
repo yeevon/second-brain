@@ -60,7 +60,7 @@ def test_compose_config_does_not_contain_real_secrets():
     env_files = compose["services"]["capture-service"]["env_file"]
 
     assert env_files == [
-        "${CAPTURE_SERVICE_ENV_FILE:?CAPTURE_SERVICE_ENV_FILE must be set}"
+        "${CAPTURE_SERVICE_ENV_FILE:-.env}"
     ]
 
 
@@ -75,7 +75,7 @@ def test_compose_enforces_capture_only_container_runtime():
     }
 
     assert service["volumes"] == [
-        "${CAPTURE_DATA_SOURCE:?CAPTURE_DATA_SOURCE must be set}:/var/lib/second-brain"
+        "${CAPTURE_DATA_SOURCE:-./second-brain-local-data}:/var/lib/second-brain"
     ]
 
 
