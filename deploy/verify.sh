@@ -69,3 +69,94 @@ if [[ "$health" != "healthy" ]]; then
 fi
 
 echo "capture-service deployment checks passed"
+
+# ── n8n checks ────────────────────────────────────────────────────────────────
+
+N8N_CONTAINER="${N8N_CONTAINER:-second-brain-n8n}"
+N8N_DATA_DIR="${N8N_DATA_DIR:-/opt/second-brain/data/n8n}"
+N8N_ENCRYPTION_KEY_FILE="${N8N_ENCRYPTION_KEY_FILE:-/opt/second-brain/config/n8n-encryption-key}"
+
+docker inspect "$N8N_CONTAINER" >/dev/null
+
+n8n_running="$(docker inspect --format '{{.State.Running}}' "$N8N_CONTAINER")"
+if [[ "$n8n_running" != "true" ]]; then
+  echo "n8n container is not running" >&2
+  exit 1
+fi
+
+n8n_restart="$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$N8N_CONTAINER")"
+if [[ "$n8n_restart" != "unless-stopped" ]]; then
+  echo "n8n unexpected restart policy: $n8n_restart" >&2
+  exit 1
+fi
+
+n8n_user="$(docker inspect --format '{{.Config.User}}' "$N8N_CONTAINER")"
+if [[ "$n8n_user" == "0" || "$n8n_user" == "root" ]]; then
+  echo "n8n container is running as root" >&2
+  exit 1
+fi
+
+n8n_image="$(docker inspect --format '{{.Config.Image}}' "$N8N_CONTAINER")"
+if echo "$n8n_image" | grep -qE ':(latest|next)$' || ! echo "$n8n_image" | grep -q ':'; then
+  echo "n8n image tag is not pinned: $n8n_image" >&2
+  exit 1
+fi
+
+n8n_ports="$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$N8N_CONTAINER")"
+if ! echo "$n8n_ports" | grep -q '"HostIp":"127.0.0.1"'; then
+  echo "n8n is not bound to loopback: $n8n_ports" >&2
+  exit 1
+fi
+if echo "$n8n_ports" | grep -q '"HostIp":"0.0.0.0"'; then
+  echo "n8n is publicly bound on 0.0.0.0:5678" >&2
+  exit 1
+fi
+
+n8n_mount_source="$(
+  docker inspect \
+    --format '{{range .Mounts}}{{if eq .Destination "/home/node/.n8n"}}{{.Source}}{{end}}{{end}}' \
+    "$N8N_CONTAINER"
+)"
+if [[ "$n8n_mount_source" != "$N8N_DATA_DIR" ]]; then
+  echo "unexpected n8n data mount source: $n8n_mount_source (expected $N8N_DATA_DIR)" >&2
+  exit 1
+fi
+
+if [[ ! -d "$N8N_DATA_DIR" ]]; then
+  echo "n8n data directory missing: $N8N_DATA_DIR" >&2
+  exit 1
+fi
+
+if [[ ! -f "$N8N_ENCRYPTION_KEY_FILE" ]]; then
+  echo "n8n encryption key file missing: $N8N_ENCRYPTION_KEY_FILE" >&2
+  exit 1
+fi
+
+if [[ ! -s "$N8N_ENCRYPTION_KEY_FILE" ]]; then
+  echo "n8n encryption key file is empty: $N8N_ENCRYPTION_KEY_FILE" >&2
+  exit 1
+fi
+
+key_perms="$(stat -c '%a' "$N8N_ENCRYPTION_KEY_FILE")"
+if [[ "$key_perms" != "600" ]]; then
+  echo "n8n encryption key file permissions are $key_perms (expected 600)" >&2
+  exit 1
+fi
+
+n8n_http="$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:5678/ || true)"
+if [[ "$n8n_http" -lt 100 || "$n8n_http" -ge 500 ]]; then
+  echo "n8n not responding on loopback (HTTP $n8n_http)" >&2
+  exit 1
+fi
+
+n8n_cs_reachable="$(
+  docker exec "$N8N_CONTAINER" \
+    node -e "fetch('http://capture-service:8000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" \
+    2>/dev/null; echo $?
+)"
+if [[ "$n8n_cs_reachable" != "0" ]]; then
+  echo "n8n cannot reach capture-service /health over backend network" >&2
+  exit 1
+fi
+
+echo "n8n foundation deployment checks passed"

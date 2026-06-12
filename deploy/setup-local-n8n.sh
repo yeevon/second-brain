@@ -102,8 +102,7 @@ echo "--- Importing Error Handler ---"
 if echo "$existing_names" | grep -qxF "$ERROR_HANDLER_NAME"; then
   echo "  $ERROR_HANDLER_NAME: already imported — skipped"
 else
-  jq --arg id "$(python3 -c 'import uuid; print(str(uuid.uuid4()))')" \
-    'del(.id, .versionId) | .id = $id' "$ERROR_HANDLER_FIXTURE" > "$TMP_DIR/import-handler.json"
+  jq 'del(.id, .versionId)' "$ERROR_HANDLER_FIXTURE" > "$TMP_DIR/import-handler.json"
   docker cp "$TMP_DIR/import-handler.json" "$N8N_CONTAINER:/tmp/import-handler.json"
   docker exec "$N8N_CONTAINER" n8n import:workflow --input=/tmp/import-handler.json
   docker exec --user root "$N8N_CONTAINER" rm -f /tmp/import-handler.json
@@ -157,9 +156,8 @@ if echo "$existing_names" | grep -qxF "$ERROR_HARNESS_NAME"; then
   fi
 else
   jq \
-    --arg id "$(python3 -c 'import uuid; print(str(uuid.uuid4()))')" \
     --arg ew "$HANDLER_ID" \
-    'del(.id, .versionId) | .id = $id | .settings.errorWorkflow = $ew' \
+    'del(.id, .versionId) | .settings.errorWorkflow = $ew' \
     "$ERROR_HARNESS_FIXTURE" > "$TMP_DIR/import-harness.json"
   docker cp "$TMP_DIR/import-harness.json" "$N8N_CONTAINER:/tmp/import-harness.json"
   docker exec "$N8N_CONTAINER" n8n import:workflow --input=/tmp/import-harness.json

@@ -105,6 +105,9 @@ class RetryDisposition:
     next_attempt_at: datetime | None
     retry_scheduled: bool
     failed_terminally: bool
+    # Populated for replay/stale cases: "retry_scheduled", "terminal_failure",
+    # "ignored_stale_attempt", "ignored_already_terminal", "ignored_retry_already_scheduled"
+    outcome: str = ""
 
 
 @dataclass(frozen=True)
@@ -132,6 +135,15 @@ class LeaseReaperResult:
 
 
 @dataclass(frozen=True)
+class WorkflowErrorOutcome:
+    capture_id: str
+    delivery_attempt: int
+    delivery_status: str
+    retry_attempts: int
+    outcome: str
+
+
+@dataclass(frozen=True)
 class DeliveryMutationResult:
     capture_id: str
     delivery_status: str
@@ -143,4 +155,5 @@ class DeliveryMutationResult:
         "stale_attempt",
         "invalid_state",
         "conflicting_replay",
+        "ignored_already_terminal",
     ]

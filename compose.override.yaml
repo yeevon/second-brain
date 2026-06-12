@@ -23,14 +23,6 @@ services:
       - |
         touch /var/lib/second-brain/.second-brain-ebs-volume 2>/dev/null || true
         exec /usr/local/bin/secondbrain-entrypoint /app/.venv/bin/python -m secondbrain run
-    depends_on:
-      local-n8n-init:
-        condition: service_completed_successfully
-      writer-service:
-        condition: service_healthy
-    environment:
-      WRITER_SERVICE_URL: http://writer-service:8001
-      WRITER_SERVICE_TOKEN: ${WRITER_SERVICE_TOKEN:-dev-writer-service-token-change-me}
     volumes:
       - second-brain-local-data:/var/lib/second-brain
 
@@ -38,6 +30,7 @@ services:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-2.25.7}
     container_name: second-brain-n8n
     restart: unless-stopped
+    init: true
     env_file:
       - ${N8N_ENV_FILE:-n8n.local.env}
     environment:
@@ -62,189 +55,49 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:5678/rest/login',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r => process.exit(r.status === 400 ? 0 : 1)).catch(() => process.exit(1))",
+          "fetch('http://127.0.0.1:5678/').then(r => process.exit(r.status < 500 ? 0 : 1)).catch(() => process.exit(1))",
         ]
       interval: 30s
       timeout: 5s
-      retries: 10
-      start_period: 60s
+      retries: 5
+      start_period: 30s
 
-  local-vault-init:
-    image: alpine/git:latest
-    container_name: second-brain-local-vault-init
-    restart: "no"
-    # Named-volume mode: LOCAL_UID unset → runs as root → can chown to 10003.
-    # Bind-mount mode:   LOCAL_UID set  → runs as host user → files owned correctly, no chown needed.
-    user: "${LOCAL_UID:-0}:${LOCAL_GID:-0}"
-    environment:
-      # HOME=/tmp prevents "could not lock config file //.gitconfig" when running as a
-      # UID that has no home directory entry (e.g. LOCAL_UID=1000 without a passwd entry).
-      HOME: /tmp
-      # Passed through so the init script can detect bind-mount vs named-volume mode.
-      LOCAL_VAULT_PATH: ${LOCAL_VAULT_PATH:-}
-    volumes:
-      - ${LOCAL_VAULT_PATH:-second-brain-local-vault}:/vault
-      - second-brain-local-vault-remote:/remote
-    entrypoint:
-      - /bin/sh
-    command:
-      - -lc
-      - |
-        set -eu
-
-        mkdir -p /vault /remote
-
-        git config --global --add safe.directory /vault || true
-        git config --global --add safe.directory /remote/repo.git || true
-
-        if [ ! -d /vault/.git ]; then
-          git -C /vault init -b main
-        fi
-
-        git -C /vault config user.name "Second Brain Writer"
-        git -C /vault config user.email "writer@second-brain.local"
-
-        mkdir -p /vault/99_log
-
-        if ! grep -qxF ".writer.lock" /vault/.gitignore 2>/dev/null; then
-          printf ".writer.lock\n" >> /vault/.gitignore
-        fi
-
-        touch /vault/99_log/.gitkeep
-
-        if [ -n "${LOCAL_VAULT_PATH:-}" ]; then
-          # Bind-mount mode: /vault is a real host directory.
-          # Require an existing git origin so that writer-service healthcheck
-          # (git remote get-url origin) passes. Fail loudly — a silent missing
-          # origin would let the init succeed but break the healthcheck later.
-          if ! git -C /vault remote get-url origin >/dev/null 2>&1; then
-            echo "ERROR: LOCAL_VAULT_PATH bind mode requires a git repo with an 'origin' remote." >&2
-            echo "  Set one up on the host before starting the stack:" >&2
-            echo "    git -C '${LOCAL_VAULT_PATH}' init -b main" >&2
-            echo "    git -C '${LOCAL_VAULT_PATH}' remote add origin <url-or-path>" >&2
-            exit 1
-          fi
-          # Skip remote rewrite, fake-remote push, and chown — all three would
-          # corrupt a GitHub-backed vault or change host file ownership.
-          git -C /vault add .gitignore 99_log/.gitkeep 2>/dev/null || true
-          if ! git -C /vault diff --cached --quiet 2>/dev/null; then
-            git -C /vault commit -m "chore: initialize local vault"
-          fi
-        else
-          # Named-volume mode: init the fake local bare remote and push.
-          # Root owns the container volume, so chown to writer-service UID.
-          if [ ! -d /remote/repo.git ]; then
-            git init --bare -b main /remote/repo.git
-          fi
-
-          if git -C /vault remote get-url origin >/dev/null 2>&1; then
-            git -C /vault remote set-url origin /remote/repo.git
-          else
-            git -C /vault remote add origin /remote/repo.git
-          fi
-
-          git -C /vault add .gitignore 99_log/.gitkeep
-
-          if ! git -C /vault diff --cached --quiet; then
-            git -C /vault commit -m "chore: initialize local vault"
-          fi
-
-          # Local-only fake remote. Normal push first; force only repairs mismatched local volumes.
-          git -C /vault push -u origin main || git -C /vault push -u origin main --force
-
-          chown -R 10003:10003 /vault /remote
-        fi
-
-        test -d /vault/.git
-        git -C /vault rev-parse --is-inside-work-tree
-        if [ -z "${LOCAL_VAULT_PATH:-}" ]; then
-          git -C /vault remote get-url origin | grep -qxF "/remote/repo.git"
-        fi
-        grep -qxF ".writer.lock" /vault/.gitignore
-        git -C /vault status --porcelain >/dev/null
-
-  local-n8n-init:
-    image: python:3.13-alpine
-    container_name: second-brain-local-n8n-init
-    restart: "no"
-    depends_on:
-      n8n:
-        condition: service_healthy
-    entrypoint: ["python", "/init.py"]
-    volumes:
-      - ./n8n/workflows:/workflows:ro
-      - ./deploy/local-n8n-init.py:/init.py:ro
-    environment:
-      N8N_URL: "http://n8n:5678"
-      N8N_LOCAL_EMAIL: ${N8N_LOCAL_EMAIL:-admin@second-brain.local}
-      N8N_LOCAL_PASSWORD: ${N8N_LOCAL_PASSWORD:-LocalDev-123!}
-      CAPTURE_SERVICE_INTERNAL_TOKEN: ${CAPTURE_SERVICE_INTERNAL_TOKEN}
-      WRITER_SERVICE_TOKEN: ${WRITER_SERVICE_TOKEN:-dev-writer-service-token-change-me}
-      N8N_INTAKE_WEBHOOK_TOKEN: ${N8N_INTAKE_WEBHOOK_TOKEN}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:?GEMINI_API_KEY is required for local-n8n-init}
-    networks:
-      - backend
-
-  writer-service:
+  writer-stub:
     build:
-      context: .
-      dockerfile: writer-service/Dockerfile
-    container_name: second-brain-writer-service
+      context: writer-stub
+      dockerfile: Dockerfile
+    container_name: second-brain-writer-stub
     restart: unless-stopped
-    depends_on:
-      local-vault-init:
-        condition: service_completed_successfully
-    environment:
-      LOCAL_UID: ${LOCAL_UID:-10003}
-      LOCAL_GID: ${LOCAL_GID:-10003}
-      WRITER_SERVICE_TOKEN: ${WRITER_SERVICE_TOKEN:-dev-writer-service-token-change-me}
-      VAULT_PATH: /opt/vault
-      AUDIT_LOG_PATH: /opt/vault/99_log/events.ndjson
-      GIT_SYNC_ENABLED: ${GIT_SYNC_ENABLED:-true}
-    volumes:
-      - ${LOCAL_VAULT_PATH:-second-brain-local-vault}:/opt/vault
-      - second-brain-local-vault-remote:/remote
-    secrets:
-      - vault_deploy_key
-      - github_known_hosts
+    init: true
+    env_file:
+      - ${WRITER_STUB_ENV_FILE:-writer-stub.local.env}
+    expose:
+      - "8001"
     networks:
       - backend
     cap_drop:
       - ALL
-    cap_add:
-      - CHOWN        # entrypoint: chown SSH key files and home dir to runtime UID
-      - DAC_OVERRIDE # entrypoint: groupadd/useradd write to /etc/group, /etc/passwd
-      - SETUID       # gosu: switch process UID from root to runtime UID
-      - SETGID       # gosu: switch process GID from root to runtime GID
     security_opt:
       - no-new-privileges:true
     healthcheck:
       test:
-        - CMD-SHELL
-        - |
-          python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')" &&
-          gosu "$${LOCAL_UID:-10003}:$${LOCAL_GID:-10003}" git -C /opt/vault rev-parse --is-inside-work-tree >/dev/null &&
-          gosu "$${LOCAL_UID:-10003}:$${LOCAL_GID:-10003}" git -C /opt/vault remote get-url origin >/dev/null &&
-          grep -qxF '.writer.lock' /opt/vault/.gitignore
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health').read()",
+        ]
       interval: 30s
       timeout: 5s
-      retries: 5
-      start_period: 20s
+      retries: 3
+      start_period: 10s
 
 secrets:
   n8n_encryption_key:
     file: ${N8N_ENCRYPTION_KEY_FILE:-n8n-encryption-key.local}
-  vault_deploy_key:
-    file: ${VAULT_DEPLOY_KEY_FILE:?VAULT_DEPLOY_KEY_FILE is required (set in .env; see .env.example)}
-  github_known_hosts:
-    file: ${GITHUB_KNOWN_HOSTS_FILE:-deploy/github_known_hosts}
 
 volumes:
   second-brain-local-data:
     name: second-brain-local-data
   second-brain-local-n8n-data:
     name: second-brain-local-n8n-data
-  second-brain-local-vault:
-    name: second-brain-local-vault
-  second-brain-local-vault-remote:
-    name: second-brain-local-vault-remote

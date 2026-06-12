@@ -1,7 +1,7 @@
 # TD-015: Plain Docker lifecycle commands are broken without shell exports
 
-**Status:** Resolved
-**Priority:** N/A
+**Status:** Open (subset of TD-014 — tracked separately for implementation clarity)
+**Priority:** High — blocking routine development workflow
 
 ## Problem
 

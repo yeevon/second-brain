@@ -119,3 +119,31 @@ class FakeDownstreamClient:
             headers=self._headers,
             json={"delivery_attempt": delivery_attempt, "reason_type": reason_type},
         )
+
+    async def report_workflow_error(
+        self,
+        capture_id: str,
+        delivery_attempt: int,
+        disposition: str,
+        error_type: str,
+        reason_type: str = "workflow_error",
+        workflow_id: str = "test_workflow",
+        workflow_name: str = "second_brain_intake",
+        execution_id: str | None = None,
+        stage: str = "workflow_unknown",
+    ):
+        payload: dict = {
+            "delivery_attempt": delivery_attempt,
+            "disposition": disposition,
+            "error_type": error_type,
+            "reason_type": reason_type,
+            "workflow_id": workflow_id,
+            "workflow_name": workflow_name,
+            "execution_id": execution_id,
+            "stage": stage,
+        }
+        return await self._client.post(
+            f"/internal/captures/{capture_id}/delivery/report-workflow-error",
+            headers=self._headers,
+            json=payload,
+        )

@@ -95,43 +95,15 @@ cs_fetch() {
   " 2>/dev/null
 }
 
-# ── Cleanup: mark synthetic capture DELIVERY_FAILED via direct SQL ────────────
-# The production workflow-error API cannot be used for cleanup: it rejects a
-# terminal disposition after a prior retryable report for the same attempt as
-# ignored_conflicting_replay. Direct SQL bypasses that guard safely because the
-# synthetic capture was itself created via direct SQL (local-only test helper).
+# ── Cleanup: mark synthetic capture terminal on exit ─────────────────────────
 
 cleanup() {
-  if [[ -n "$CAPTURE_ID" ]]; then
-    docker exec -i \
-      -e "CLEANUP_CAPTURE_ID=$CAPTURE_ID" \
-      "$CS_CONTAINER" python3 - <<'PYEOF' >/dev/null 2>&1 || true
-import sqlite3, os, json
-from datetime import UTC, datetime
-
-ledger_path = os.environ.get('LEDGER_PATH', '/var/lib/second-brain/ledger.sqlite3')
-capture_id = os.environ['CLEANUP_CAPTURE_ID']
-now_iso = datetime.now(UTC).isoformat()
-
-with sqlite3.connect(ledger_path, timeout=10) as conn:
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=10000")
-    conn.execute(
-        """UPDATE captures
-           SET status='FAILED', delivery_status='DELIVERY_FAILED',
-               processing_lease_until=NULL, next_attempt_at=NULL,
-               last_error='test_cleanup', updated_at=?
-           WHERE capture_id=?""",
-        (now_iso, capture_id),
-    )
-    conn.execute(
-        """INSERT INTO capture_events
-               (capture_id, event_type, event_payload_json, created_at)
-           VALUES (?, 'TEST_CLEANUP', ?, ?)""",
-        (capture_id, json.dumps({"reason": "test_cleanup"}), now_iso),
-    )
-    conn.commit()
-PYEOF
+  if [[ -n "$CAPTURE_ID" && -n "$DELIVERY_ATTEMPT" ]]; then
+    cs_fetch \
+      "http://capture-service:8000/internal/captures/$CAPTURE_ID/delivery/report-workflow-error" \
+      "POST" \
+      "{\"delivery_attempt\":${DELIVERY_ATTEMPT},\"disposition\":\"terminal\",\"error_type\":\"contract_violation\",\"reason_type\":\"test_cleanup\",\"workflow_id\":\"test\",\"workflow_name\":\"second_brain_intake\",\"stage\":\"workflow_unknown\"}" \
+      >/dev/null 2>&1 || true
   fi
   rm -f "$TMP_WF"
 }
@@ -198,71 +170,46 @@ echo ""
 echo "--- Step 1: create synthetic test capture ---"
 
 # Runs entirely inside the capture-service container via its Python environment.
-# No test endpoint added to production code.
-#
-# Uses a single atomic SQLite transaction that inserts the capture directly in
-# FORWARDING state — there is no PENDING_FORWARD intermediate, so the
-# dispatcher cannot race between insert and claim.
-#
-# The -i flag on docker exec is required so the heredoc reaches python3 stdin.
+# No test endpoint added to production code; uses the ledger API directly.
 create_result="$(
-  docker exec -i \
-    -e "DISCORD_MSG_ID=$DISCORD_MSG_ID" \
-    "$CS_CONTAINER" python3 - <<'PYEOF'
-import sys, os, json, sqlite3
+  docker exec -e "DISCORD_MSG_ID=$DISCORD_MSG_ID" "$CS_CONTAINER" python3 - <<'PYEOF'
+import sys, os
+from pathlib import Path
 from datetime import UTC, datetime, timedelta
+
+sys.path.insert(0, '/app/src')
+from secondbrain.ledger import Ledger
 
 ledger_path = os.environ.get('LEDGER_PATH', '/var/lib/second-brain/ledger.sqlite3')
 msg_id = os.environ['DISCORD_MSG_ID']
-now = datetime.now(UTC)
-now_iso = now.isoformat()
-lease_iso = (now + timedelta(hours=2)).isoformat()
-delivery_attempts = 1
 
-with sqlite3.connect(ledger_path, timeout=15) as conn:
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=15000")
+ledger = Ledger(Path(ledger_path))
+try:
+    now = datetime.now(UTC)
+    result = ledger.insert_accepted_capture(
+        discord_message_id=msg_id,
+        discord_channel_id='0',
+        discord_guild_id='0',
+        discord_author_id='0',
+        raw_text='SB-113 error workflow regression test — safe to delete',
+        has_attachments=False,
+        received_at=now,
+    )
+    capture_id = result.capture.capture_id
 
-    if conn.execute(
-        "SELECT 1 FROM captures WHERE discord_message_id=?", (msg_id,)
-    ).fetchone():
-        print(f'ERROR: discord_message_id {msg_id} already exists', file=sys.stderr)
+    claimed = ledger.claim_due_deliveries(
+        now=now,
+        lease_until=now + timedelta(hours=2),
+        batch_size=25,
+    )
+    match = next((c for c in claimed if c.capture_id == capture_id), None)
+    if not match:
+        print(f'ERROR: failed to claim {capture_id}', file=sys.stderr)
         sys.exit(1)
 
-    # Generate capture_id matching ledger pattern: SB-YYYYMMDD-NNNN
-    prefix = f"SB-{now.strftime('%Y%m%d')}-"
-    row = conn.execute(
-        "SELECT capture_id FROM captures WHERE capture_id LIKE ? ORDER BY capture_id DESC LIMIT 1",
-        (f"{prefix}%",),
-    ).fetchone()
-    next_number = (int(row["capture_id"].rsplit("-", 1)[1]) + 1) if row else 1
-    capture_id = f"{prefix}{next_number:04d}"
-
-    # Insert directly in FORWARDING state — atomic, no dispatcher race
-    conn.execute(
-        """INSERT INTO captures (
-               capture_id, discord_message_id, discord_channel_id, discord_guild_id,
-               discord_author_id, raw_text, is_sensitive, has_attachments,
-               attachment_metadata_json, received_at, status, delivery_status,
-               delivery_attempts, processing_lease_until, updated_at
-           ) VALUES (?, ?, '0', '0', '0', ?, 0, 0, '[]', ?, 'RECEIVED', 'FORWARDING', ?, ?, ?)""",
-        (capture_id, msg_id,
-         'SB-113 error workflow regression test — safe to delete',
-         now_iso, delivery_attempts, lease_iso, now_iso),
-    )
-    conn.execute(
-        "INSERT INTO capture_events (capture_id, event_type, event_payload_json, created_at) VALUES (?, ?, ?, ?)",
-        (capture_id, 'CAPTURE_RECEIVED', json.dumps({"status": "RECEIVED"}), now_iso),
-    )
-    conn.execute(
-        "INSERT INTO capture_events (capture_id, event_type, event_payload_json, created_at) VALUES (?, ?, ?, ?)",
-        (capture_id, 'DELIVERY_ATTEMPT_CLAIMED',
-         json.dumps({"delivery_attempt": delivery_attempts, "lease_until": lease_iso}), now_iso),
-    )
-    conn.commit()
-
-print(f'{capture_id}:{delivery_attempts}')
+    print(f'{match.capture_id}:{match.delivery_attempts}')
+finally:
+    ledger.close()
 PYEOF
 )"
 
@@ -287,37 +234,28 @@ curl -sf \
   --data "{\"capture_id\":\"$CAPTURE_ID\",\"delivery_attempt\":${DELIVERY_ATTEMPT},\"test_case\":\"gemini_timeout\"}" \
   "$N8N_URL/webhook/second-brain-error-harness" >/dev/null 2>&1 \
   || echo "  (harness webhook returned non-2xx; n8n execution may still complete asynchronously)"
-echo "  harness triggered — polling for RETRY_WAIT (up to 30s)..."
+echo "  harness triggered — waiting 5s for error workflow to complete..."
+sleep 5
 
 # ── Step 3: Verify RETRY_WAIT state ──────────────────────────────────────────
 
 echo "--- Step 3: verify RETRY_WAIT ---"
-state=""
-step3_ok=false
-for _i in $(seq 1 15); do
-  sleep 2
-  state="$(cs_fetch "http://capture-service:8000/internal/captures/$CAPTURE_ID" 2>/dev/null || true)"
-  ds="$(echo "$state" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("delivery_status",""))' 2>/dev/null || true)"
-  if [[ "$ds" == "RETRY_WAIT" ]]; then
-    step3_ok=true
-    break
-  fi
-done
+state="$(cs_fetch "http://capture-service:8000/internal/captures/$CAPTURE_ID" || true)"
 
 if echo "$state" | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
-ds = d.get("delivery_status", "")
-ra = d.get("retry_attempts", 0)
-assert ds == "RETRY_WAIT", "expected RETRY_WAIT, got " + ds
-assert ra >= 1, "expected retry_attempts >= 1, got " + str(ra)
-assert d.get("next_attempt_at") is not None, "expected next_attempt_at to be set"
-assert d.get("raw_text") is not None, "raw_text must not be null"
-print("  delivery_status=RETRY_WAIT  retry_attempts=" + str(ra) + "  PASS")
+assert d["delivery_status"] == "RETRY_WAIT", \
+    f"expected RETRY_WAIT, got {d[\"delivery_status\"]}"
+assert d["retry_attempts"] >= 1, \
+    f"expected retry_attempts >= 1, got {d[\"retry_attempts\"]}"
+assert d["next_attempt_at"] is not None, "expected next_attempt_at to be set"
+assert d["raw_text"] is not None, "raw_text must not be null"
+print(f"  delivery_status=RETRY_WAIT  retry_attempts={d[\"retry_attempts\"]}  PASS")
 ' 2>/dev/null; then
   :
 else
-  echo "  FAIL: capture not in expected RETRY_WAIT state after 30s" >&2
+  echo "  FAIL: capture not in expected RETRY_WAIT state" >&2
   echo "  state: $state" >&2
   ERRORS=$((ERRORS + 1))
 fi
@@ -334,10 +272,9 @@ replay="$(cs_fetch \
 if echo "$replay" | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
-outcome = d.get("outcome", "")
 ok = ("ignored_retry_already_scheduled", "ignored_already_terminal", "ignored_stale_attempt")
-assert outcome in ok, "unexpected outcome: " + outcome
-print("  outcome=" + outcome + "  PASS")
+assert d["outcome"] in ok, f"unexpected outcome: {d[\"outcome\"]}"
+print(f"  outcome={d[\"outcome\"]}  PASS")
 ' 2>/dev/null; then
   :
 else
@@ -364,24 +301,25 @@ fi
 # ── Step 6: Orphan error does not mutate the test capture ─────────────────────
 
 echo "--- Step 6: orphan error ---"
-pre_orphan_state="$(cs_fetch "http://capture-service:8000/internal/captures/$CAPTURE_ID" 2>/dev/null || true)"
-pre_retry_attempts="$(echo "$pre_orphan_state" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("retry_attempts",0))' 2>/dev/null || echo 0)"
-
 curl -sf \
   --request POST \
   --header "Content-Type: application/json" \
   --header "X-Second-Brain-Webhook-Token: $TEST_HARNESS_TOKEN" \
   --data '{"test_case":"orphan_unhandled_exception"}' \
   "$N8N_URL/webhook/second-brain-error-harness" >/dev/null 2>&1 || true
-sleep 8
+sleep 2
 
-orphan_state="$(cs_fetch "http://capture-service:8000/internal/captures/$CAPTURE_ID" 2>/dev/null || true)"
-post_retry_attempts="$(echo "$orphan_state" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("retry_attempts",0))' 2>/dev/null || echo -1)"
-
-if [[ "$post_retry_attempts" -eq "$pre_retry_attempts" ]]; then
-  echo "  orphan did not increment retry_attempts (${pre_retry_attempts} → ${post_retry_attempts})  PASS"
+orphan_state="$(cs_fetch "http://capture-service:8000/internal/captures/$CAPTURE_ID" || true)"
+if echo "$orphan_state" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+assert d["delivery_status"] == "RETRY_WAIT", \
+    f"capture status changed unexpectedly: {d[\"delivery_status\"]}"
+print("  orphan did not mutate test capture  PASS")
+' 2>/dev/null; then
+  :
 else
-  echo "  FAIL: orphan changed retry_attempts (${pre_retry_attempts} → ${post_retry_attempts})" >&2
+  echo "  FAIL: orphan error mutated the test capture unexpectedly" >&2
   echo "  state: $orphan_state" >&2
   ERRORS=$((ERRORS + 1))
 fi

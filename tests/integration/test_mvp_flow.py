@@ -68,7 +68,7 @@ async def test_happy_path_capture_to_vault_edits_original_receipt(tmp_path):
     assert capture.status == RECEIVED
     assert capture.receipt_message_id == "9001"
     assert channel.sent_contents == [
-        f"⏳ {capture_id} received.\nYour note is saved. Processing…"
+        f"⏳ {capture_id} received.\nYour note is safely captured.\nQueued for downstream filing."
     ]
     assert list((tmp_path / "vault").rglob("*.md")) == []
     assert classifier_client.aio.models.calls == []
@@ -91,7 +91,7 @@ async def test_happy_path_capture_to_vault_edits_original_receipt(tmp_path):
     assert len(notes) == 1
     assert classifier_client.aio.models.calls[0]["model"] == "gemini-test"
     assert channel.sent_contents == [
-        f"⏳ {capture_id} received.\nYour note is saved. Processing…"
+        f"⏳ {capture_id} received.\nYour note is safely captured.\nQueued for downstream filing."
     ]
     assert channel.messages[9001].content == (
         f"✅ {capture_id} filed.\n"

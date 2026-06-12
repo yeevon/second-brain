@@ -33,6 +33,7 @@ def make_settings(tmp_path):
         delivery_retry_base_delay_seconds=10,
         delivery_retry_max_delay_seconds=300,
         capture_service_heartbeat_interval_seconds=15,
+        downstream_delivery_enabled=False,
     )
 
 

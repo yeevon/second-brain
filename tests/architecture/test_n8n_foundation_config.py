@@ -109,19 +109,16 @@ def test_env_enforce_settings_file_permissions():
     assert "N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true" in n8n_env_text()
 
 
-def test_env_block_env_access_in_node_is_set():
-    # Must be explicitly set to false so $env.DISCORD_DIGEST_WEBHOOK_URL resolves
-    # in workflow expression fields (HTTP Request URL). Removed the true guard
-    # intentionally — blocking $env in nodes prevents the brief delivery webhook.
-    assert "N8N_BLOCK_ENV_ACCESS_IN_NODE=" in n8n_env_text()
+def test_env_block_env_access_in_node():
+    assert "N8N_BLOCK_ENV_ACCESS_IN_NODE=true" in n8n_env_text()
 
 
 def test_env_block_file_access_to_n8n_files():
     assert "N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES=true" in n8n_env_text()
 
 
-def test_env_runners_not_present():
-    assert "N8N_RUNNERS_ENABLED" not in n8n_env_text()
+def test_env_runners_enabled():
+    assert "N8N_RUNNERS_ENABLED=true" in n8n_env_text()
 
 
 def test_env_secure_cookie_false_is_documented_as_ssh_tunnel_only():

@@ -30,8 +30,13 @@ class Settings:
         # self.github_vault_repo  = os.getenv("GITHUB_VAULT_REPO")
         # self.github_vault_branch = os.getenv("GITHUB_VAULT_BRANCH")
 
-        # n8n
-        # self.n8n_webhook_url = os.getenv("N8N_WEBHOOK_URL")
+        # Downstream delivery (n8n)
+        self.downstream_delivery_enabled = (
+            os.getenv("DOWNSTREAM_DELIVERY_ENABLED", "false").strip().lower() == "true"
+        )
+        self.n8n_intake_webhook_url = os.getenv("N8N_INTAKE_WEBHOOK_URL", "").strip() or None
+        self.n8n_intake_webhook_token = os.getenv("N8N_INTAKE_WEBHOOK_TOKEN", "").strip() or None
+        self.delivery_webhook_timeout_seconds = _parse_int_env("DELIVERY_WEBHOOK_TIMEOUT_SECONDS", "10")
 
         # Vault
         self.vault_path              = os.getenv("VAULT_PATH")
@@ -178,6 +183,27 @@ class Settings:
             raise RuntimeError("SQLITE_BUSY_RETRY_BASE_DELAY_MS must be >= 0")
         if self.sqlite_job_queue_maxsize < 1:
             raise RuntimeError("SQLITE_JOB_QUEUE_MAXSIZE must be >= 1")
+
+        # Downstream delivery validation
+        if self.downstream_delivery_enabled:
+            if not self.n8n_intake_webhook_url:
+                raise RuntimeError(
+                    "N8N_INTAKE_WEBHOOK_URL is required when DOWNSTREAM_DELIVERY_ENABLED=true"
+                )
+            if not self.n8n_intake_webhook_url.startswith(
+                "http://n8n:5678/webhook/second-brain-intake"
+            ):
+                raise RuntimeError(
+                    "N8N_INTAKE_WEBHOOK_URL must be http://n8n:5678/webhook/second-brain-intake"
+                )
+            if not self.n8n_intake_webhook_token:
+                raise RuntimeError(
+                    "N8N_INTAKE_WEBHOOK_TOKEN is required when DOWNSTREAM_DELIVERY_ENABLED=true"
+                )
+            if len(self.n8n_intake_webhook_token) < 32:
+                raise RuntimeError("N8N_INTAKE_WEBHOOK_TOKEN must be at least 32 characters")
+        if self.delivery_webhook_timeout_seconds < 1:
+            raise RuntimeError("DELIVERY_WEBHOOK_TIMEOUT_SECONDS must be >= 1")
 
 
 def _parse_int_env(name: str, default: str) -> int:

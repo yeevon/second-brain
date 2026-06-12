@@ -183,8 +183,11 @@ def _query_snapshot(
 
     filed_today_row = conn.execute(
         """
-        SELECT COUNT(*) AS c FROM capture_events
-        WHERE event_type = 'CAPTURE_FILED' AND created_at >= ? AND created_at < ?
+        SELECT COUNT(*) AS c FROM capture_events ce
+        JOIN captures c ON c.capture_id = ce.capture_id
+        WHERE ce.event_type = 'CAPTURE_FILED'
+          AND ce.created_at >= ? AND ce.created_at < ?
+          AND (c.derived_note_path IS NULL OR c.derived_note_path NOT LIKE 'stub://%')
         """,
         (today_utc_iso, tomorrow_utc_iso),
     ).fetchone()
@@ -224,7 +227,9 @@ def _query_snapshot(
     vault_row = conn.execute(
         """
         SELECT derived_note_path FROM captures
-        WHERE status IN ('FILED', 'INBOX') AND derived_note_path IS NOT NULL
+        WHERE status IN ('FILED', 'INBOX')
+          AND derived_note_path IS NOT NULL
+          AND derived_note_path NOT LIKE 'stub://%'
         ORDER BY updated_at DESC, id DESC
         LIMIT 1
         """

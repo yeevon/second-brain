@@ -1,6 +1,6 @@
 # TD-010: Make explicit terminal-failure callbacks idempotent
 
-**Status:** Resolved in SB-112
+**Status:** Open
 **Priority:** Low — required before at-least-once n8n callback delivery is enabled
 
 ## Problem

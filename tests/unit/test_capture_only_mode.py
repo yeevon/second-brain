@@ -117,7 +117,7 @@ def test_local_full_receipt_preserves_processing_message():
         downstream_processing_enabled=True,
     )
 
-    assert content == "⏳ SB-20260608-0001 received.\nYour note is saved. Processing…"
+    assert content == "⏳ SB-20260608-0001 received.\nYour note is safely captured.\nQueued for downstream filing."
 
 
 def test_capture_only_receipt_preserves_attachment_warning():
