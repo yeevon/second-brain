@@ -211,6 +211,28 @@ deploy/open-n8n-tunnel.sh <EC2_HOST>
 
 Then open `http://127.0.0.1:5678` in the browser. The tunnel must remain open while using the editor.
 
+### Local SB-113 error workflow validation
+
+After `deploy/local-stack-up.sh`, run once to set up error workflow testing:
+
+```bash
+deploy/setup-local-n8n.sh
+```
+
+This imports the Error Handler and Error Harness workflows, wires the `errorWorkflow`
+link automatically, generates `TEST_HARNESS_TOKEN` into `n8n-test.local.env`, and
+prints the minimal credential-binding steps that require the n8n UI.
+
+Once the one-time UI setup is done, run the full regression at any time:
+
+```bash
+deploy/test-n8n-error-workflow.sh
+```
+
+The script creates its own synthetic test capture, advances it to FORWARDING without
+racing the dispatcher, fires the harness, and verifies RETRY_WAIT, idempotency,
+raw-text preservation, and orphan behavior.
+
 ### Bootstrap workflows after first login
 
 After creating the owner account in the UI, run on EC2:

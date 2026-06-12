@@ -25,6 +25,7 @@ if [[ ! -f "${WRITER_STUB_ENV_FILE:-$WRITER_STUB_ENV_FILE_DEFAULT}" ]]; then
   exit 1
 fi
 
+export N8N_IMAGE_TAG="${N8N_IMAGE_TAG:-2.25.7}"
 export CAPTURE_SERVICE_ENV_FILE="${CAPTURE_SERVICE_ENV_FILE:-$ROOT_DIR/.env}"
 export CAPTURE_DATA_SOURCE=second-brain-local-data
 export N8N_IMAGE_TAG="${N8N_IMAGE_TAG:?N8N_IMAGE_TAG must be set}"
