@@ -18,6 +18,7 @@ export N8N_IMAGE_TAG="${N8N_IMAGE_TAG:-placeholder}"
 export N8N_ENV_FILE="${N8N_ENV_FILE:-$ROOT_DIR/n8n.local.env}"
 export N8N_ENCRYPTION_KEY_FILE="${N8N_ENCRYPTION_KEY_FILE:-$ROOT_DIR/n8n-encryption-key.local}"
 export N8N_DATA_SOURCE=second-brain-local-n8n-data
+export WRITER_STUB_ENV_FILE="${WRITER_STUB_ENV_FILE:-$ROOT_DIR/writer-stub.local.env}"
 export COMPOSE_FILE=compose.yaml:compose.local.yaml:compose.n8n.yaml
 
 cd "$ROOT_DIR"
