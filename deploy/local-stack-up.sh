@@ -30,7 +30,7 @@ fi
 
 if [[ ! -f "$N8N_KEY_FILE" ]]; then
   echo "n8n encryption key file missing: $N8N_KEY_FILE" >&2
-  echo "Generate with: openssl rand -hex 32 > n8n-encryption-key.local" >&2
+  echo "Generate with: printf '%s' \"\$(openssl rand -hex 32)\" > n8n-encryption-key.local" >&2
   exit 1
 fi
 

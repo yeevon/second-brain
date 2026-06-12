@@ -156,19 +156,32 @@ uv run python -m secondbrain status
 
 ## Setup — capture-only (local Docker validation)
 
-Use the managed local scripts to build and test the container without EC2:
+Fill in credentials, then use standard Docker Compose commands:
 
 ```bash
-cp .env.example .env           # fill in Discord credentials and internal token
-deploy/local-up.sh             # build image, create named volume, start container
-deploy/test-container-packaging.sh   # run the packaging regression suite
-deploy/local-down.sh           # stop container (volume preserved)
-deploy/local-reset.sh --confirm-delete-local-test-data   # wipe volume and start fresh
+cp .env.example .env                # fill in Discord credentials and internal token
+docker compose up -d                # build images, start all services
+docker compose down                 # stop services (named volumes preserved)
+docker compose logs -f              # follow logs
+docker compose ps                   # check status
 ```
 
-The named volume `second-brain-local-data` is managed by Docker. `local-up.sh` creates the EBS sentinel marker inside it automatically so the entrypoint check passes.
+`compose.override.yaml` is auto-loaded and provides local-safe defaults for all required variables. The EBS sentinel marker is created automatically on first container start.
 
-`test-container-packaging.sh` runs four tests: Python version, environment override correctness, running-container invariants, and a clean SIGTERM shutdown. The SIGTERM test stops the container — run `deploy/local-up.sh` again before the next test cycle.
+For a first-run convenience wrapper that also validates env files and waits for healthy containers:
+
+```bash
+deploy/local-stack-up.sh
+```
+
+Container packaging regression:
+
+```bash
+deploy/test-container-packaging.sh   # Python version, env overrides, invariants, SIGTERM
+deploy/local-reset.sh --confirm-delete-local-test-data   # wipe volumes and start fresh
+```
+
+`test-container-packaging.sh` runs four tests. The SIGTERM test stops the container — run `docker compose up -d` again before the next test cycle.
 
 ## Setup — capture-only (EC2)
 
@@ -226,6 +239,16 @@ n8n runs alongside capture-service in the `compose.n8n.yaml` overlay. Key facts:
 `writer-stub` is a standalone FastAPI container (UID 10002, port 8001, never published to the host) that acts as n8n's filing agent. n8n sends classified captures to `/write` or `/inbox`; writer-stub writes `stub://<capture_id>` paths back to capture-service. This sidesteps the `N8N_CONCURRENCY_PRODUCTION_LIMIT=1` deadlock — n8n cannot call a webhook on itself while processing a webhook.
 
 Downstream delivery is enabled with `DOWNSTREAM_DELIVERY_ENABLED=true`. See `.env.example` and `deploy/writer-stub.env.example` for all required variables.
+
+### Error workflow (SB-113+)
+
+When an n8n execution fails, `Second Brain - Error Handler` is invoked automatically via n8n's `errorWorkflow` setting. It reports the failure back to capture-service:
+
+```text
+POST /internal/captures/{id}/delivery/report-workflow-error
+```
+
+The endpoint accepts `disposition` (`retryable` or `terminal`), `error_type`, `reason_type`, `stage`, and execution metadata. Retryable reports schedule a capped-backoff retry; terminal reports mark the capture `DELIVERY_FAILED`. All values are validated as safe slugs — no raw exception text enters the ledger. Duplicate and stale reports are handled idempotently.
 
 capture-service remains the sole owner of the capture ledger. n8n and writer-stub reach it over the private Compose backend network at `http://capture-service:8000`.
 

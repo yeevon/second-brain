@@ -30,7 +30,6 @@ services:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-2.25.7}
     container_name: second-brain-n8n
     restart: unless-stopped
-    init: true
     env_file:
       - ${N8N_ENV_FILE:-n8n.local.env}
     environment:
