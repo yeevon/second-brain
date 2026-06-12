@@ -4,6 +4,51 @@ All notable changes to this project are documented here.
 
 ---
 
+## v1.0.3 — Local developer workflow and n8n operational hardening
+
+**Branch:** `tech_debt_one`
+
+Resolved tech debt items TD-014 and TD-015 (local Docker lifecycle), fixed three bugs in the SB-113 regression script, and applied several n8n operational hardening improvements.
+
+### TD-014 / TD-015 — Plain Docker lifecycle commands now work without shell exports
+
+- **`compose.yaml`** — replaced `:?` error guards on `CAPTURE_SERVICE_ENV_FILE` and `CAPTURE_DATA_SOURCE` with `:-` defaults (`.env` and `./second-brain-local-data` respectively). Plain `docker compose up/down/logs/ps` now parse without exporting any variables.
+- **`compose.override.yaml`** (new) — auto-loaded by Docker Compose when `COMPOSE_FILE` is not set. Provides local-safe defaults for all required variables, includes the full n8n and writer-stub service definitions, and wraps the capture-service entrypoint to create the EBS sentinel marker automatically on first start. Eliminates the manual `docker run` init step.
+- **`deploy/local-stack-up.sh`** / **`deploy/local-stack-down.sh`** — simplified to plain `docker compose` calls; no longer export `COMPOSE_FILE` or manage volumes manually.
+- **`deploy/deploy.sh`** — unchanged. Continues to set `COMPOSE_FILE=compose.yaml:compose.n8n.yaml` explicitly, which prevents `compose.override.yaml` from being auto-loaded in production.
+- **`tests/architecture/test_container_config.py`** — updated assertions to match `:-` defaults.
+- TD-015 is fully resolved as a subset of TD-014. Both files marked **Status: Resolved**.
+
+### n8n workflow import fix
+
+- **`deploy/bootstrap-n8n.sh`** / **`deploy/setup-local-n8n.sh`** — n8n 2.25.7 requires a UUID `id` field on import. Both scripts now generate a fresh UUID via `python3 -c 'import uuid; ...'` and inject it after `del(.id, .versionId)`. The fixture files remain id-free; the architecture test still passes because `del(.id, .versionId)` is still present.
+
+### `deploy/test-n8n-error-workflow.sh` bug fixes
+
+Three bugs fixed in the SB-113 local regression script:
+
+- **Missing `-i` flag** — `docker exec` without `-i` does not pass the shell's stdin (the heredoc) into the container. Added to both `docker exec` calls.
+- **Cleanup race** — The exit trap previously called the production `report-workflow-error` API with a `terminal` disposition after a prior `retryable` report, which the ledger correctly rejects as `ignored_conflicting_replay`. Replaced with a direct SQL `UPDATE` in the exit trap.
+- **Dispatcher race** — The original helper used a two-step insert + claim that the running dispatcher could race. Replaced with a single atomic SQLite transaction that inserts the capture directly in `FORWARDING` state.
+
+Additional script improvements:
+
+- **Timing** — replaced the fixed 5-second sleep with a 30-second poll loop that waits for `RETRY_WAIT` state before proceeding to the idempotency step.
+- **Python f-string syntax** — `d[\"key\"]` inside f-string expressions is a compile-time `SyntaxError` on Python ≤ 3.12. All inline assertion messages rewritten to avoid backslashes in f-string expressions.
+- **Step 6 robustness** — orphan test now compares `retry_attempts` before and after instead of asserting a specific `delivery_status`, which is more robust against dispatcher reclaims during the test window.
+
+### n8n config cleanup
+
+- **`N8N_RUNNERS_ENABLED`** removed from `deploy/n8n.env.example` (deprecated; n8n warns to remove it). Architecture test `test_env_runners_enabled` renamed to `test_env_runners_not_present` and assertion inverted.
+- **Encryption key newline** — all documentation and error messages updated to use `printf '%s' "$(openssl rand -hex 32)"` which writes the key without a trailing newline (n8n rejects keys with leading/trailing whitespace).
+- **Tini double-init** — removed `init: true` from the n8n service in `compose.override.yaml` and `compose.n8n.yaml`. The n8n image already runs through Tini; Docker's `init: true` inserted a second PID-1 init layer, causing Tini to log a warning on every startup. `init: true` remains in place for capture-service and writer-stub.
+
+### TD-010 — Idempotent terminal-failure callbacks (documented, already implemented)
+
+TD-010 was already implemented in SB-112 via `_report_workflow_error` in `ledger.py`: same disposition for the same delivery attempt returns `ignored_retry_already_scheduled` / `ignored_already_terminal`; conflicting disposition returns `ignored_conflicting_replay`. TD-010 file updated to **Status: Resolved in SB-112**.
+
+---
+
 ## Milestone 3 — Move classification into n8n
 
 ### SB-113 — n8n error workflow
