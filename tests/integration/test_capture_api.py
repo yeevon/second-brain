@@ -487,8 +487,8 @@ async def test_wrong_attempt_renew_lease_returns_stale_outcome(api_context):
 
 
 @pytest.mark.asyncio
-async def test_acknowledge_failed_from_invalid_state_returns_409(api_context):
-    """Explicitly failing a capture that is already FILED must return 409."""
+async def test_acknowledge_failed_on_already_filed_capture_returns_200(api_context):
+    """Failing a capture that is already FILED returns 200 (ignored_already_terminal, not an error)."""
     capture, attempt = await _capture_in_classifying_state(api_context)
     await api_context.downstream.acknowledge_filed(
         capture.capture_id, attempt, "20_projects/halo/file.md"
@@ -496,7 +496,7 @@ async def test_acknowledge_failed_from_invalid_state_returns_409(api_context):
 
     response = await api_context.downstream.acknowledge_failed(capture.capture_id, attempt)
 
-    assert response.status_code == 409
+    assert response.status_code == 200
 
 
 @pytest.mark.asyncio

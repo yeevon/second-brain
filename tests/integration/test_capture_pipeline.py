@@ -59,7 +59,7 @@ async def test_normal_message_creates_one_capture_and_one_note(
         }
     ]
     assert fake_channel.sent_receipts == [
-        (9001, f"⏳ {capture.capture_id} received.\nYour note is saved. Processing…")
+        (9001, f"⏳ {capture.capture_id} received.\nYour note is safely captured.\nQueued for downstream filing.")
     ]
     assert fake_channel.edited_receipts == [
         (

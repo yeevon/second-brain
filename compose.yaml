@@ -6,7 +6,7 @@ services:
     image: second-brain-capture-service:local
     container_name: second-brain-capture-service
     env_file:
-      - ${CAPTURE_SERVICE_ENV_FILE:?CAPTURE_SERVICE_ENV_FILE must be set}
+      - ${CAPTURE_SERVICE_ENV_FILE:-.env}
     environment:
       CAPTURE_PROCESSING_MODE: capture-only
       CAPTURE_API_HOST: 0.0.0.0
@@ -16,7 +16,7 @@ services:
     init: true
 
     volumes:
-      - ${CAPTURE_DATA_SOURCE:?CAPTURE_DATA_SOURCE must be set}:/var/lib/second-brain
+      - ${CAPTURE_DATA_SOURCE:-./second-brain-local-data}:/var/lib/second-brain
 
     expose:
       - "8000"

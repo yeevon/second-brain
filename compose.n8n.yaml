@@ -1,0 +1,74 @@
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:?N8N_IMAGE_TAG must be set}
+    container_name: second-brain-n8n
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${N8N_ENV_FILE:?N8N_ENV_FILE must be set}
+    environment:
+      N8N_ENCRYPTION_KEY_FILE: /run/secrets/n8n_encryption_key
+    secrets:
+      - n8n_encryption_key
+    volumes:
+      - ${N8N_DATA_SOURCE:?N8N_DATA_SOURCE must be set}:/home/node/.n8n
+    ports:
+      - "127.0.0.1:5678:5678"
+    expose:
+      - "5678"
+    networks:
+      - backend
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:5678/').then(r => process.exit(r.status < 500 ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  writer-stub:
+    build:
+      context: writer-stub
+      dockerfile: Dockerfile
+    container_name: second-brain-writer-stub
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${WRITER_STUB_ENV_FILE:?WRITER_STUB_ENV_FILE must be set}
+    expose:
+      - "8001"
+    networks:
+      - backend
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health').read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+secrets:
+  n8n_encryption_key:
+    file: ${N8N_ENCRYPTION_KEY_FILE:?N8N_ENCRYPTION_KEY_FILE must be set}
+
+volumes:
+  second-brain-local-n8n-data:
+    name: second-brain-local-n8n-data

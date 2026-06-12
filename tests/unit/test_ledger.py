@@ -1333,7 +1333,7 @@ def test_mark_delivery_failed_terminally_stale_attempt(tmp_path):
     ledger.close()
 
 
-def test_mark_delivery_failed_terminally_invalid_state(tmp_path):
+def test_mark_delivery_failed_terminally_already_complete_returns_ignored(tmp_path):
     ledger = make_ledger(tmp_path)
     _accepted(ledger, "1001")
     ledger.claim_due_deliveries(now=_NOW, lease_until=_LEASE, batch_size=10)
@@ -1341,12 +1341,12 @@ def test_mark_delivery_failed_terminally_invalid_state(tmp_path):
     ledger.mark_filed(
         capture_id="SB-20260609-0001", delivery_attempt=1, derived_note_path="path/note.md"
     )
-    # State is COMPLETE (FILED) — attempt matches (1==1) but delivery state is invalid
+    # State is COMPLETE (FILED) — late failure callback is safely ignored
     result = ledger.mark_delivery_failed_terminally(
         capture_id="SB-20260609-0001", delivery_attempt=1
     )
     assert result.changed is False
-    assert result.outcome == "invalid_state"
+    assert result.outcome == "ignored_already_terminal"
     ledger.close()
 
 

@@ -4,7 +4,7 @@ At this point, EC2 capture should remain safe even if n8n is completely offline.
 
 ---
 
-## SB-110 — Deploy a secured n8n instance
+## SB-111 — Deploy a secured n8n instance
 
 **Branch:** ```feature/n8n-foundation```
 
@@ -23,7 +23,7 @@ The security requirements specifically call out persistent n8n storage, secure c
 
 ---
 
-## SB-111 — Add the n8n intake workflow with a stub writer
+## SB-112 — Add the n8n intake workflow with a stub writer
 
 **Branch:** ```feature/n8n-intake-workflow```
 
@@ -53,11 +53,11 @@ edit Discord receipt
 
 The canonical architecture deliberately places n8n after the durable capture boundary. n8n coordinates processing but does not own intake durability or SQLite.
 
-**Done when:** posting while n8n is stopped still produces an immediate saved receipt, and starting n8n later processes the queued item exactly once.
+**Done when:** posting while n8n is stopped still produces an immediate saved receipt, and starting n8n later processes the queued item through at-least-once delivery while producing one observable terminal result.
 
 ---
 
-## SB-112 — Add the n8n error workflow
+## SB-113 — Add the n8n error workflow
 
 **Branch:** ```feature/n8n-error-workflow```
 
@@ -69,4 +69,4 @@ Use the n8n Error Trigger to:
 - Send a visible receipt update.
 - Preserve the raw capture.
 
-**Done when:** a forced Gemini timeout or invalid payload produces a visible failure or Inbox result instead of silent disappearance.
+**Done when:** a forced Gemini timeout or invalid payload produces a visible failure or retry receipt instead of silent disappearance when safe correlation exists; when correlation is unavailable the system fails closed and relies on eventual stale-lease recovery without guessing.

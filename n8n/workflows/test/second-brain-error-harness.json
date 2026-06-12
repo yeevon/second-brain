@@ -1,0 +1,71 @@
+{
+  "name": "Second Brain - Error Harness",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "second-brain-error-harness",
+        "authentication": "headerAuth",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "ha000001-0001-0001-0001-000100010001",
+      "name": "Harness Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [260, 300],
+      "webhookId": "second-brain-error-harness",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_TEST_HARNESS_TOKEN",
+          "name": "Test Harness Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate harness request and build a safe Stop And Error object.\n// Allowed test cases only — do not accept arbitrary error categories.\nconst body = $input.first().json.body ?? $input.first().json;\n\nconst ALLOWED_TEST_CASES = [\n  'gemini_timeout',\n  'classification_validation_failure',\n  'contract_violation',\n  'orphan_unhandled_exception',\n];\nconst CAPTURE_ID_RE = /^SB-\\d{8}-\\d{4}$/;\n\nconst testCase = body.test_case;\nif (!ALLOWED_TEST_CASES.includes(testCase)) {\n  throw new Error(`Unknown test_case: ${JSON.stringify(testCase)}. Allowed: ${ALLOWED_TEST_CASES.join(', ')}`);\n}\n\nconst ERROR_TEMPLATES = {\n  gemini_timeout: {\n    disposition: 'retryable',\n    error_type: 'gemini_timeout',\n    reason_type: 'workflow_error',\n    stage: 'gemini',\n  },\n  classification_validation_failure: {\n    disposition: 'retryable',\n    error_type: 'classification_validation_failure',\n    reason_type: 'workflow_error',\n    stage: 'classification_validation',\n  },\n  contract_violation: {\n    disposition: 'terminal',\n    error_type: 'contract_violation',\n    reason_type: 'workflow_error',\n    stage: 'workflow_unknown',\n  },\n  orphan_unhandled_exception: null,\n};\n\nlet errorObject;\n\nif (testCase === 'orphan_unhandled_exception') {\n  // Deliberately throw without capture correlation to test orphan path\n  errorObject = { test_case: 'orphan_unhandled_exception' };\n} else {\n  const captureId = body.capture_id;\n  const deliveryAttempt = body.delivery_attempt;\n\n  if (!captureId || !CAPTURE_ID_RE.test(captureId)) {\n    throw new Error('capture_id is required for correlated test cases and must match ^SB-\\\\d{8}-\\\\d{4}$');\n  }\n  if (!Number.isInteger(deliveryAttempt) || deliveryAttempt < 1) {\n    throw new Error('delivery_attempt must be an integer >= 1 for correlated test cases');\n  }\n\n  errorObject = {\n    capture_id: captureId,\n    delivery_attempt: deliveryAttempt,\n    ...ERROR_TEMPLATES[testCase],\n  };\n}\n\nreturn [{ json: { error_object: errorObject } }];"
+      },
+      "id": "ha000002-0002-0002-0002-000200020002",
+      "name": "Validate and Build Error Object",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "errorMessage": "={{ JSON.stringify($json.error_object) }}"
+      },
+      "id": "ha000003-0003-0003-0003-000300030003",
+      "name": "Stop And Error",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [700, 300]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Harness Webhook": {
+      "main": [
+        [{ "node": "Validate and Build Error Object", "type": "main", "index": 0 }]
+      ]
+    },
+    "Validate and Build Error Object": {
+      "main": [
+        [{ "node": "Stop And Error", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false,
+    "errorWorkflow": "PLACEHOLDER_SECOND_BRAIN_ERROR_HANDLER"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

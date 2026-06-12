@@ -1,0 +1,687 @@
+{
+  "name": "Second Brain - Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "second-brain-intake",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a1b2c3d4-1111-1111-1111-111111111111",
+      "name": "Intake Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [260, 300],
+      "webhookId": "second-brain-intake",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_INTAKE_WEBHOOK_TOKEN",
+          "name": "Intake Webhook Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"received\": true}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "a1b2c3d4-2222-2222-2222-222222222222",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1700, 60]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=http://capture-service:8000/internal/downstream/captures/{{ $('Intake Webhook').first().json.capture_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "a1b2c3d4-3333-3333-3333-333333333333",
+      "name": "Get Capture",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://capture-service:8000/internal/security/screen",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "={{ $json.raw_text }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-4444-4444-4444-444444444444",
+      "name": "Screen for Sensitive",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [740, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "sensitive-check",
+              "leftValue": "={{ $json.is_sensitive }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-5555-5555-5555-555555555555",
+      "name": "Sensitive?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [980, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.capture_id }}/delivery/acknowledge-forwarded",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "delivery_attempt",
+              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000100010001",
+      "name": "Claim Attempt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1220, 140],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "outcome-check",
+              "leftValue": "={{ $json.outcome }}",
+              "rightValue": "changed",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0002-0002-0002-000200020002",
+      "name": "Claimed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1460, 140]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"received\": true, \"status\": \"ignored\"}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "a1b2c3d4-0003-0003-0003-000300030003",
+      "name": "Respond 202 Ignored",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1700, 260]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.capture_id }}/delivery/acknowledge-classifying",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "delivery_attempt",
+              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0004-0004-0004-000400040004",
+      "name": "Acknowledge Classifying",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1940, 60],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.capture_id }}/delivery/renew-lease",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "delivery_attempt",
+              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0005-0005-0005-000500050005",
+      "name": "Renew Lease",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2180, 60],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build Gemini generateContent request — ask for full Classification matching models.py\nconst captureText = $('Get Capture').first().json.raw_text ?? '';\nconst prompt = [\n  'Classify the following personal note into a structured knowledge item.',\n  '',\n  'Allowed folder values: inbox, people, projects, ideas, learning, admin',\n  'Allowed action status values: open, done',\n  '',\n  'Capture:',\n  captureText,\n  '',\n  'Respond with a single JSON object only (no markdown fences, no other text):',\n  '{',\n  '  \"folder\": \"inbox\",',\n  '  \"project\": null,',\n  '  \"note_type\": \"general\",',\n  '  \"title\": \"concise title\",',\n  '  \"tags\": [\"tag1\"],',\n  '  \"body\": \"full note body in markdown\",',\n  '  \"actions\": [{\"text\": \"example action\", \"status\": \"open\"}],',\n  '  \"needs_clarification\": false,',\n  '  \"clarifying_question\": null,',\n  '  \"confidence\": 0.9',\n  '}',\n].join('\\n');\n\nreturn [{\n  json: {\n    contents: [{ parts: [{ text: prompt }] }],\n    generationConfig: { temperature: 0.1, maxOutputTokens: 1024 },\n  }\n}];"
+      },
+      "id": "a1b2c3d4-6666-6666-6666-666666666666",
+      "name": "Prepare Gemini Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2420, 60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-7777-7777-7777-777777777777",
+      "name": "Classify with Gemini",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2660, 60],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_GEMINI_API_KEY",
+          "name": "Gemini API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract Classification object directly from Gemini — confidence lives inside it\nconst body = $input.first().json;\nconst rawText = body?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';\n\nlet classification = {};\ntry {\n  const cleaned = rawText.replace(/^```(?:json)?\\n?/, '').replace(/\\n?```$/, '').trim();\n  classification = JSON.parse(cleaned);\n} catch (_) {\n  // Leave empty; validate endpoint will report errors\n}\n\nreturn [{ json: { classification } }];"
+      },
+      "id": "a1b2c3d4-8888-8888-8888-888888888888",
+      "name": "Parse Gemini Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2900, 60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://capture-service:8000/internal/contracts/classification/validate",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "classification",
+              "value": "={{ $json.classification }}"
+            },
+            {
+              "name": "delivery_attempt",
+              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-9999-9999-9999-999999999999",
+      "name": "Validate Classification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3140, 60],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {},
+                "conditions": [
+                  {
+                    "id": "route-file",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "file",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "file"
+            },
+            {
+              "conditions": {
+                "options": {},
+                "conditions": [
+                  {
+                    "id": "route-inbox",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "inbox",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "inbox"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "name": "File or Inbox?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [3380, 60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://writer-stub:8001/write",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "capture_id",
+              "value": "={{ $('Intake Webhook').first().json.capture_id }}"
+            },
+            {
+              "name": "delivery_attempt",
+              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      "name": "Write to Vault",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3620, -20],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_WRITER_STUB_TOKEN",
+          "name": "Writer Stub Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://writer-stub:8001/inbox",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "capture_id",
+              "value": "={{ $('Intake Webhook').first().json.capture_id }}"
+            },
+            {
+              "name": "delivery_attempt",
+              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-cccc-cccc-cccc-cccccccccccc",
+      "name": "Inbox (classified)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3620, 140],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_WRITER_STUB_TOKEN",
+          "name": "Writer Stub Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.capture_id }}/delivery/acknowledge-failed",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "delivery_attempt",
+              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+            },
+            {
+              "name": "reason_type",
+              "value": "defense_in_depth_secret_detected"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-dddd-dddd-dddd-dddddddddddd",
+      "name": "Acknowledge Failed (sensitive)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1220, 460],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"received\": true, \"status\": \"blocked\"}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "a1b2c3d4-0006-0006-0006-000600060006",
+      "name": "Respond 202 Blocked",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1460, 460]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Intake Webhook": {
+      "main": [
+        [
+          {
+            "node": "Get Capture",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Capture": {
+      "main": [
+        [
+          {
+            "node": "Screen for Sensitive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Screen for Sensitive": {
+      "main": [
+        [
+          {
+            "node": "Sensitive?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sensitive?": {
+      "main": [
+        [
+          {
+            "node": "Acknowledge Failed (sensitive)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Claim Attempt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Acknowledge Failed (sensitive)": {
+      "main": [
+        [
+          {
+            "node": "Respond 202 Blocked",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Attempt": {
+      "main": [
+        [
+          {
+            "node": "Claimed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claimed?": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 202 Ignored",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond to Webhook": {
+      "main": [
+        [
+          {
+            "node": "Acknowledge Classifying",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Acknowledge Classifying": {
+      "main": [
+        [
+          {
+            "node": "Renew Lease",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Renew Lease": {
+      "main": [
+        [
+          {
+            "node": "Prepare Gemini Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Gemini Prompt": {
+      "main": [
+        [
+          {
+            "node": "Classify with Gemini",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify with Gemini": {
+      "main": [
+        [
+          {
+            "node": "Parse Gemini Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Gemini Response": {
+      "main": [
+        [
+          {
+            "node": "Validate Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Classification": {
+      "main": [
+        [
+          {
+            "node": "File or Inbox?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "File or Inbox?": {
+      "main": [
+        [
+          {
+            "node": "Write to Vault",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Inbox (classified)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false,
+    "errorWorkflow": "PLACEHOLDER_SECOND_BRAIN_ERROR_HANDLER"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

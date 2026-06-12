@@ -35,6 +35,7 @@ from secondbrain.capture_models import (
     RequeuedLease,
     RetryDisposition,
     TransitionResult,
+    WorkflowErrorOutcome,
 )
 from secondbrain.sqlite_runtime import SQLiteRuntime
 
@@ -378,6 +379,43 @@ class Ledger:
                 capture_id=capture_id,
                 delivery_attempt=delivery_attempt,
                 reason=reason,
+            ),
+        )
+
+    def report_workflow_error(
+        self,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        disposition: str,
+        error_type: str,
+        reason_type: str,
+        workflow_id: str,
+        workflow_name: str,
+        execution_id: str | None,
+        stage: str,
+        max_attempts: int,
+        base_delay_seconds: int,
+        max_delay_seconds: int,
+    ) -> WorkflowErrorOutcome:
+        now = _now()
+        return self._write(
+            "report_workflow_error",
+            lambda conn: self._report_workflow_error(
+                conn,
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                disposition=disposition,
+                error_type=error_type,
+                reason_type=reason_type,
+                workflow_id=workflow_id,
+                workflow_name=workflow_name,
+                execution_id=execution_id,
+                stage=stage,
+                max_attempts=max_attempts,
+                base_delay_seconds=base_delay_seconds,
+                max_delay_seconds=max_delay_seconds,
+                now=now,
             ),
         )
 
@@ -1108,6 +1146,18 @@ class Ledger:
             return _result("stale_attempt")
 
         current_ds = row["delivery_status"]
+
+        # Replay safety: already terminally failed
+        if current_ds == DELIVERY_FAILED:
+            stored_reason = row["last_error"] or ""
+            if stored_reason == (reason or ""):
+                return _result("idempotent_replay")
+            return _result("conflicting_replay")
+
+        # Replay safety: already succeeded (complete)
+        if current_ds == COMPLETE:
+            return _result("ignored_already_terminal")
+
         if current_ds not in (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING):
             return _result("invalid_state")
 
@@ -1158,12 +1208,55 @@ class Ledger:
 
         row = self._get_by_capture_id(conn, capture_id)
         current_ds = row["delivery_status"]
-        if current_ds not in (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING):
-            raise ValueError(f"cannot schedule retry from delivery_status={current_ds!r}")
+
+        # Replay safety: stale delivery attempt
         if row["delivery_attempts"] != delivery_attempt:
-            raise ValueError(
-                f"stale delivery_attempt: got {delivery_attempt}, "
-                f"current={row['delivery_attempts']}"
+            return RetryDisposition(
+                capture_id=capture_id,
+                delivery_status=current_ds,
+                delivery_attempts=row["delivery_attempts"],
+                next_attempt_at=None,
+                retry_scheduled=False,
+                failed_terminally=False,
+                outcome="ignored_stale_attempt",
+            )
+
+        # Replay safety: already terminal
+        if current_ds in (COMPLETE, DELIVERY_FAILED):
+            return RetryDisposition(
+                capture_id=capture_id,
+                delivery_status=current_ds,
+                delivery_attempts=row["delivery_attempts"],
+                next_attempt_at=None,
+                retry_scheduled=False,
+                failed_terminally=False,
+                outcome="ignored_already_terminal",
+            )
+
+        # Replay safety: already waiting for retry on this same attempt
+        if current_ds == RETRY_WAIT:
+            from datetime import datetime as _dt
+            raw_next = row["next_attempt_at"]
+            next_dt = _dt.fromisoformat(raw_next) if raw_next else None
+            return RetryDisposition(
+                capture_id=capture_id,
+                delivery_status=RETRY_WAIT,
+                delivery_attempts=row["delivery_attempts"],
+                next_attempt_at=next_dt,
+                retry_scheduled=True,
+                failed_terminally=False,
+                outcome="ignored_retry_already_scheduled",
+            )
+
+        if current_ds not in (FORWARDING, DELIVERY_FORWARDED, DELIVERY_CLASSIFYING):
+            return RetryDisposition(
+                capture_id=capture_id,
+                delivery_status=current_ds,
+                delivery_attempts=row["delivery_attempts"],
+                next_attempt_at=None,
+                retry_scheduled=False,
+                failed_terminally=False,
+                outcome="ignored_already_terminal",
             )
 
         now_ts = _iso(now)
@@ -1201,6 +1294,7 @@ class Ledger:
                 next_attempt_at=None,
                 retry_scheduled=False,
                 failed_terminally=True,
+                outcome="terminal_failure",
             )
 
         delay = calculate_retry_delay_seconds(
@@ -1240,7 +1334,142 @@ class Ledger:
             next_attempt_at=next_attempt,
             retry_scheduled=True,
             failed_terminally=False,
+            outcome="retry_scheduled",
         )
+
+    def _report_workflow_error(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        capture_id: str,
+        delivery_attempt: int,
+        disposition: str,
+        error_type: str,
+        reason_type: str,
+        workflow_id: str,
+        workflow_name: str,
+        execution_id: str | None,
+        stage: str,
+        max_attempts: int,
+        base_delay_seconds: int,
+        max_delay_seconds: int,
+        now: datetime,
+    ) -> WorkflowErrorOutcome:
+        row = self._get_by_capture_id(conn, capture_id)
+        current_ds = row["delivery_status"]
+        current_attempts = row["delivery_attempts"]
+        retry_attempts = row["retry_attempts"] if "retry_attempts" in row.keys() else 0
+
+        # Stale attempt: request's attempt doesn't match the active attempt
+        if delivery_attempt != current_attempts:
+            return WorkflowErrorOutcome(
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                delivery_status=current_ds,
+                retry_attempts=retry_attempts,
+                outcome="ignored_stale_attempt",
+            )
+
+        # Check for a prior N8N_WORKFLOW_ERROR_REPORTED event for this attempt
+        prior_row = conn.execute(
+            """
+            SELECT event_payload_json FROM capture_events
+            WHERE capture_id = ?
+              AND event_type = 'N8N_WORKFLOW_ERROR_REPORTED'
+              AND CAST(json_extract(event_payload_json, '$.delivery_attempt') AS INTEGER) = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (capture_id, delivery_attempt),
+        ).fetchone()
+
+        if prior_row is not None:
+            prior_payload = json.loads(prior_row["event_payload_json"])
+            prior_disposition = prior_payload.get("disposition")
+
+            # Conflicting replay: different disposition for same attempt
+            if prior_disposition != disposition:
+                return WorkflowErrorOutcome(
+                    capture_id=capture_id,
+                    delivery_attempt=delivery_attempt,
+                    delivery_status=current_ds,
+                    retry_attempts=retry_attempts,
+                    outcome="ignored_conflicting_replay",
+                )
+
+            # Idempotent replay: same disposition already reported
+            if disposition == "retryable":
+                outcome = "ignored_retry_already_scheduled" if current_ds == RETRY_WAIT else "ignored_already_terminal"
+            else:
+                outcome = "ignored_already_terminal"
+            return WorkflowErrorOutcome(
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                delivery_status=current_ds,
+                retry_attempts=retry_attempts,
+                outcome=outcome,
+            )
+
+        # No prior event — already in a terminal delivery state
+        if current_ds in (COMPLETE, DELIVERY_FAILED):
+            return WorkflowErrorOutcome(
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                delivery_status=current_ds,
+                retry_attempts=retry_attempts,
+                outcome="ignored_already_terminal",
+            )
+
+        # Append the audit event before applying the transition
+        event_payload: dict[str, Any] = {
+            "delivery_attempt": delivery_attempt,
+            "disposition": disposition,
+            "error_type": error_type,
+            "reason_type": reason_type,
+            "workflow_id": workflow_id,
+            "workflow_name": workflow_name,
+            "stage": stage,
+        }
+        if execution_id is not None:
+            event_payload["execution_id"] = execution_id
+        self._append_event(conn, capture_id, "N8N_WORKFLOW_ERROR_REPORTED", event_payload)
+
+        if disposition == "retryable":
+            retry_disp = self._schedule_retry(
+                conn,
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                now=now,
+                error_type=error_type,
+                reason_type=reason_type,
+                max_attempts=max_attempts,
+                base_delay_seconds=base_delay_seconds,
+                max_delay_seconds=max_delay_seconds,
+            )
+            updated = self._get_by_capture_id(conn, capture_id)
+            return WorkflowErrorOutcome(
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                delivery_status=retry_disp.delivery_status,
+                retry_attempts=updated["retry_attempts"] if "retry_attempts" in updated.keys() else 0,
+                outcome=retry_disp.outcome,
+            )
+        else:  # terminal
+            fail_result = self._mark_delivery_failed_terminally(
+                conn,
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                reason=reason_type,
+            )
+            updated = self._get_by_capture_id(conn, capture_id)
+            outcome = "terminal_failure" if fail_result.outcome == "changed" else fail_result.outcome
+            return WorkflowErrorOutcome(
+                capture_id=capture_id,
+                delivery_attempt=delivery_attempt,
+                delivery_status=fail_result.delivery_status,
+                retry_attempts=updated["retry_attempts"] if "retry_attempts" in updated.keys() else 0,
+                outcome=outcome,
+            )
 
     def _normalize_delivery_for_local_full(self, conn: sqlite3.Connection) -> int:
         """Normalize all non-terminal delivery states to NOT_APPLICABLE for local-full mode."""
@@ -1708,7 +1937,9 @@ class Ledger:
             """
             SELECT derived_note_path
             FROM captures
-            WHERE status IN (?, ?) AND derived_note_path IS NOT NULL
+            WHERE status IN (?, ?)
+              AND derived_note_path IS NOT NULL
+              AND derived_note_path NOT LIKE 'stub://%'
             ORDER BY updated_at DESC, id DESC
             LIMIT 1
             """,

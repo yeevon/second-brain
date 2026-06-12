@@ -558,3 +558,79 @@ last_successful_vault_write_path
 ```
 
 The status command should read those fields directly rather than infer the value from mutable capture-row timestamps.
+
+--
+
+## Simplify the local developer workflow before adding another milestone
+
+**Status:** Promoted — must be addressed before the next milestone  
+**Priority:** High  
+**Scope:** Local developer experience and repeatable validation only
+
+The local development workflow has become unnecessarily difficult to operate.
+
+Routine actions currently depend on wrapper scripts, required shell exports, manually generated tokens, manually wired test fixtures, log scraping, and timing-sensitive steps. A simple change should not require digging through Docker logs, racing the dispatcher, or remembering which custom script wraps a standard Docker command.
+
+This is now slowing validation enough that it will compound with every new milestone.
+
+### Required outcome
+
+After one-time local setup, routine lifecycle commands must work directly:
+
+```bash
+docker compose up -d
+docker compose down
+docker compose logs -f
+docker compose ps
+
+Local Compose configuration must provide sensible defaults for named volumes, local file paths, and the pinned n8n image version. Production deployment may continue to require explicit EBS paths and deliberate configuration values.
+
+The SB-112 and SB-113 validation paths must also be repeatable. A developer should be able to run one documented command that:
+
+creates or seeds its own synthetic capture
+advances it into the required state deterministically
+runs the intended validation
+reports pass or fail clearly
+cleans up its temporary state when practical
+
+The developer must not need to:
+
+search Docker logs for a capture ID
+manually determine the active delivery attempt
+race the dispatcher to catch a temporary state
+generate a new test token for each run
+manually construct a synthetic test scenario
+remember undocumented shell exports
+use wrapper scripts for ordinary docker compose up or down
+Keep the fix small
+
+Do not introduce another orchestration layer.
+
+Do not add a production test endpoint.
+
+Do not build a shell framework, configuration framework, or large abstraction layer.
+
+Wrapper scripts may remain for:
+
+one-time initialization
+n8n fixture import
+targeted regression tests
+production deployment
+
+They must not be required for basic local Docker lifecycle operations.
+
+Acceptance criteria
+
+From a configured local checkout:
+
+docker compose up -d
+docker compose down
+
+both succeed without additional shell exports.
+
+A single documented command runs the local downstream and workflow-error regression path without requiring manual log inspection or timing-sensitive intervention.
+
+The cleanup is complete when validating a routine change takes minutes rather than requiring a manual reconstruction of the environment.
+
+
+That should be the **only promoted tech-debt item blocking the next milestone**. Do not turn it into another architecture review. The goal is to remove friction, not add a new layer of process.
