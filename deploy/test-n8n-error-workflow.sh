@@ -65,13 +65,29 @@ echo "capture_id=${CAPTURE_ID}  delivery_attempt=${DELIVERY_ATTEMPT}"
 echo ""
 
 # ── Helper: call capture-service from inside the backend network ──────────────
+# Uses Node fetch() (built-in since Node 18) instead of curl — curl is not
+# guaranteed to be present in the official n8n Docker image.
 
-cs_curl() {
-  # Usage: cs_curl <extra curl args...>
-  # Runs curl inside the n8n container (which is on the backend network).
-  docker exec "$CONTAINER" curl -sf \
-    --header "X-Second-Brain-Internal-Token: $CAPTURE_SERVICE_INTERNAL_TOKEN" \
-    "$@"
+cs_fetch() {
+  # Usage: cs_fetch <url> [method] [body_json]
+  local url="$1"
+  local method="${2:-GET}"
+  local body="${3:-}"
+  local token="$CAPTURE_SERVICE_INTERNAL_TOKEN"
+
+  docker exec "$CONTAINER" node -e "
+    const opts = {
+      method: '${method}',
+      headers: {
+        'X-Second-Brain-Internal-Token': '${token}',
+        'Content-Type': 'application/json',
+      },
+    };
+    $( [[ -n "$body" ]] && printf 'opts.body = %s;' "'$body'" )
+    fetch('${url}', opts)
+      .then(r => r.text().then(t => { if (!r.ok) process.exit(1); process.stdout.write(t); }))
+      .catch(() => process.exit(1));
+  " 2>/dev/null
 }
 
 # ── Pre-flight: n8n reachable ─────────────────────────────────────────────────
@@ -86,7 +102,7 @@ fi
 
 # ── Pre-flight: capture-service reachable via backend network ─────────────────
 echo "--- Pre-flight: capture-service health ---"
-cs_health="$(cs_curl "http://capture-service:8000/health" 2>/dev/null || true)"
+cs_health="$(cs_fetch "http://capture-service:8000/health" 2>/dev/null || true)"
 if echo "$cs_health" | grep -q '"ok"'; then
   echo "  capture-service: healthy"
 else
@@ -117,7 +133,7 @@ fi
 
 # ── Pre-flight: capture exists and is in an active delivery state ─────────────
 echo "--- Pre-flight: capture state ---"
-capture_state="$(cs_curl "http://capture-service:8000/internal/captures/$CAPTURE_ID" 2>/dev/null || true)"
+capture_state="$(cs_fetch "http://capture-service:8000/internal/captures/$CAPTURE_ID" 2>/dev/null || true)"
 if [[ -z "$capture_state" ]]; then
   echo "  FAIL: capture $CAPTURE_ID not found or capture-service unreachable" >&2
   exit 1
@@ -128,11 +144,15 @@ current_attempt="$(echo "$capture_state" | python3 -c 'import sys,json; print(js
 
 echo "  delivery_status=${current_ds}  delivery_attempts=${current_attempt}"
 
-if [[ "$current_ds" == "COMPLETE" || "$current_ds" == "FAILED" ]]; then
-  echo "  FAIL: capture is already in terminal state ${current_ds}" >&2
-  echo "  Use a capture in FORWARDING, FORWARDED, or CLASSIFYING state." >&2
-  exit 1
-fi
+case "$current_ds" in
+  FORWARDING|FORWARDED|CLASSIFYING)
+    ;;
+  *)
+    echo "  FAIL: capture must be in FORWARDING, FORWARDED, or CLASSIFYING; got ${current_ds}" >&2
+    echo "  Use a capture that has been claimed but not yet completed or failed." >&2
+    exit 1
+    ;;
+esac
 
 if [[ "$current_attempt" != "$DELIVERY_ATTEMPT" ]]; then
   echo "  WARN: provided delivery_attempt=${DELIVERY_ATTEMPT} does not match current ${current_attempt}" >&2
@@ -157,7 +177,7 @@ sleep 4
 
 # ── Test 2: verify RETRY_WAIT ─────────────────────────────────────────────────
 echo "--- Test 2: verify RETRY_WAIT state ---"
-capture_state="$(cs_curl "http://capture-service:8000/internal/captures/$CAPTURE_ID" 2>/dev/null || true)"
+capture_state="$(cs_fetch "http://capture-service:8000/internal/captures/$CAPTURE_ID" 2>/dev/null || true)"
 
 if echo "$capture_state" | python3 -c '
 import sys, json
@@ -177,11 +197,10 @@ fi
 
 # ── Test 3: replay — idempotency ──────────────────────────────────────────────
 echo "--- Test 3: replay gemini_timeout — idempotency ---"
-report_replay="$(cs_curl \
-  --request POST \
-  --header "Content-Type: application/json" \
-  --data "{\"delivery_attempt\":$DELIVERY_ATTEMPT,\"disposition\":\"retryable\",\"error_type\":\"gemini_timeout\",\"reason_type\":\"workflow_error\",\"workflow_id\":\"test_workflow\",\"workflow_name\":\"second_brain_intake\",\"stage\":\"gemini\"}" \
+report_replay="$(cs_fetch \
   "http://capture-service:8000/internal/captures/$CAPTURE_ID/delivery/report-workflow-error" \
+  "POST" \
+  "{\"delivery_attempt\":$DELIVERY_ATTEMPT,\"disposition\":\"retryable\",\"error_type\":\"gemini_timeout\",\"reason_type\":\"workflow_error\",\"workflow_id\":\"test_workflow\",\"workflow_name\":\"second_brain_intake\",\"stage\":\"gemini\"}" \
   2>/dev/null || true)"
 
 if echo "$report_replay" | python3 -c '
@@ -200,7 +219,7 @@ fi
 
 # ── Test 4: raw_text preserved ────────────────────────────────────────────────
 echo "--- Test 4: raw_text preserved ---"
-raw_text="$(cs_curl "http://capture-service:8000/internal/captures/$CAPTURE_ID" 2>/dev/null \
+raw_text="$(cs_fetch "http://capture-service:8000/internal/captures/$CAPTURE_ID" 2>/dev/null \
   | python3 -c 'import sys,json; print(json.load(sys.stdin).get("raw_text",""))' 2>/dev/null || true)"
 if [[ -n "$raw_text" ]]; then
   echo "  raw_text present: PASS"
