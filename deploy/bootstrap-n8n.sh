@@ -62,8 +62,9 @@ echo "Found $existing_count existing workflow(s)."
 if echo "$existing_names" | grep -qxF "$ERROR_HANDLER_NAME"; then
   echo "  Second Brain - Error Handler: skipped (already exists)"
 else
-  # Sanitize fixture: strip id and versionId to prevent ID-based overwrite
-  jq 'del(.id, .versionId)' \
+  # Sanitize fixture: strip id and versionId, assign a fresh UUID (n8n 2.x requires id)
+  jq --arg id "$(python3 -c 'import uuid; print(str(uuid.uuid4()))')" \
+    'del(.id, .versionId) | .id = $id' \
     "$ERROR_HANDLER_FIXTURE" \
     > "$TMP_DIR/bootstrap-error-handler.json"
 
@@ -83,7 +84,8 @@ fi
 if echo "$existing_names" | grep -qxF "$INTAKE_NAME"; then
   echo "  Second Brain - Intake: skipped (already exists)"
 else
-  jq 'del(.id, .versionId)' \
+  jq --arg id "$(python3 -c 'import uuid; print(str(uuid.uuid4()))')" \
+    'del(.id, .versionId) | .id = $id' \
     "$INTAKE_FIXTURE" \
     > "$TMP_DIR/bootstrap-intake.json"
 

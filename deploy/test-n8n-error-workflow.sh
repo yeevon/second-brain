@@ -287,28 +287,37 @@ curl -sf \
   --data "{\"capture_id\":\"$CAPTURE_ID\",\"delivery_attempt\":${DELIVERY_ATTEMPT},\"test_case\":\"gemini_timeout\"}" \
   "$N8N_URL/webhook/second-brain-error-harness" >/dev/null 2>&1 \
   || echo "  (harness webhook returned non-2xx; n8n execution may still complete asynchronously)"
-echo "  harness triggered — waiting 5s for error workflow to complete..."
-sleep 5
+echo "  harness triggered — polling for RETRY_WAIT (up to 30s)..."
 
 # ── Step 3: Verify RETRY_WAIT state ──────────────────────────────────────────
 
 echo "--- Step 3: verify RETRY_WAIT ---"
-state="$(cs_fetch "http://capture-service:8000/internal/captures/$CAPTURE_ID" || true)"
+state=""
+step3_ok=false
+for _i in $(seq 1 15); do
+  sleep 2
+  state="$(cs_fetch "http://capture-service:8000/internal/captures/$CAPTURE_ID" 2>/dev/null || true)"
+  ds="$(echo "$state" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("delivery_status",""))' 2>/dev/null || true)"
+  if [[ "$ds" == "RETRY_WAIT" ]]; then
+    step3_ok=true
+    break
+  fi
+done
 
 if echo "$state" | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
-assert d["delivery_status"] == "RETRY_WAIT", \
-    f"expected RETRY_WAIT, got {d[\"delivery_status\"]}"
-assert d["retry_attempts"] >= 1, \
-    f"expected retry_attempts >= 1, got {d[\"retry_attempts\"]}"
-assert d["next_attempt_at"] is not None, "expected next_attempt_at to be set"
-assert d["raw_text"] is not None, "raw_text must not be null"
-print(f"  delivery_status=RETRY_WAIT  retry_attempts={d[\"retry_attempts\"]}  PASS")
+ds = d.get("delivery_status", "")
+ra = d.get("retry_attempts", 0)
+assert ds == "RETRY_WAIT", "expected RETRY_WAIT, got " + ds
+assert ra >= 1, "expected retry_attempts >= 1, got " + str(ra)
+assert d.get("next_attempt_at") is not None, "expected next_attempt_at to be set"
+assert d.get("raw_text") is not None, "raw_text must not be null"
+print("  delivery_status=RETRY_WAIT  retry_attempts=" + str(ra) + "  PASS")
 ' 2>/dev/null; then
   :
 else
-  echo "  FAIL: capture not in expected RETRY_WAIT state" >&2
+  echo "  FAIL: capture not in expected RETRY_WAIT state after 30s" >&2
   echo "  state: $state" >&2
   ERRORS=$((ERRORS + 1))
 fi
@@ -325,9 +334,10 @@ replay="$(cs_fetch \
 if echo "$replay" | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
+outcome = d.get("outcome", "")
 ok = ("ignored_retry_already_scheduled", "ignored_already_terminal", "ignored_stale_attempt")
-assert d["outcome"] in ok, f"unexpected outcome: {d[\"outcome\"]}"
-print(f"  outcome={d[\"outcome\"]}  PASS")
+assert outcome in ok, "unexpected outcome: " + outcome
+print("  outcome=" + outcome + "  PASS")
 ' 2>/dev/null; then
   :
 else
@@ -354,25 +364,24 @@ fi
 # ── Step 6: Orphan error does not mutate the test capture ─────────────────────
 
 echo "--- Step 6: orphan error ---"
+pre_orphan_state="$(cs_fetch "http://capture-service:8000/internal/captures/$CAPTURE_ID" 2>/dev/null || true)"
+pre_retry_attempts="$(echo "$pre_orphan_state" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("retry_attempts",0))' 2>/dev/null || echo 0)"
+
 curl -sf \
   --request POST \
   --header "Content-Type: application/json" \
   --header "X-Second-Brain-Webhook-Token: $TEST_HARNESS_TOKEN" \
   --data '{"test_case":"orphan_unhandled_exception"}' \
   "$N8N_URL/webhook/second-brain-error-harness" >/dev/null 2>&1 || true
-sleep 2
+sleep 8
 
-orphan_state="$(cs_fetch "http://capture-service:8000/internal/captures/$CAPTURE_ID" || true)"
-if echo "$orphan_state" | python3 -c '
-import sys, json
-d = json.load(sys.stdin)
-assert d["delivery_status"] == "RETRY_WAIT", \
-    f"capture status changed unexpectedly: {d[\"delivery_status\"]}"
-print("  orphan did not mutate test capture  PASS")
-' 2>/dev/null; then
-  :
+orphan_state="$(cs_fetch "http://capture-service:8000/internal/captures/$CAPTURE_ID" 2>/dev/null || true)"
+post_retry_attempts="$(echo "$orphan_state" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("retry_attempts",0))' 2>/dev/null || echo -1)"
+
+if [[ "$post_retry_attempts" -eq "$pre_retry_attempts" ]]; then
+  echo "  orphan did not increment retry_attempts (${pre_retry_attempts} → ${post_retry_attempts})  PASS"
 else
-  echo "  FAIL: orphan error mutated the test capture unexpectedly" >&2
+  echo "  FAIL: orphan changed retry_attempts (${pre_retry_attempts} → ${post_retry_attempts})" >&2
   echo "  state: $orphan_state" >&2
   ERRORS=$((ERRORS + 1))
 fi

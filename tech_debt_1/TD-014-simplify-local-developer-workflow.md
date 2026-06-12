@@ -1,6 +1,6 @@
 # TD-014: Simplify the local developer workflow
 
-**Status:** Promoted — must be addressed before the next milestone
+**Status:** Resolved
 **Priority:** High
 
 ## Problem
