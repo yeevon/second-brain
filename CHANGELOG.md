@@ -6,6 +6,27 @@ All notable changes to this project are documented here.
 
 ## Milestone 3 — Move classification into n8n
 
+### SB-113 — n8n error workflow
+
+Implemented the durable error-reporting path from n8n back to capture-service, closing the retry/failure loop for downstream delivery.
+
+- **`src/secondbrain/downstream_errors.py`** — error taxonomy: `RETRYABLE_DOWNSTREAM_ERRORS`, `TERMINAL_DOWNSTREAM_ERRORS`, `ALLOWED_STAGES`. All values validated as safe slugs — no raw exception text can enter the ledger through this path.
+- **`src/secondbrain/capture_models.py`** — `WorkflowErrorOutcome` dataclass with `capture_id`, `delivery_attempt`, `delivery_status`, `retry_attempts`, and `outcome`.
+- **`src/secondbrain/api_models.py`** — `ReportWorkflowErrorRequest` (`StrictInternalRequest`, `extra="forbid"`) with cross-field validation: `disposition=retryable` requires a retryable `error_type`; `disposition=terminal` requires a terminal `error_type`. `WorkflowErrorResponse` surfaces the `outcome` string.
+- **`src/secondbrain/ledger.py`** — `report_workflow_error()` write job. Idempotency is enforced via a `N8N_WORKFLOW_ERROR_REPORTED` audit event per delivery attempt: a duplicate report returns `ignored_retry_already_scheduled` or `ignored_already_terminal`; a conflicting disposition for the same attempt returns `ignored_conflicting_replay`; a stale attempt returns `ignored_stale_attempt`. Retryable reports call `_schedule_retry` (existing capped backoff); terminal reports call `_mark_delivery_failed_terminally`.
+- **`src/secondbrain/capture_service.py`** — `report_workflow_error()` facade method.
+- **`src/secondbrain/capture_api.py`** — `POST /internal/captures/{id}/delivery/report-workflow-error`. Returns HTTP 200 for all outcomes including idempotent and ignored cases; n8n never sees a 4xx for a legitimate retry of a valid prior report.
+- **`n8n/workflows/second-brain-error-handler.json`** — `Second Brain - Error Handler` updated with the full implementation: HTTP Request node posts to `report-workflow-error` with `X-Second-Brain-Internal-Token` auth, structured payload including `execution_id`, `workflow_id`, `workflow_name`, `stage`, `error_type`, and `reason_type`. Normalizes safe metadata only — no raw error messages, stack traces, or capture text.
+- **`n8n/workflows/second-brain-intake.json`** — `errorWorkflow` setting wired to the Error Handler workflow (placeholder resolved at import time via `deploy/setup-local-n8n.sh`).
+- **`n8n/workflows/test/second-brain-error-harness.json`** — local-only `Second Brain - Error Harness` workflow. Accepts a test webhook with `test_case` routing, synthetically triggers the Error Handler, and validates the full error path without a real n8n execution failure.
+- **`deploy/setup-local-n8n.sh`** — one-time local setup: generates `TEST_HARNESS_TOKEN` into `n8n-test.local.env`, imports the Error Handler, resolves the real workflow ID, patches the Error Harness and Intake `errorWorkflow` field in-place via `n8n export:workflow` + jq + `n8n import:workflow`. Prints exact credential-binding steps for the n8n UI.
+- **`deploy/test-n8n-error-workflow.sh`** — self-contained local regression script. Creates a synthetic capture directly in `FORWARDING` state via a single atomic SQLite transaction (no dispatcher race), triggers the Error Harness, verifies RETRY_WAIT state, idempotent replay, raw-text preservation, and orphan behavior. Cleans up via direct SQL on exit. No arguments, no log scraping, no manual token input required.
+- **`deploy/bootstrap-n8n-test-fixtures.sh`** — imports the Error Harness fixture into the local n8n instance (idempotent by name).
+- **`tests/architecture/test_n8n_error_workflow.py`** — architecture assertions: error handler fixture validity, no execution retention, no localhost URLs, PLACEHOLDER credentials only, correct endpoint path, safe-slug payload fields.
+- **`tests/integration/test_n8n_error_workflow.py`** — 37 integration tests covering: auth (missing/wrong/correct token), request validation (disposition × error_type cross-check, unknown stage, extra fields, unsafe slugs), retryable transitions (FORWARDING/CLASSIFYING → RETRY_WAIT, retry count, lease cleared, raw_text preserved, audit event), terminal transitions (DELIVERY_FAILED, lease cleared), retry exhaustion, idempotency (duplicate/stale/already-terminal/conflicting replays), and concurrent calls (at most one retry increment and one audit event per attempt).
+
+---
+
 ### SB-112 — At-least-once webhook delivery from capture-service to n8n
 
 Implemented the full webhook delivery pipeline between capture-service and n8n, including a writer-stub container that breaks the n8n concurrency deadlock.

@@ -240,6 +240,16 @@ n8n runs alongside capture-service in the `compose.n8n.yaml` overlay. Key facts:
 
 Downstream delivery is enabled with `DOWNSTREAM_DELIVERY_ENABLED=true`. See `.env.example` and `deploy/writer-stub.env.example` for all required variables.
 
+### Error workflow (SB-113+)
+
+When an n8n execution fails, `Second Brain - Error Handler` is invoked automatically via n8n's `errorWorkflow` setting. It reports the failure back to capture-service:
+
+```text
+POST /internal/captures/{id}/delivery/report-workflow-error
+```
+
+The endpoint accepts `disposition` (`retryable` or `terminal`), `error_type`, `reason_type`, `stage`, and execution metadata. Retryable reports schedule a capped-backoff retry; terminal reports mark the capture `DELIVERY_FAILED`. All values are validated as safe slugs — no raw exception text enters the ledger. Duplicate and stale reports are handled idempotently.
+
 capture-service remains the sole owner of the capture ledger. n8n and writer-stub reach it over the private Compose backend network at `http://capture-service:8000`.
 
 See [deploy/README.md](deploy/README.md) for provisioning, bootstrap, and verification steps.
