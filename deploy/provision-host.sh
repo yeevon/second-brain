@@ -94,7 +94,13 @@ if [[ -n "$VAULT_REMOTE" ]]; then
 
   else
     echo "Vault git clone already exists, verifying remote..."
-    actual_remote="$(git -C /opt/second-brain/vault remote get-url origin 2>/dev/null || true)"
+
+    # The vault is owned by UID 10003 from the previous provision run.
+    # Temporarily give $DEPLOY_USER ownership so git operations can succeed,
+    # then restore to 10003:10003 unconditionally at the end of this branch.
+    sudo chown -R "$DEPLOY_USER:$DEPLOY_USER" /opt/second-brain/vault
+
+    actual_remote="$(sudo -u "$DEPLOY_USER" git -C /opt/second-brain/vault remote get-url origin 2>/dev/null || true)"
     if [[ "$actual_remote" != "$VAULT_REMOTE" ]]; then
       echo "WARNING: vault remote $actual_remote does not match expected $VAULT_REMOTE" >&2
     fi
@@ -106,7 +112,7 @@ if [[ -n "$VAULT_REMOTE" ]]; then
       echo "Repairing: adding .writer.lock to vault .gitignore..."
       sudo -u "$DEPLOY_USER" \
         sh -c 'printf ".writer.lock\n" >> /opt/second-brain/vault/.gitignore'
-      if [[ -n "$(git -C /opt/second-brain/vault status --porcelain 2>/dev/null)" ]]; then
+      if [[ -n "$(sudo -u "$DEPLOY_USER" git -C /opt/second-brain/vault status --porcelain 2>/dev/null)" ]]; then
         sudo -u "$DEPLOY_USER" \
           git -C /opt/second-brain/vault add .gitignore
         sudo -u "$DEPLOY_USER" \
@@ -117,7 +123,7 @@ if [[ -n "$VAULT_REMOTE" ]]; then
       fi
     fi
 
-    # Ensure chown is correct even on re-runs
+    # Restore writer-service ownership
     sudo chown -R 10003:10003 /opt/second-brain/vault
   fi
 fi

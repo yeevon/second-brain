@@ -193,21 +193,21 @@ if [[ ! -d "$VAULT_DIR/.git" ]]; then
   exit 1
 fi
 
-vault_branch="$(git -C "$VAULT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+vault_branch="$(docker exec "$WRITER_CONTAINER" git -C /opt/vault rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 if [[ "$vault_branch" != "main" ]]; then
   echo "vault is not on branch main (got: $vault_branch)" >&2
   exit 1
 fi
 
 if [[ -n "$EXPECTED_VAULT_REMOTE" ]]; then
-  actual_remote="$(git -C "$VAULT_DIR" remote get-url origin 2>/dev/null || true)"
+  actual_remote="$(docker exec "$WRITER_CONTAINER" git -C /opt/vault remote get-url origin 2>/dev/null || true)"
   if [[ "$actual_remote" != "$EXPECTED_VAULT_REMOTE" ]]; then
     echo "vault remote mismatch: expected $EXPECTED_VAULT_REMOTE, got $actual_remote" >&2
     exit 1
   fi
 fi
 
-vault_dirty="$(git -C "$VAULT_DIR" status --porcelain 2>/dev/null || true)"
+vault_dirty="$(docker exec "$WRITER_CONTAINER" git -C /opt/vault status --porcelain 2>/dev/null || true)"
 if [[ -n "$vault_dirty" ]]; then
   echo "vault working tree is not clean (uncommitted changes detected)" >&2
   exit 1

@@ -112,6 +112,16 @@ def test_error_handler_has_no_writer_stub_call():
     assert "writer-stub" not in fixture_text
 
 
+def test_error_handler_does_not_allow_writer_stub_stage():
+    """No stale writer_stub taxonomy in the error-handler allowlists (SB-116 cleanup)."""
+    all_js = "\n".join(_all_code(_load(ERROR_HANDLER_PATH)))
+    assert "writer_stub" not in all_js, (
+        "error-handler JS still references writer_stub taxonomy — remove it"
+    )
+    assert "writer_stub_timeout" not in all_js
+    assert "writer_stub_unavailable" not in all_js
+
+
 def test_error_handler_has_no_filesystem_node():
     types = _node_types(_load(ERROR_HANDLER_PATH))
     fs_types = {"n8n-nodes-base.readWriteFile", "n8n-nodes-base.writeBinaryFile", "n8n-nodes-base.filesFromUrl"}
