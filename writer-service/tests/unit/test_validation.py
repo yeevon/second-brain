@@ -102,21 +102,76 @@ def test_delivery_attempt_below_one_rejected(tmp_path, monkeypatch):
 
 
 # ── Path traversal rejection ─────────────────────────────────────────────────
+# Contract (SB-116): traversal-shaped input is rejected BEFORE sanitization.
+# Inputs containing "..", "/", "\", null byte, or starting with "." raise
+# PathTraversalError → HTTP 422, error_type=path_traversal_attempt.
 
 
-def test_path_traversal_in_title_is_sanitized_safely(tmp_path, monkeypatch):
-    """sanitize_slug strips non-alnum characters, so traversal sequences become harmless slugs."""
+def test_double_dot_in_title_rejected(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True)
+    monkeypatch.setenv("VAULT_PATH", str(vault))
+    payload = _base_payload()
+    payload["classification"]["title"] = "../../etc/passwd"
+    resp = CLIENT.post("/internal/notes/file", json=payload, headers=_HEADERS)
+    assert resp.status_code == 422
+    assert resp.json()["error_type"] == "path_traversal_attempt"
+    assert not any(vault.rglob("*.md"))
+
+
+def test_dot_prefix_in_title_rejected(tmp_path, monkeypatch):
+    """Title starting with '.' is rejected as traversal-shaped."""
     vault = tmp_path / "vault"
     vault.mkdir(parents=True)
     monkeypatch.setenv("VAULT_PATH", str(vault))
     payload = _base_payload()
     payload["classification"]["title"] = "..evil"
     resp = CLIENT.post("/internal/notes/file", json=payload, headers=_HEADERS)
-    assert resp.status_code == 200
-    note_path = resp.json()["note_path"]
-    assert ".." not in note_path
-    assert note_path.startswith("20_projects/")
-    assert (vault / note_path).is_file()
+    assert resp.status_code == 422
+    assert resp.json()["error_type"] == "path_traversal_attempt"
+
+
+def test_slash_in_title_rejected(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True)
+    monkeypatch.setenv("VAULT_PATH", str(vault))
+    payload = _base_payload()
+    payload["classification"]["title"] = "notes/secret"
+    resp = CLIENT.post("/internal/notes/file", json=payload, headers=_HEADERS)
+    assert resp.status_code == 422
+    assert resp.json()["error_type"] == "path_traversal_attempt"
+
+
+def test_null_byte_in_title_rejected(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True)
+    monkeypatch.setenv("VAULT_PATH", str(vault))
+    payload = _base_payload()
+    payload["classification"]["title"] = "note\x00title"
+    resp = CLIENT.post("/internal/notes/file", json=payload, headers=_HEADERS)
+    assert resp.status_code == 422
+    assert resp.json()["error_type"] == "path_traversal_attempt"
+
+
+def test_double_dot_in_project_rejected(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True)
+    monkeypatch.setenv("VAULT_PATH", str(vault))
+    payload = _base_payload()
+    payload["classification"]["project"] = "../../etc/passwd"
+    resp = CLIENT.post("/internal/notes/file", json=payload, headers=_HEADERS)
+    assert resp.status_code == 422
+    assert resp.json()["error_type"] == "path_traversal_attempt"
+
+
+def test_path_traversal_retryable_is_false(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True)
+    monkeypatch.setenv("VAULT_PATH", str(vault))
+    payload = _base_payload()
+    payload["classification"]["title"] = "../../etc/passwd"
+    resp = CLIENT.post("/internal/notes/file", json=payload, headers=_HEADERS)
+    assert resp.json()["retryable"] is False
 
 
 def test_note_path_stays_inside_vault(tmp_path, monkeypatch):
@@ -132,16 +187,12 @@ def test_note_path_stays_inside_vault(tmp_path, monkeypatch):
     assert (vault / note_path).resolve().is_relative_to(vault.resolve())
 
 
-def test_null_byte_in_title_sanitized_safely(tmp_path, monkeypatch):
-    """null bytes are stripped by sanitize_slug (non-alnum → hyphen); the filed path stays inside the vault."""
+def test_safe_title_with_special_chars_accepted(tmp_path, monkeypatch):
+    """Titles with special chars that don't contain traversal patterns are accepted."""
     vault = tmp_path / "vault"
     vault.mkdir(parents=True)
     monkeypatch.setenv("VAULT_PATH", str(vault))
     payload = _base_payload()
-    payload["classification"]["title"] = "note\x00title"
+    payload["classification"]["title"] = "My Note: Review & Action Items (2026)"
     resp = CLIENT.post("/internal/notes/file", json=payload, headers=_HEADERS)
     assert resp.status_code == 200
-    note_path = resp.json()["note_path"]
-    assert "\x00" not in note_path
-    assert ".." not in note_path
-    assert (vault / note_path).resolve().is_relative_to(vault.resolve())

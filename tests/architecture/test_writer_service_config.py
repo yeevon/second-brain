@@ -412,3 +412,62 @@ def test_intake_routes_capture_id_duplicate_to_acknowledge_failed():
     retryable_conns = conns.get("Writer Error Retryable?", {}).get("main", [])
     terminal_targets = [c["node"] for c in retryable_conns[1]] if len(retryable_conns) > 1 else []
     assert any("Acknowledge Failed" in t for t in terminal_targets)
+
+
+# ── SB-116: complete retryable taxonomy ─────────────────────────────────────
+
+
+def test_retryable_errors_contains_writer_git_fetch_error():
+    de = _load_downstream_errors()
+    assert "writer_git_fetch_error" in de.RETRYABLE_DOWNSTREAM_ERRORS
+
+
+def test_retryable_errors_contains_writer_git_add_error():
+    de = _load_downstream_errors()
+    assert "writer_git_add_error" in de.RETRYABLE_DOWNSTREAM_ERRORS
+
+
+def test_retryable_errors_contains_writer_git_commit_error():
+    de = _load_downstream_errors()
+    assert "writer_git_commit_error" in de.RETRYABLE_DOWNSTREAM_ERRORS
+
+
+def test_retryable_errors_contains_writer_git_push_error():
+    de = _load_downstream_errors()
+    assert "writer_git_push_error" in de.RETRYABLE_DOWNSTREAM_ERRORS
+
+
+# ── SB-116: Evaluate Writer Response uses body.retryable from response ────────
+
+
+def test_evaluate_writer_response_uses_body_retryable():
+    """Retryability is derived from the writer-service response, not a hardcoded set."""
+    wf = _intake()
+    for node in wf["nodes"]:
+        if node["name"] in ("Evaluate Writer Response", "Evaluate Writer Response (inbox)"):
+            js = node["parameters"].get("jsCode", "")
+            assert "body.retryable === true" in js, (
+                f"Node {node['name']!r} must use body.retryable from writer response"
+            )
+
+
+# ── SB-116: verify.sh checks vault .gitignore ───────────────────────────────
+
+
+def test_verify_sh_checks_vault_gitignore_contains_writer_lock():
+    verify = VERIFY_SH.read_text()
+    assert ".writer.lock" in verify
+
+
+# ── SB-116: path traversal contract ─────────────────────────────────────────
+
+
+def test_git_errors_defines_path_traversal_error():
+    ge = _load_git_errors()
+    assert hasattr(ge, "PathTraversalError")
+
+
+def test_path_traversal_error_is_422_not_retryable():
+    ge = _load_git_errors()
+    assert ge.PathTraversalError.http_status == 422
+    assert ge.PathTraversalError.retryable is False

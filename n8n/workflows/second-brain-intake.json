@@ -621,7 +621,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Normalize writer-service response. On 2xx, unwrap body for downstream nodes.\n// On error, map writer error_type → capture-service error_type for routing.\nconst resp = $input.first().json;\nconst statusCode = resp.statusCode ?? 200;\nconst body = resp.body ?? resp;\n\nconst ERROR_MAP = {\n  'git_push_rejected':   'writer_git_push_rejected',\n  'git_index_locked':    'writer_git_index_locked',\n  'git_merge_conflict':  'writer_git_conflict',\n  'git_worktree_dirty':  'writer_git_worktree_dirty',\n  'path_traversal_attempt': 'writer_path_traversal',\n  'capture_id_duplicate': 'writer_capture_duplicate',\n};\nconst RETRYABLE = new Set(['git_push_rejected', 'git_index_locked']);\n\nif (statusCode >= 200 && statusCode < 300) {\n  return [{ json: { ...body, _writer_ok: true } }];\n}\n\nconst writerErrorType = body.error_type ?? 'unknown';\nconst mappedErrorType = ERROR_MAP[writerErrorType] ?? 'writer_service_unavailable';\nreturn [{\n  json: {\n    _writer_ok: false,\n    _retryable: RETRYABLE.has(writerErrorType),\n    _error_type: mappedErrorType,\n    _reason_type: 'writer_service_error',\n  }\n}];"
+        "jsCode": "// Normalize writer-service response. On 2xx, unwrap body for downstream nodes.\n// On error, map writer error_type → capture-service taxonomy and use the\n// writer-service's own retryable flag to determine routing.\nconst resp = $input.first().json;\nconst statusCode = resp.statusCode ?? 200;\nconst body = resp.body ?? resp;\n\nconst ERROR_MAP = {\n  'git_fetch_error':        'writer_git_fetch_error',\n  'git_add_error':          'writer_git_add_error',\n  'git_commit_error':       'writer_git_commit_error',\n  'git_push_error':         'writer_git_push_error',\n  'git_push_rejected':      'writer_git_push_rejected',\n  'git_index_locked':       'writer_git_index_locked',\n  'git_merge_conflict':     'writer_git_conflict',\n  'git_worktree_dirty':     'writer_git_worktree_dirty',\n  'path_traversal_attempt': 'writer_path_traversal',\n  'capture_id_duplicate':   'writer_capture_duplicate',\n};\n\nif (statusCode >= 200 && statusCode < 300) {\n  return [{ json: { ...body, _writer_ok: true } }];\n}\n\nconst writerErrorType = body.error_type ?? 'unknown';\nconst mappedErrorType = ERROR_MAP[writerErrorType] ?? 'writer_service_unavailable';\nreturn [{\n  json: {\n    _writer_ok: false,\n    _retryable: body.retryable === true,\n    _error_type: mappedErrorType,\n    _reason_type: 'writer_service_error',\n  }\n}];"
       },
       "id": "eval-writer-file",
       "name": "Evaluate Writer Response",
@@ -705,8 +705,8 @@
       ],
       "credentials": {
         "httpHeaderAuth": {
-          "id": "PLACEHOLDER_CAPTURE_INTERNAL",
-          "name": "Capture Internal Token"
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
         }
       }
     },
@@ -731,14 +731,14 @@
       ],
       "credentials": {
         "httpHeaderAuth": {
-          "id": "PLACEHOLDER_CAPTURE_INTERNAL",
-          "name": "Capture Internal Token"
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
         }
       }
     },
     {
       "parameters": {
-        "jsCode": "// Normalize writer-service response. On 2xx, unwrap body for downstream nodes.\n// On error, map writer error_type → capture-service error_type for routing.\nconst resp = $input.first().json;\nconst statusCode = resp.statusCode ?? 200;\nconst body = resp.body ?? resp;\n\nconst ERROR_MAP = {\n  'git_push_rejected':   'writer_git_push_rejected',\n  'git_index_locked':    'writer_git_index_locked',\n  'git_merge_conflict':  'writer_git_conflict',\n  'git_worktree_dirty':  'writer_git_worktree_dirty',\n  'path_traversal_attempt': 'writer_path_traversal',\n  'capture_id_duplicate': 'writer_capture_duplicate',\n};\nconst RETRYABLE = new Set(['git_push_rejected', 'git_index_locked']);\n\nif (statusCode >= 200 && statusCode < 300) {\n  return [{ json: { ...body, _writer_ok: true } }];\n}\n\nconst writerErrorType = body.error_type ?? 'unknown';\nconst mappedErrorType = ERROR_MAP[writerErrorType] ?? 'writer_service_unavailable';\nreturn [{\n  json: {\n    _writer_ok: false,\n    _retryable: RETRYABLE.has(writerErrorType),\n    _error_type: mappedErrorType,\n    _reason_type: 'writer_service_error',\n  }\n}];"
+        "jsCode": "// Normalize writer-service response. On 2xx, unwrap body for downstream nodes.\n// On error, map writer error_type → capture-service taxonomy and use the\n// writer-service's own retryable flag to determine routing.\nconst resp = $input.first().json;\nconst statusCode = resp.statusCode ?? 200;\nconst body = resp.body ?? resp;\n\nconst ERROR_MAP = {\n  'git_fetch_error':        'writer_git_fetch_error',\n  'git_add_error':          'writer_git_add_error',\n  'git_commit_error':       'writer_git_commit_error',\n  'git_push_error':         'writer_git_push_error',\n  'git_push_rejected':      'writer_git_push_rejected',\n  'git_index_locked':       'writer_git_index_locked',\n  'git_merge_conflict':     'writer_git_conflict',\n  'git_worktree_dirty':     'writer_git_worktree_dirty',\n  'path_traversal_attempt': 'writer_path_traversal',\n  'capture_id_duplicate':   'writer_capture_duplicate',\n};\n\nif (statusCode >= 200 && statusCode < 300) {\n  return [{ json: { ...body, _writer_ok: true } }];\n}\n\nconst writerErrorType = body.error_type ?? 'unknown';\nconst mappedErrorType = ERROR_MAP[writerErrorType] ?? 'writer_service_unavailable';\nreturn [{\n  json: {\n    _writer_ok: false,\n    _retryable: body.retryable === true,\n    _error_type: mappedErrorType,\n    _reason_type: 'writer_service_error',\n  }\n}];"
       },
       "id": "eval-writer-inbox",
       "name": "Evaluate Writer Response (inbox)",
@@ -822,8 +822,8 @@
       ],
       "credentials": {
         "httpHeaderAuth": {
-          "id": "PLACEHOLDER_CAPTURE_INTERNAL",
-          "name": "Capture Internal Token"
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
         }
       }
     },
@@ -848,8 +848,8 @@
       ],
       "credentials": {
         "httpHeaderAuth": {
-          "id": "PLACEHOLDER_CAPTURE_INTERNAL",
-          "name": "Capture Internal Token"
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
         }
       }
     }

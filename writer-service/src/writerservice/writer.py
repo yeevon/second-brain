@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 from dataclasses import dataclass
@@ -8,7 +9,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from writerservice.api_models import Classification
-from writerservice.git_errors import CaptureDuplicateError
+from writerservice.git_errors import CaptureDuplicateError, PathTraversalError
+
+logger = logging.getLogger(__name__)
 
 
 class DuplicateCaptureError(Exception):
@@ -23,6 +26,10 @@ FOLDER_MAPPING = {
     "learning": "40_learning",
     "admin": "50_admin",
 }
+
+# Patterns that signal traversal-shaped input regardless of eventual sanitization.
+# Checked on raw field values before any slug conversion.
+_TRAVERSAL_RE = re.compile(r"\.\.|/|\\|\x00")
 
 
 @dataclass(frozen=True)
@@ -196,17 +203,12 @@ class VaultWriter:
     def _find_all_notes_by_capture_id(self, capture_id: str) -> list[Path]:
         if not self.vault_path.exists():
             return []
-
-        needles = {
-            f"capture_id: {capture_id}",
-            f"capture_id: {yaml_scalar(capture_id)}",
-        }
         found: list[Path] = []
         for path in self.vault_path.rglob("*.md"):
             if not path.is_file():
                 continue
             text = path.read_text(encoding="utf-8")
-            if any(needle in text for needle in needles):
+            if _frontmatter_capture_id(text) == capture_id:
                 found.append(path)
         return found
 
@@ -227,16 +229,18 @@ class VaultWriter:
             folder = FOLDER_MAPPING[classification.folder]
             relative_parts = [folder]
             if classification.folder == "projects":
-                relative_parts.append(sanitize_slug(classification.project or "general"))
+                raw_project = classification.project or "general"
+                _reject_traversal_input(raw_project, "project")
+                relative_parts.append(sanitize_slug(raw_project))
 
-        _validate_path_components(relative_parts)
+        raw_title = classification.title
+        _reject_traversal_input(raw_title, "title")
 
         filename = (
             f"{created_at.strftime('%Y-%m-%d')}--"
             f"{capture_id}--"
-            f"{sanitize_slug(classification.title)}.md"
+            f"{sanitize_slug(raw_title)}.md"
         )
-        _validate_path_components([filename])
         relative_parts.append(filename)
 
         path = (self.vault_path / Path(*relative_parts)).resolve()
@@ -263,6 +267,30 @@ class VaultWriter:
         )
 
 
+def _reject_traversal_input(value: str, field: str) -> None:
+    """Reject raw user-supplied strings that contain traversal-shaped characters."""
+    if _TRAVERSAL_RE.search(value) or value.startswith("."):
+        raise PathTraversalError(
+            f"Traversal-shaped input rejected in {field!r}"
+        )
+
+
+def _frontmatter_capture_id(text: str) -> str | None:
+    """Return the capture_id from YAML frontmatter, or None if absent/unparseable."""
+    if not text.startswith("---\n"):
+        return None
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return None
+    for line in text[4:end].splitlines():
+        if line.startswith("capture_id:"):
+            raw = line[len("capture_id:"):].strip()
+            if raw.startswith('"') and raw.endswith('"'):
+                return raw[1:-1]
+            return raw
+    return None
+
+
 def _rollback_to_head(
     vault_path: Path,
     pre_write_head: str,
@@ -270,19 +298,29 @@ def _rollback_to_head(
     audit_log_existed: bool,
     audit_log_path: Path,
 ) -> None:
-    subprocess.run(
+    rel_note = str(written_note.relative_to(vault_path))
+    reset_result = subprocess.run(
         ["git", "reset", "--hard", pre_write_head],
         cwd=vault_path,
         check=False,
         capture_output=True,
+        timeout=15,
     )
-    rel_note = str(written_note.relative_to(vault_path))
-    subprocess.run(
+    clean_result = subprocess.run(
         ["git", "clean", "-f", rel_note],
         cwd=vault_path,
         check=False,
         capture_output=True,
+        timeout=15,
     )
+    if reset_result.returncode != 0 or clean_result.returncode != 0:
+        logger.error(
+            json.dumps({
+                "event": "writer_git_rollback_failed",
+                "reset_returncode": reset_result.returncode,
+                "clean_returncode": clean_result.returncode,
+            })
+        )
     if not audit_log_existed and audit_log_path.exists():
         audit_log_path.unlink(missing_ok=True)
 
@@ -359,22 +397,6 @@ def sanitize_slug(value: str) -> str:
 
 def yaml_scalar(value: str) -> str:
     return json.dumps(value)
-
-
-def _validate_path_components(parts: list[str]) -> None:
-    for part in parts:
-        if not part:
-            raise ValueError("empty path component")
-        if "\x00" in part:
-            raise ValueError("path component contains null byte")
-        if part.startswith("."):
-            raise ValueError("path component starts with dot")
-        if ".." in part:
-            raise ValueError("path component contains ..")
-        if "/" in part:
-            raise ValueError("path component contains /")
-        if part.startswith("/"):
-            raise ValueError("absolute path component")
 
 
 def _relative_posix(path: Path, root: Path) -> str:

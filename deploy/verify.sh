@@ -245,4 +245,9 @@ if ! echo "$ls_remote_result" | grep -qE '^[0-9a-f]{40}'; then
   exit 1
 fi
 
+if ! grep -qxF '.writer.lock' "$VAULT_DIR/.gitignore" 2>/dev/null; then
+  echo "vault .gitignore does not contain '.writer.lock' — writer lock file would be tracked by Git" >&2
+  exit 1
+fi
+
 echo "writer-service Git-sync checks passed"

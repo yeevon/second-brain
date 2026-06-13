@@ -111,16 +111,33 @@ def test_index_lock_no_note_written(tmp_path, monkeypatch):
 
 
 # ── Simulated merge conflict ───────────────────────────────────────────────────
+# A true --ff-only failure requires the local and remote to DIVERGE.
+# We achieve this by:
+#   1. Advancing the remote from a second clone (commit B).
+#   2. Making a local commit C in the vault clone (on top of the shared base A).
+# After fetch, origin/main = B but vault HEAD = C → merge --ff-only fails.
+
+def _make_diverging_vault(tmp_path: "Path") -> tuple["Path", "Path"]:
+    bare, vault = _init_bare_repo(tmp_path)
+    # Advance remote from a second clone
+    clone2 = tmp_path / "clone2"
+    subprocess.run(["git", "clone", str(bare), str(clone2)], check=True, capture_output=True)
+    _cfg_git(clone2)
+    (clone2 / "remote_only.md").write_text("remote advance")
+    subprocess.run(["git", "add", "remote_only.md"], cwd=clone2, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "chore: remote advance"], cwd=clone2, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=clone2, check=True, capture_output=True)
+    # Make a diverging local commit in the vault clone
+    (vault / "local_only.md").write_text("local diverge")
+    subprocess.run(["git", "add", "local_only.md"], cwd=vault, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "local: diverging commit"], cwd=vault, check=True, capture_output=True)
+    return bare, vault
+
 
 def test_merge_conflict_returns_409(tmp_path, monkeypatch):
-    bare, vault = _init_bare_repo(tmp_path)
+    bare, vault = _make_diverging_vault(tmp_path)
     monkeypatch.setenv("VAULT_PATH", str(vault))
     monkeypatch.setenv("GIT_SYNC_ENABLED", "true")
-
-    # Commit directly on local clone to diverge from remote
-    (vault / "local_only.md").write_text("not pushed")
-    subprocess.run(["git", "add", "local_only.md"], cwd=vault, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "local: unpushed commit"], cwd=vault, check=True, capture_output=True)
 
     resp = CLIENT.post("/internal/notes/file", json=_base_payload("SB-20260612-0104"), headers=_HEADERS)
     assert resp.status_code == 409
@@ -130,13 +147,9 @@ def test_merge_conflict_returns_409(tmp_path, monkeypatch):
 
 
 def test_merge_conflict_no_new_file_written(tmp_path, monkeypatch):
-    bare, vault = _init_bare_repo(tmp_path)
+    bare, vault = _make_diverging_vault(tmp_path)
     monkeypatch.setenv("VAULT_PATH", str(vault))
     monkeypatch.setenv("GIT_SYNC_ENABLED", "true")
-
-    (vault / "local_only.md").write_text("not pushed")
-    subprocess.run(["git", "add", "local_only.md"], cwd=vault, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "local: unpushed commit"], cwd=vault, check=True, capture_output=True)
 
     CLIENT.post("/internal/notes/file", json=_base_payload("SB-20260612-0105"), headers=_HEADERS)
     md_files = list(vault.rglob("*.md"))
@@ -268,7 +281,8 @@ def test_duplicate_no_third_file_written(tmp_path, monkeypatch):
 
 # ── Path traversal ────────────────────────────────────────────────────────────
 
-def test_path_traversal_in_project_returns_safely(tmp_path, monkeypatch):
+def test_path_traversal_in_project_rejected(tmp_path, monkeypatch):
+    # SB-116 contract: traversal-shaped input is rejected before sanitization.
     vault = tmp_path / "vault"
     vault.mkdir()
     monkeypatch.setenv("VAULT_PATH", str(vault))
@@ -277,8 +291,7 @@ def test_path_traversal_in_project_returns_safely(tmp_path, monkeypatch):
     payload = _base_payload("SB-20260612-0113")
     payload["classification"]["project"] = "../../etc/passwd"
     resp = CLIENT.post("/internal/notes/file", json=payload, headers=_HEADERS)
-    # sanitize_slug converts this to a safe slug; must succeed safely
-    assert resp.status_code == 200
-    note_path = resp.json()["note_path"]
-    assert ".." not in note_path
-    assert (vault / note_path).resolve().is_relative_to(vault.resolve())
+    assert resp.status_code == 422
+    assert resp.json()["error_type"] == "path_traversal_attempt"
+    assert resp.json()["retryable"] is False
+    assert not any(vault.rglob("*.md"))

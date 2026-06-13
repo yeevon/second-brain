@@ -356,3 +356,37 @@ def test_bootstrap_does_not_activate_intake():
     bootstrap = BOOTSTRAP_PATH.read_text()
     assert "--active=true" not in bootstrap
     assert "activate:workflow" not in bootstrap
+
+
+# ── Credential consistency ────────────────────────────────────────────────────
+
+
+def test_every_capture_service_node_uses_same_credential():
+    """Every node that calls capture-service:8000 must use the same credential id and name.
+
+    Prevents the hidden-credential-binding problem that plagued SB-114:
+    a mismatched placeholder causes silent failures on the first writer error path.
+    """
+    wf = _fixture()
+    capture_cred_ids: set[str] = set()
+    capture_cred_names: set[str] = set()
+    nodes_checked: list[str] = []
+
+    for node in wf["nodes"]:
+        url = node.get("parameters", {}).get("url", "")
+        if "capture-service" not in url:
+            continue
+        cred = node.get("credentials", {}).get("httpHeaderAuth")
+        if not cred:
+            continue
+        capture_cred_ids.add(cred["id"])
+        capture_cred_names.add(cred["name"])
+        nodes_checked.append(node["name"])
+
+    assert nodes_checked, "No capture-service HTTP nodes found in workflow"
+    assert capture_cred_ids == {"PLACEHOLDER_CAPTURE_SERVICE_TOKEN"}, (
+        f"Multiple credential IDs for capture-service nodes {nodes_checked}: {capture_cred_ids}"
+    )
+    assert capture_cred_names == {"Capture Service Token"}, (
+        f"Multiple credential names for capture-service nodes {nodes_checked}: {capture_cred_names}"
+    )

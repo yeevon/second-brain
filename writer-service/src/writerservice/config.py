@@ -15,7 +15,6 @@ class Settings:
             os.environ.get("GIT_SYNC_ENABLED", "false").lower() == "true"
         )
         self.vault_remote: str = os.environ.get("VAULT_REMOTE", "")
-        self.vault_branch: str = os.environ.get("VAULT_BRANCH", "main")
 
 
 _settings: Settings | None = None
