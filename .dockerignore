@@ -16,6 +16,9 @@ n8n.local.env
 n8n-encryption-key.local
 writer-stub.local.env
 writer-service.local.env
+vault-deploy-key
+vault-deploy-key.pub
+github_known_hosts.local
 vault
 tests
 docs

@@ -1,7 +1,9 @@
-"""Architecture tests for writer-service compose configuration."""
+"""Architecture tests for writer-service compose configuration (SB-115, SB-116)."""
 from __future__ import annotations
 
+import importlib
 import json
+import sys
 from pathlib import Path
 
 import yaml
@@ -10,6 +12,11 @@ ROOT = Path(".")
 COMPOSE_N8N = ROOT / "compose.n8n.yaml"
 COMPOSE_OVERRIDE = ROOT / "compose.override.yaml"
 INTAKE_FIXTURE = ROOT / "n8n" / "workflows" / "second-brain-intake.json"
+ERROR_HANDLER_FIXTURE = ROOT / "n8n" / "workflows" / "second-brain-error-handler.json"
+WRITER_SRC = ROOT / "writer-service" / "src" / "writerservice"
+VERIFY_SH = ROOT / "deploy" / "verify.sh"
+GITIGNORE = ROOT / ".gitignore"
+DOCKERIGNORE = ROOT / ".dockerignore"
 
 
 def _n8n_compose():
@@ -22,6 +29,10 @@ def _override_compose():
 
 def _intake():
     return json.loads(INTAKE_FIXTURE.read_text())
+
+
+def _error_handler():
+    return json.loads(ERROR_HANDLER_FIXTURE.read_text())
 
 
 # ── writer-service image ──────────────────────────────────────────────────────
@@ -86,3 +97,318 @@ def test_compose_n8n_does_not_contain_writer_stub():
 def test_compose_override_does_not_define_writer_stub():
     content = COMPOSE_OVERRIDE.read_text()
     assert "writer-stub" not in content
+
+
+# ── SB-115: Git vault sync compose config ────────────────────────────────────
+
+
+def test_compose_n8n_vault_volume_is_bind_mount():
+    svc = _n8n_compose()["services"]["writer-service"]
+    volumes = svc.get("volumes", [])
+    assert any("/opt/vault" in str(v) for v in volumes)
+    # Bind mount uses a variable path (not a bare named-volume reference)
+    vault_vol = next(str(v) for v in volumes if "/opt/vault" in str(v))
+    assert "${WRITER_VAULT_SOURCE" in vault_vol
+
+
+def test_compose_n8n_vault_deploy_key_secret_defined():
+    compose = _n8n_compose()
+    secrets = compose.get("secrets", {})
+    assert "vault_deploy_key" in secrets
+
+
+def test_compose_n8n_github_known_hosts_secret_defined():
+    compose = _n8n_compose()
+    secrets = compose.get("secrets", {})
+    assert "github_known_hosts" in secrets
+
+
+def test_writer_service_git_ssh_command_contains_strict_host_checking_yes():
+    svc = _n8n_compose()["services"]["writer-service"]
+    env = svc.get("environment", {})
+    git_ssh = str(env.get("GIT_SSH_COMMAND", ""))
+    assert "StrictHostKeyChecking=yes" in git_ssh
+
+
+def test_writer_service_git_ssh_command_does_not_contain_strict_host_checking_no():
+    svc = _n8n_compose()["services"]["writer-service"]
+    env = svc.get("environment", {})
+    git_ssh = str(env.get("GIT_SSH_COMMAND", ""))
+    assert "StrictHostKeyChecking=no" not in git_ssh
+
+
+def test_writer_service_git_ssh_command_contains_known_hosts_file():
+    svc = _n8n_compose()["services"]["writer-service"]
+    env = svc.get("environment", {})
+    git_ssh = str(env.get("GIT_SSH_COMMAND", ""))
+    assert "UserKnownHostsFile=/run/secrets/github_known_hosts" in git_ssh
+
+
+def test_gitignore_contains_writer_lock():
+    assert ".writer.lock" in GITIGNORE.read_text()
+
+
+def test_gitignore_contains_vault_deploy_key():
+    assert "vault-deploy-key" in GITIGNORE.read_text()
+
+
+def test_dockerignore_contains_vault_deploy_key():
+    assert "vault-deploy-key" in DOCKERIGNORE.read_text()
+
+
+def test_verify_sh_checks_vault_remote_url():
+    verify = VERIFY_SH.read_text()
+    assert "VAULT_REMOTE" in verify or "vault remote" in verify.lower()
+
+
+def test_verify_sh_checks_deploy_key_permissions():
+    verify = VERIFY_SH.read_text()
+    assert "vault-deploy-key" in verify or "DEPLOY_KEY" in verify or "deploy_key" in verify
+
+
+def test_verify_sh_checks_github_known_hosts_file():
+    verify = VERIFY_SH.read_text()
+    assert "github_known_hosts" in verify or "known_hosts" in verify.lower()
+
+
+# ── SB-116: Git error hierarchy ──────────────────────────────────────────────
+
+
+def _load_git_errors():
+    spec_path = str(WRITER_SRC)
+    if spec_path not in sys.path:
+        sys.path.insert(0, str(ROOT / "writer-service" / "src"))
+    import writerservice.git_errors as ge
+    return ge
+
+
+def test_git_errors_defines_git_merge_conflict_error():
+    ge = _load_git_errors()
+    assert hasattr(ge, "GitMergeConflictError")
+
+
+def test_git_errors_defines_git_push_rejected_error():
+    ge = _load_git_errors()
+    assert hasattr(ge, "GitPushRejectedError")
+
+
+def test_git_errors_defines_git_index_locked_error():
+    ge = _load_git_errors()
+    assert hasattr(ge, "GitIndexLockedError")
+
+
+def test_git_errors_defines_git_workdir_dirty_error():
+    ge = _load_git_errors()
+    assert hasattr(ge, "GitWorkdirDirtyError")
+
+
+def test_git_errors_defines_capture_duplicate_error():
+    ge = _load_git_errors()
+    assert hasattr(ge, "CaptureDuplicateError")
+
+
+def test_git_errors_defines_path_traversal_error():
+    ge = _load_git_errors()
+    assert hasattr(ge, "PathTraversalError")
+
+
+def test_all_writer_errors_have_error_type_http_status_retryable():
+    ge = _load_git_errors()
+    for name in [
+        "GitMergeConflictError", "GitPushRejectedError", "GitIndexLockedError",
+        "GitWorkdirDirtyError", "CaptureDuplicateError", "PathTraversalError",
+    ]:
+        cls = getattr(ge, name)
+        assert hasattr(cls, "error_type"), f"{name} missing error_type"
+        assert hasattr(cls, "http_status"), f"{name} missing http_status"
+        assert hasattr(cls, "retryable"), f"{name} missing retryable"
+        assert issubclass(cls, ge.WriterError)
+
+
+def test_git_merge_conflict_error_not_retryable():
+    ge = _load_git_errors()
+    assert ge.GitMergeConflictError.retryable is False
+
+
+def test_git_workdir_dirty_error_not_retryable():
+    ge = _load_git_errors()
+    assert ge.GitWorkdirDirtyError.retryable is False
+
+
+# ── SB-116: downstream_errors.py ────────────────────────────────────────────
+
+
+def _load_downstream_errors():
+    if str(ROOT / "src") not in sys.path:
+        sys.path.insert(0, str(ROOT / "src"))
+    import secondbrain.downstream_errors as de
+    return de
+
+
+def test_retryable_errors_contains_writer_git_push_rejected():
+    de = _load_downstream_errors()
+    assert "writer_git_push_rejected" in de.RETRYABLE_DOWNSTREAM_ERRORS
+
+
+def test_retryable_errors_contains_writer_git_index_locked():
+    de = _load_downstream_errors()
+    assert "writer_git_index_locked" in de.RETRYABLE_DOWNSTREAM_ERRORS
+
+
+def test_terminal_errors_contains_writer_git_conflict():
+    de = _load_downstream_errors()
+    assert "writer_git_conflict" in de.TERMINAL_DOWNSTREAM_ERRORS
+
+
+def test_terminal_errors_contains_writer_git_worktree_dirty():
+    de = _load_downstream_errors()
+    assert "writer_git_worktree_dirty" in de.TERMINAL_DOWNSTREAM_ERRORS
+
+
+def test_terminal_errors_contains_writer_path_traversal():
+    de = _load_downstream_errors()
+    assert "writer_path_traversal" in de.TERMINAL_DOWNSTREAM_ERRORS
+
+
+def test_terminal_errors_contains_writer_capture_duplicate():
+    de = _load_downstream_errors()
+    assert "writer_capture_duplicate" in de.TERMINAL_DOWNSTREAM_ERRORS
+
+
+def test_allowed_stages_contains_writer_service():
+    de = _load_downstream_errors()
+    assert "writer_service" in de.ALLOWED_STAGES
+
+
+def test_allowed_stages_does_not_contain_writer_stub():
+    de = _load_downstream_errors()
+    assert "writer_stub" not in de.ALLOWED_STAGES
+
+
+# ── SB-116: n8n error handler workflow ──────────────────────────────────────
+
+
+def _error_handler_js(node_name: str) -> str:
+    wf = _error_handler()
+    for node in wf["nodes"]:
+        if node["name"] == node_name:
+            return node["parameters"].get("jsCode", "")
+    return ""
+
+
+def test_error_handler_maps_submit_to_writer_service_stage():
+    js = _error_handler_js("Normalize Safe Error Metadata")
+    assert "Submit to Writer Service" in js
+    assert "writer_service" in js
+
+
+def test_error_handler_retryable_set_contains_writer_git_push_rejected():
+    js = _error_handler_js("Extract Safe Correlation Context")
+    assert "writer_git_push_rejected" in js
+
+
+def test_error_handler_retryable_set_contains_writer_git_index_locked():
+    js = _error_handler_js("Extract Safe Correlation Context")
+    assert "writer_git_index_locked" in js
+
+
+def test_error_handler_terminal_set_contains_writer_git_conflict():
+    js = _error_handler_js("Extract Safe Correlation Context")
+    assert "writer_git_conflict" in js
+
+
+def test_error_handler_terminal_set_contains_writer_git_worktree_dirty():
+    js = _error_handler_js("Extract Safe Correlation Context")
+    assert "writer_git_worktree_dirty" in js
+
+
+def test_error_handler_allowed_stages_contains_writer_service():
+    js = _error_handler_js("Extract Safe Correlation Context")
+    assert "writer_service" in js
+
+
+# ── SB-116: n8n intake workflow error routing ─────────────────────────────────
+
+
+def _writer_nodes():
+    wf = _intake()
+    return [
+        n for n in wf["nodes"]
+        if n["name"] in ("Submit to Writer Service", "Submit to Writer Service (inbox)")
+    ]
+
+
+def test_intake_writer_service_nodes_have_never_error():
+    for node in _writer_nodes():
+        opts = node["parameters"].get("options", {})
+        inner = opts.get("response", {}).get("response", {})
+        assert inner.get("neverError") is True, (
+            f"Node {node['name']!r} missing neverError: true"
+        )
+
+
+def test_intake_writer_service_nodes_have_full_response():
+    for node in _writer_nodes():
+        opts = node["parameters"].get("options", {})
+        inner = opts.get("response", {}).get("response", {})
+        assert inner.get("fullResponse") is True, (
+            f"Node {node['name']!r} missing fullResponse: true"
+        )
+
+
+def _intake_conns():
+    return _intake().get("connections", {})
+
+
+def test_intake_writer_service_routes_to_evaluate_node():
+    conns = _intake_conns()
+    file_targets = [c["node"] for c in conns.get("Submit to Writer Service", {}).get("main", [[]])[0]]
+    assert "Evaluate Writer Response" in file_targets
+
+    inbox_targets = [c["node"] for c in conns.get("Submit to Writer Service (inbox)", {}).get("main", [[]])[0]]
+    assert "Evaluate Writer Response (inbox)" in inbox_targets
+
+
+def test_intake_routes_git_push_rejected_to_schedule_retry():
+    conns = _intake_conns()
+    # Writer Error Retryable? output 0 (true) → Schedule Retry (writer)
+    retryable_conns = conns.get("Writer Error Retryable?", {}).get("main", [])
+    retry_targets = [c["node"] for c in retryable_conns[0]] if retryable_conns else []
+    assert any("Schedule Retry" in t for t in retry_targets)
+
+
+def test_intake_routes_git_index_locked_to_schedule_retry():
+    # Both git_push_rejected and git_index_locked are retryable → same Schedule Retry node
+    conns = _intake_conns()
+    retryable_conns = conns.get("Writer Error Retryable?", {}).get("main", [])
+    retry_targets = [c["node"] for c in retryable_conns[0]] if retryable_conns else []
+    assert any("Schedule Retry" in t for t in retry_targets)
+
+
+def test_intake_routes_git_merge_conflict_to_acknowledge_failed():
+    conns = _intake_conns()
+    # Writer Error Retryable? output 1 (false) → Acknowledge Failed (writer)
+    retryable_conns = conns.get("Writer Error Retryable?", {}).get("main", [])
+    terminal_targets = [c["node"] for c in retryable_conns[1]] if len(retryable_conns) > 1 else []
+    assert any("Acknowledge Failed" in t for t in terminal_targets)
+
+
+def test_intake_routes_git_worktree_dirty_to_acknowledge_failed():
+    conns = _intake_conns()
+    retryable_conns = conns.get("Writer Error Retryable?", {}).get("main", [])
+    terminal_targets = [c["node"] for c in retryable_conns[1]] if len(retryable_conns) > 1 else []
+    assert any("Acknowledge Failed" in t for t in terminal_targets)
+
+
+def test_intake_routes_path_traversal_to_acknowledge_failed():
+    conns = _intake_conns()
+    retryable_conns = conns.get("Writer Error Retryable?", {}).get("main", [])
+    terminal_targets = [c["node"] for c in retryable_conns[1]] if len(retryable_conns) > 1 else []
+    assert any("Acknowledge Failed" in t for t in terminal_targets)
+
+
+def test_intake_routes_capture_id_duplicate_to_acknowledge_failed():
+    conns = _intake_conns()
+    retryable_conns = conns.get("Writer Error Retryable?", {}).get("main", [])
+    terminal_targets = [c["node"] for c in retryable_conns[1]] if len(retryable_conns) > 1 else []
+    assert any("Acknowledge Failed" in t for t in terminal_targets)

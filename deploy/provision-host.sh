@@ -30,5 +30,23 @@ sudo chown -R 10001:10001 /opt/second-brain/data
 sudo mkdir -p /opt/second-brain/vault/99_log
 sudo chown -R 10003:10003 /opt/second-brain/vault
 
+# ── Vault Git clone ───────────────────────────────────────────────────────────
+# Only clone if the vault directory does not already contain a .git folder.
+VAULT_REMOTE="${VAULT_REMOTE:-}"
+if [[ -n "$VAULT_REMOTE" ]]; then
+  if [[ ! -d /opt/second-brain/vault/.git ]]; then
+    sudo -u "$DEPLOY_USER" git clone "$VAULT_REMOTE" /opt/second-brain/vault
+    git -C /opt/second-brain/vault config user.name "Second Brain Writer"
+    git -C /opt/second-brain/vault config user.email "writer@second-brain.local"
+  else
+    echo "Vault git clone already exists, verifying remote..."
+    actual_remote="$(git -C /opt/second-brain/vault remote get-url origin 2>/dev/null || true)"
+    if [[ "$actual_remote" != "$VAULT_REMOTE" ]]; then
+      echo "WARNING: vault remote $actual_remote does not match expected $VAULT_REMOTE" >&2
+    fi
+  fi
+  sudo chown -R 10003:10003 /opt/second-brain/vault
+fi
+
 echo "Docker installed. Log out and back in for docker group membership to refresh."
 echo "Mount the encrypted EBS data volume at /opt/second-brain/data before starting the service."

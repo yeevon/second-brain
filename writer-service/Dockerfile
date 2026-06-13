@@ -1,5 +1,10 @@
 FROM python:3.13-slim
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    openssh-client \
+  && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir \
     fastapi==0.136.3 \
     uvicorn==0.34.3 \

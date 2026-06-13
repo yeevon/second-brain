@@ -42,6 +42,19 @@ services:
     restart: unless-stopped
     env_file:
       - ${WRITER_SERVICE_ENV_FILE:?WRITER_SERVICE_ENV_FILE must be set}
+    environment:
+      GIT_SSH_COMMAND: >-
+        ssh -i /run/secrets/vault_deploy_key
+        -o StrictHostKeyChecking=yes
+        -o UserKnownHostsFile=/run/secrets/github_known_hosts
+        -o BatchMode=yes
+      GIT_AUTHOR_NAME: "Second Brain Writer"
+      GIT_AUTHOR_EMAIL: "writer@second-brain.local"
+      GIT_COMMITTER_NAME: "Second Brain Writer"
+      GIT_COMMITTER_EMAIL: "writer@second-brain.local"
+    secrets:
+      - vault_deploy_key
+      - github_known_hosts
     volumes:
       - ${WRITER_VAULT_SOURCE:?WRITER_VAULT_SOURCE must be set}:/opt/vault
     networks:
@@ -66,6 +79,10 @@ services:
 secrets:
   n8n_encryption_key:
     file: ${N8N_ENCRYPTION_KEY_FILE:?N8N_ENCRYPTION_KEY_FILE must be set}
+  vault_deploy_key:
+    file: ${VAULT_DEPLOY_KEY_FILE:?VAULT_DEPLOY_KEY_FILE must be set}
+  github_known_hosts:
+    file: ${GITHUB_KNOWN_HOSTS_FILE:?GITHUB_KNOWN_HOSTS_FILE must be set}
 
 volumes:
   second-brain-local-n8n-data:

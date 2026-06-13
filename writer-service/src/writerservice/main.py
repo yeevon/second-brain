@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from secrets import compare_digest
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from pydantic import ValidationError
+from fastapi.responses import JSONResponse
 
 from writerservice.api_models import FileNoteRequest, FileNoteResponse, HealthResponse
 from writerservice.config import get_settings
+from writerservice.git_errors import CaptureDuplicateError, WriterError
 from writerservice.vault import check_vault_writable
 from writerservice.writer import DuplicateCaptureError, VaultWriter
 
@@ -25,6 +26,17 @@ def _build_app() -> FastAPI:
         settings = get_settings()
         if supplied is None or not compare_digest(supplied, settings.writer_service_token):
             raise HTTPException(status_code=401, detail="unauthorized")
+
+    @app.exception_handler(WriterError)
+    async def writer_error_handler(request: Request, exc: WriterError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.http_status,
+            content={
+                "error_type": exc.error_type,
+                "retryable": exc.retryable,
+                "message": str(exc),
+            },
+        )
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
@@ -61,7 +73,10 @@ def _build_app() -> FastAPI:
                 prompt_version=request.prompt_version,
                 delivery_attempt=request.delivery_attempt,
                 inbox_reason=request.inbox_reason,
+                git_sync_enabled=settings.git_sync_enabled,
             )
+        except CaptureDuplicateError as exc:
+            raise exc from exc
         except DuplicateCaptureError as exc:
             raise HTTPException(
                 status_code=409,
@@ -75,7 +90,7 @@ def _build_app() -> FastAPI:
         return FileNoteResponse(
             result="FILED",
             note_path=result.note_path,
-            git_commit_hash=None,
+            git_commit_hash=result.git_commit_hash,
             idempotent=not result.created,
         )
 

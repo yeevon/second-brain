@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from writerservice.api_models import Classification
+from writerservice.git_errors import CaptureDuplicateError
 
 
 class DuplicateCaptureError(Exception):
@@ -28,6 +30,7 @@ class WriteResult:
     note_path: str
     absolute_path: Path
     created: bool
+    git_commit_hash: str | None = None
 
 
 class VaultWriter:
@@ -52,14 +55,68 @@ class VaultWriter:
         prompt_version: str,
         delivery_attempt: int,
         inbox_reason: str | None,
+        git_sync_enabled: bool = False,
     ) -> WriteResult:
+        from writerservice.flock import vault_write_lock
+
+        lock_path = self.vault_path / ".writer.lock"
+        with vault_write_lock(lock_path):
+            return self._write_under_lock(
+                capture_id=capture_id,
+                source_message_id=source_message_id,
+                created_at=created_at,
+                classification=classification,
+                model=model,
+                prompt_version=prompt_version,
+                delivery_attempt=delivery_attempt,
+                inbox_reason=inbox_reason,
+                git_sync_enabled=git_sync_enabled,
+            )
+
+    def _write_under_lock(
+        self,
+        *,
+        capture_id: str,
+        source_message_id: str,
+        created_at: datetime,
+        classification: Classification,
+        model: str,
+        prompt_version: str,
+        delivery_attempt: int,
+        inbox_reason: str | None,
+        git_sync_enabled: bool,
+    ) -> WriteResult:
+        from writerservice.git_ops import (
+            check_index_lock,
+            check_working_tree_clean,
+            git_add,
+            git_commit,
+            git_fetch,
+            git_log_hash_for_path,
+            git_merge_ff_only,
+            git_push,
+            git_rev_parse_head,
+        )
+
+        if git_sync_enabled:
+            check_index_lock(self.vault_path)
+            git_fetch(self.vault_path)
+            git_merge_ff_only(self.vault_path)
+
         existing_path = self.find_note_by_capture_id(capture_id)
         if existing_path is not None:
+            commit_hash: str | None = None
+            if git_sync_enabled:
+                commit_hash = git_log_hash_for_path(self.vault_path, existing_path)
             return WriteResult(
                 note_path=_relative_posix(existing_path, self.vault_path),
                 absolute_path=existing_path,
                 created=False,
+                git_commit_hash=commit_hash,
             )
+
+        if git_sync_enabled:
+            check_working_tree_clean(self.vault_path)
 
         note_path = self._note_path(
             capture_id=capture_id,
@@ -72,39 +129,68 @@ class VaultWriter:
         if note_path.exists():
             raise FileExistsError(f"refusing to overwrite unrelated note: {note_path}")
 
-        markdown = render_markdown(
-            capture_id=capture_id,
-            source_message_id=source_message_id,
-            created_at=created_at,
-            classification=classification,
-            model=model,
-            prompt_version=prompt_version,
-        )
-        note_path.write_text(markdown, encoding="utf-8")
+        pre_write_head: str | None = None
+        audit_log_existed = self.audit_log_path.exists()
+        if git_sync_enabled:
+            pre_write_head = git_rev_parse_head(self.vault_path)
 
-        relative_path = _relative_posix(note_path, self.vault_path)
-        self._append_audit_event(
-            capture_id=capture_id,
-            note_path=relative_path,
-            delivery_attempt=delivery_attempt,
-            idempotent=False,
-        )
+        try:
+            markdown = render_markdown(
+                capture_id=capture_id,
+                source_message_id=source_message_id,
+                created_at=created_at,
+                classification=classification,
+                model=model,
+                prompt_version=prompt_version,
+            )
+            note_path.write_text(markdown, encoding="utf-8")
+
+            relative_path = _relative_posix(note_path, self.vault_path)
+            self._append_audit_event(
+                capture_id=capture_id,
+                note_path=relative_path,
+                delivery_attempt=delivery_attempt,
+                idempotent=False,
+            )
+
+            git_hash: str | None = None
+            if git_sync_enabled:
+                git_add(self.vault_path, relative_path, "99_log/events.ndjson")
+                git_commit(
+                    self.vault_path,
+                    f"note: {capture_id} via writer-service",
+                )
+                git_hash = git_rev_parse_head(self.vault_path)
+                git_push(self.vault_path)
+
+        except Exception:
+            if git_sync_enabled and pre_write_head is not None:
+                _rollback_to_head(
+                    self.vault_path,
+                    pre_write_head,
+                    note_path,
+                    audit_log_existed,
+                    self.audit_log_path,
+                )
+            raise
 
         return WriteResult(
             note_path=relative_path,
             absolute_path=note_path,
             created=True,
+            git_commit_hash=git_hash,
         )
 
     def find_note_by_capture_id(self, capture_id: str) -> Path | None:
-        """Return path if exactly one match, None if zero. Raises DuplicateCaptureError on 2+."""
         matches = self._find_all_notes_by_capture_id(capture_id)
         if len(matches) == 0:
             return None
         if len(matches) == 1:
             return matches[0]
-        raise DuplicateCaptureError(
-            f"multiple notes found for capture_id {capture_id!r}: {matches}"
+        raise CaptureDuplicateError(
+            f"Found {len(matches)} vault files with capture_id {capture_id!r}. "
+            "Manual deduplication required. "
+            f"Files: {', '.join(str(p.relative_to(self.vault_path)) for p in matches)}"
         )
 
     def _find_all_notes_by_capture_id(self, capture_id: str) -> list[Path]:
@@ -175,6 +261,30 @@ class VaultWriter:
             delivery_attempt=delivery_attempt,
             idempotent=idempotent,
         )
+
+
+def _rollback_to_head(
+    vault_path: Path,
+    pre_write_head: str,
+    written_note: Path,
+    audit_log_existed: bool,
+    audit_log_path: Path,
+) -> None:
+    subprocess.run(
+        ["git", "reset", "--hard", pre_write_head],
+        cwd=vault_path,
+        check=False,
+        capture_output=True,
+    )
+    rel_note = str(written_note.relative_to(vault_path))
+    subprocess.run(
+        ["git", "clean", "-f", rel_note],
+        cwd=vault_path,
+        check=False,
+        capture_output=True,
+    )
+    if not audit_log_existed and audit_log_path.exists():
+        audit_log_path.unlink(missing_ok=True)
 
 
 def render_markdown(

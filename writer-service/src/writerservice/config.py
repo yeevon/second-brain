@@ -11,6 +11,11 @@ class Settings:
             "AUDIT_LOG_PATH", "/opt/vault/99_log/events.ndjson"
         )
         self.log_level: str = os.environ.get("LOG_LEVEL", "INFO")
+        self.git_sync_enabled: bool = (
+            os.environ.get("GIT_SYNC_ENABLED", "false").lower() == "true"
+        )
+        self.vault_remote: str = os.environ.get("VAULT_REMOTE", "")
+        self.vault_branch: str = os.environ.get("VAULT_BRANCH", "main")
 
 
 _settings: Settings | None = None

@@ -226,21 +226,34 @@ def test_intake_has_no_stub_path_references():
 
 
 def test_intake_file_branch_calls_acknowledge_filed_after_writer_service():
+    # SB-116: writer → Evaluate Writer Response → Writer OK? (true) → Acknowledge Filed
     wf = _fixture()
     conns = wf.get("connections", {})
+    # Direct connection now goes to the evaluation layer
     writer_conns = conns.get("Submit to Writer Service", {}).get("main", [])
     assert writer_conns, "Submit to Writer Service has no connections"
-    targets = [c["node"] for entry in writer_conns for c in entry]
-    assert "Acknowledge Filed" in targets
+    direct_targets = [c["node"] for entry in writer_conns for c in entry]
+    assert "Evaluate Writer Response" in direct_targets
+
+    # Acknowledge Filed must be reachable via Writer OK? true branch
+    writer_ok_conns = conns.get("Writer OK?", {}).get("main", [])
+    ok_targets = [c["node"] for c in writer_ok_conns[0]] if writer_ok_conns else []
+    assert "Acknowledge Filed" in ok_targets
 
 
 def test_intake_inbox_branch_calls_acknowledge_inbox_after_writer_service():
+    # SB-116: writer (inbox) → Evaluate Writer Response (inbox) → Writer OK? (inbox) → Acknowledge Inbox
     wf = _fixture()
     conns = wf.get("connections", {})
     writer_conns = conns.get("Submit to Writer Service (inbox)", {}).get("main", [])
     assert writer_conns, "Submit to Writer Service (inbox) has no connections"
-    targets = [c["node"] for entry in writer_conns for c in entry]
-    assert "Acknowledge Inbox" in targets
+    direct_targets = [c["node"] for entry in writer_conns for c in entry]
+    assert "Evaluate Writer Response (inbox)" in direct_targets
+
+    # Acknowledge Inbox must be reachable via Writer OK? (inbox) true branch
+    writer_ok_conns = conns.get("Writer OK? (inbox)", {}).get("main", [])
+    ok_targets = [c["node"] for c in writer_ok_conns[0]] if writer_ok_conns else []
+    assert "Acknowledge Inbox" in ok_targets
 
 
 def test_compose_override_does_not_define_writer_stub():
