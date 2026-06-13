@@ -33,5 +33,5 @@ dev = [
 packages = ["src/secondbrain"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
-testpaths = ["tests"]
+pythonpath = ["src", "writer-service/src"]
+testpaths = ["tests", "writer-service/tests"]

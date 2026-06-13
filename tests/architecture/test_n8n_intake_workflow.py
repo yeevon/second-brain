@@ -157,17 +157,54 @@ def test_intake_acknowledge_forwarded_url_is_correct():
     assert "/delivery/acknowledge-forwarded" in fixture_text
 
 
-# ── Writer-stub URLs ──────────────────────────────────────────────────────────
+# ── Writer-service URLs ───────────────────────────────────────────────────────
 
 
-def test_intake_writer_stub_write_url_is_correct():
+def test_intake_writer_service_file_url_is_correct():
     fixture_text = FIXTURE_PATH.read_text()
-    assert "http://writer-stub:8001/write" in fixture_text
+    assert "http://writer-service:8001/internal/notes/file" in fixture_text
 
 
-def test_intake_writer_stub_inbox_url_is_correct():
+def test_intake_does_not_reference_writer_stub():
     fixture_text = FIXTURE_PATH.read_text()
-    assert "http://writer-stub:8001/inbox" in fixture_text
+    assert "http://writer-stub" not in fixture_text
+
+
+def test_intake_has_no_stub_path_references():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "stub://" not in fixture_text
+
+
+def test_intake_file_branch_calls_acknowledge_filed_after_writer_service():
+    wf = _fixture()
+    conns = wf.get("connections", {})
+    writer_conns = conns.get("Submit to Writer Service", {}).get("main", [])
+    assert writer_conns, "Submit to Writer Service has no connections"
+    targets = [c["node"] for entry in writer_conns for c in entry]
+    assert "Acknowledge Filed" in targets
+
+
+def test_intake_inbox_branch_calls_acknowledge_inbox_after_writer_service():
+    wf = _fixture()
+    conns = wf.get("connections", {})
+    writer_conns = conns.get("Submit to Writer Service (inbox)", {}).get("main", [])
+    assert writer_conns, "Submit to Writer Service (inbox) has no connections"
+    targets = [c["node"] for entry in writer_conns for c in entry]
+    assert "Acknowledge Inbox" in targets
+
+
+def test_compose_override_does_not_define_writer_stub():
+    from pathlib import Path
+    content = (Path(".") / "compose.override.yaml").read_text()
+    assert "writer-stub" not in content
+
+
+def test_compose_override_defines_second_brain_local_vault_volume():
+    from pathlib import Path
+    import yaml
+    compose = yaml.safe_load((Path(".") / "compose.override.yaml").read_text())
+    volumes = compose.get("volumes", {})
+    assert "second-brain-local-vault" in volumes
 
 
 # ── Gemini URL ────────────────────────────────────────────────────────────────

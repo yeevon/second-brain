@@ -27,5 +27,8 @@ sudo install -d -m 700 -o "$DEPLOY_USER" -g "$DEPLOY_USER" /opt/second-brain/con
 sudo chown -R "$DEPLOY_USER:$DEPLOY_USER" /opt/second-brain/app
 sudo chown -R 10001:10001 /opt/second-brain/data
 
+sudo mkdir -p /opt/second-brain/vault/99_log
+sudo chown -R 10003:10003 /opt/second-brain/vault
+
 echo "Docker installed. Log out and back in for docker group membership to refresh."
 echo "Mount the encrypted EBS data volume at /opt/second-brain/data before starting the service."

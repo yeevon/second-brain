@@ -34,17 +34,16 @@ services:
       retries: 5
       start_period: 30s
 
-  writer-stub:
+  writer-service:
     build:
-      context: writer-stub
-      dockerfile: Dockerfile
-    container_name: second-brain-writer-stub
+      context: .
+      dockerfile: writer-service/Dockerfile
+    container_name: second-brain-writer-service
     restart: unless-stopped
-    init: true
     env_file:
-      - ${WRITER_STUB_ENV_FILE:?WRITER_STUB_ENV_FILE must be set}
-    expose:
-      - "8001"
+      - ${WRITER_SERVICE_ENV_FILE:?WRITER_SERVICE_ENV_FILE must be set}
+    volumes:
+      - ${WRITER_VAULT_SOURCE:?WRITER_VAULT_SOURCE must be set}:/opt/vault
     networks:
       - backend
     cap_drop:
@@ -57,12 +56,12 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health').read()",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')",
         ]
       interval: 30s
       timeout: 5s
-      retries: 3
-      start_period: 10s
+      retries: 5
+      start_period: 20s
 
 secrets:
   n8n_encryption_key:

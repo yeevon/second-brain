@@ -13,7 +13,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 N8N_ENV_FILE="${N8N_ENV_FILE:-$ROOT_DIR/n8n.local.env}"
 N8N_KEY_FILE="${N8N_ENCRYPTION_KEY_FILE:-$ROOT_DIR/n8n-encryption-key.local}"
-WRITER_STUB_ENV_FILE="${WRITER_STUB_ENV_FILE:-$ROOT_DIR/writer-stub.local.env}"
+export WRITER_SERVICE_ENV_FILE="${WRITER_SERVICE_ENV_FILE:-$ROOT_DIR/writer-service.local.env}"
+export WRITER_VAULT_SOURCE="${WRITER_VAULT_SOURCE:-second-brain-local-vault}"
 ENV_FILE="${ROOT_DIR}/.env"
 
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -34,21 +35,21 @@ if [[ ! -f "$N8N_KEY_FILE" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$WRITER_STUB_ENV_FILE" ]]; then
-  echo "writer-stub env file missing: $WRITER_STUB_ENV_FILE" >&2
-  echo "Copy deploy/writer-stub.env.example and fill in any required values." >&2
+if [[ ! -f "$WRITER_SERVICE_ENV_FILE" ]]; then
+  echo "writer-service env file missing: $WRITER_SERVICE_ENV_FILE" >&2
+  echo "Copy deploy/writer-service.env.example and fill in the required values." >&2
   exit 1
 fi
 
 cd "$ROOT_DIR"
 
-docker compose build capture-service writer-stub
+docker compose build capture-service writer-service
 
-docker compose up -d capture-service n8n writer-stub
+docker compose up -d capture-service n8n writer-service
 
 echo "Waiting for containers to become healthy..."
 
-for container in second-brain-capture-service second-brain-n8n second-brain-writer-stub; do
+for container in second-brain-capture-service second-brain-n8n second-brain-writer-service; do
   health=""
   for _ in $(seq 1 60); do
     health="$(
@@ -70,7 +71,7 @@ done
 
 echo "capture-service local container is healthy"
 echo "n8n local container is healthy"
-echo "writer-stub local container is healthy"
+echo "writer-service local container is healthy"
 echo ""
 echo "Open the n8n editor at http://127.0.0.1:5678"
 echo "Run deploy/bootstrap-n8n.sh after creating the owner account."

@@ -6,6 +6,7 @@ second-brain-local-data/
 n8n.local.env
 n8n-encryption-key.local
 writer-stub.local.env
+writer-service.local.env
 n8n-test.local.env
 .runtime/
 __pycache__/

@@ -15,6 +15,7 @@ capture-service.local.env
 n8n.local.env
 n8n-encryption-key.local
 writer-stub.local.env
+writer-service.local.env
 vault
 tests
 docs

@@ -202,6 +202,8 @@ class DownstreamCaptureResponse(BaseModel):
     delivery_attempt: int
     status: str
     delivery_status: str
+    source_message_id: str
+    created_at: datetime
 
 
 class SecurityScreenRequest(StrictInternalRequest):
@@ -222,6 +224,7 @@ class ClassificationValidationResponse(BaseModel):
     valid: bool
     route: Literal["file", "inbox"] | None
     confidence_met: bool
+    inbox_reason: str | None = None
     errors: list[str]
 
 

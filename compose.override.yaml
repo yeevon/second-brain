@@ -61,35 +61,14 @@ services:
       retries: 5
       start_period: 30s
 
-  writer-stub:
-    build:
-      context: writer-stub
-      dockerfile: Dockerfile
-    container_name: second-brain-writer-stub
-    restart: unless-stopped
-    init: true
-    env_file:
-      - ${WRITER_STUB_ENV_FILE:-writer-stub.local.env}
-    expose:
-      - "8001"
-    networks:
-      - backend
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health').read()",
-        ]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+  writer-service:
+    environment:
+      WRITER_SERVICE_TOKEN: ${WRITER_SERVICE_TOKEN:-dev-writer-service-token-change-me}
+      VAULT_PATH: /opt/vault
+      AUDIT_LOG_PATH: /opt/vault/99_log/events.ndjson
+      GIT_SYNC_ENABLED: ${GIT_SYNC_ENABLED:-false}
+    volumes:
+      - second-brain-local-vault:/opt/vault
 
 secrets:
   n8n_encryption_key:
@@ -100,3 +79,5 @@ volumes:
     name: second-brain-local-data
   second-brain-local-n8n-data:
     name: second-brain-local-n8n-data
+  second-brain-local-vault:
+    name: second-brain-local-vault
