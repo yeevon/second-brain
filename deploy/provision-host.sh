@@ -98,6 +98,25 @@ if [[ -n "$VAULT_REMOTE" ]]; then
     if [[ "$actual_remote" != "$VAULT_REMOTE" ]]; then
       echo "WARNING: vault remote $actual_remote does not match expected $VAULT_REMOTE" >&2
     fi
+
+    # Repair .writer.lock in .gitignore if missing — the writer-service creates
+    # this file under the vault root; if the vault repo tracks it, git sync will
+    # fail the dirty-tree check on every write.
+    if ! grep -qxF '.writer.lock' /opt/second-brain/vault/.gitignore 2>/dev/null; then
+      echo "Repairing: adding .writer.lock to vault .gitignore..."
+      sudo -u "$DEPLOY_USER" \
+        sh -c 'printf ".writer.lock\n" >> /opt/second-brain/vault/.gitignore'
+      if [[ -n "$(git -C /opt/second-brain/vault status --porcelain 2>/dev/null)" ]]; then
+        sudo -u "$DEPLOY_USER" \
+          git -C /opt/second-brain/vault add .gitignore
+        sudo -u "$DEPLOY_USER" \
+          git -C /opt/second-brain/vault commit -m "chore: add .writer.lock to vault .gitignore"
+        sudo -u "$DEPLOY_USER" \
+          GIT_SSH_COMMAND="ssh -i $VAULT_DEPLOY_KEY_FILE -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$GITHUB_KNOWN_HOSTS_FILE -o BatchMode=yes" \
+          git -C /opt/second-brain/vault push origin main
+      fi
+    fi
+
     # Ensure chown is correct even on re-runs
     sudo chown -R 10003:10003 /opt/second-brain/vault
   fi
