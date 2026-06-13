@@ -67,9 +67,8 @@ services:
       dockerfile: writer-service/Dockerfile
     container_name: second-brain-writer-service
     restart: unless-stopped
-    env_file:
-      - ${WRITER_SERVICE_ENV_FILE:-writer-service.local.env}
     environment:
+      WRITER_SERVICE_TOKEN: ${WRITER_SERVICE_TOKEN:-dev-writer-service-token-change-me}
       VAULT_PATH: /opt/vault
       AUDIT_LOG_PATH: /opt/vault/99_log/events.ndjson
       GIT_SYNC_ENABLED: ${GIT_SYNC_ENABLED:-false}

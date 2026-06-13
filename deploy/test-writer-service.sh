@@ -8,7 +8,6 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 WRITER_SERVICE_CONTAINER="${WRITER_SERVICE_CONTAINER:-second-brain-writer-service}"
 CAPTURE_SERVICE_CONTAINER="${CAPTURE_SERVICE_CONTAINER:-second-brain-capture-service}"
-WRITER_SERVICE_ENV_FILE="${WRITER_SERVICE_ENV_FILE:-$ROOT_DIR/writer-service.local.env}"
 ENV_FILE="${ROOT_DIR}/.env"
 
 PASS=0
@@ -53,12 +52,12 @@ fi
 
 # ── Load token (without printing it) ─────────────────────────────────────────
 
-WRITER_TOKEN=""
-if [[ -f "$WRITER_SERVICE_ENV_FILE" ]]; then
-  WRITER_TOKEN="$(grep '^WRITER_SERVICE_TOKEN=' "$WRITER_SERVICE_ENV_FILE" 2>/dev/null | cut -d= -f2-)"
+WRITER_TOKEN="${WRITER_SERVICE_TOKEN:-}"
+if [[ -z "$WRITER_TOKEN" ]] && [[ -f "$ENV_FILE" ]]; then
+  WRITER_TOKEN="$(grep '^WRITER_SERVICE_TOKEN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
 fi
 if [[ -z "$WRITER_TOKEN" ]]; then
-  WRITER_TOKEN="${WRITER_SERVICE_TOKEN:-dev-writer-service-token-change-me}"
+  WRITER_TOKEN="dev-writer-service-token-change-me"
 fi
 
 INTERNAL_TOKEN=""

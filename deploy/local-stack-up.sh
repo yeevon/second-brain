@@ -13,7 +13,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 N8N_ENV_FILE="${N8N_ENV_FILE:-$ROOT_DIR/n8n.local.env}"
 N8N_KEY_FILE="${N8N_ENCRYPTION_KEY_FILE:-$ROOT_DIR/n8n-encryption-key.local}"
-export WRITER_SERVICE_ENV_FILE="${WRITER_SERVICE_ENV_FILE:-$ROOT_DIR/writer-service.local.env}"
 export WRITER_VAULT_SOURCE="${WRITER_VAULT_SOURCE:-second-brain-local-vault}"
 ENV_FILE="${ROOT_DIR}/.env"
 
@@ -32,12 +31,6 @@ fi
 if [[ ! -f "$N8N_KEY_FILE" ]]; then
   echo "n8n encryption key file missing: $N8N_KEY_FILE" >&2
   echo "Generate with: printf '%s' \"\$(openssl rand -hex 32)\" > n8n-encryption-key.local" >&2
-  exit 1
-fi
-
-if [[ ! -f "$WRITER_SERVICE_ENV_FILE" ]]; then
-  echo "writer-service env file missing: $WRITER_SERVICE_ENV_FILE" >&2
-  echo "Copy deploy/writer-service.env.example and fill in the required values." >&2
   exit 1
 fi
 
