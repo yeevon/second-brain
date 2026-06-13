@@ -49,7 +49,7 @@ def _build_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="invalid created_at format") from exc
 
-        writer = VaultWriter(vault_path)
+        writer = VaultWriter(vault_path, audit_log_path=settings.audit_log_path)
 
         try:
             result = writer.write_note(

@@ -422,7 +422,8 @@
         "genericAuthType": "httpHeaderAuth",
         "options": {},
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ capture_id: $('Intake Webhook').first().json.capture_id, delivery_attempt: $('Intake Webhook').first().json.delivery_attempt, classification: $('Parse Gemini Response').first().json.classification, inbox_reason: null, source_message_id: $('Get Capture').first().json.source_message_id, created_at: $('Get Capture').first().json.created_at, model: \"gemini-3.5-flash\", prompt_version: \"classifier-v1\" }) }}"
+        "jsonBody": "={{ JSON.stringify({ capture_id: $('Intake Webhook').first().json.capture_id, delivery_attempt: $('Intake Webhook').first().json.delivery_attempt, classification: $('Parse Gemini Response').first().json.classification, inbox_reason: null, source_message_id: $('Get Capture').first().json.source_message_id, created_at: $('Get Capture').first().json.created_at, model: \"gemini-3.5-flash\", prompt_version: \"classifier-v1\" }) }}",
+        "sendBody": true
       },
       "id": "a1b2c3d4-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
       "name": "Submit to Writer Service",
@@ -447,7 +448,8 @@
         "genericAuthType": "httpHeaderAuth",
         "options": {},
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ capture_id: $('Intake Webhook').first().json.capture_id, delivery_attempt: $('Intake Webhook').first().json.delivery_attempt, classification: $('Parse Gemini Response').first().json.classification, inbox_reason: $('Validate Classification').first().json.inbox_reason, source_message_id: $('Get Capture').first().json.source_message_id, created_at: $('Get Capture').first().json.created_at, model: \"gemini-3.5-flash\", prompt_version: \"classifier-v1\" }) }}"
+        "jsonBody": "={{ JSON.stringify({ capture_id: $('Intake Webhook').first().json.capture_id, delivery_attempt: $('Intake Webhook').first().json.delivery_attempt, classification: $('Parse Gemini Response').first().json.classification, inbox_reason: $('Validate Classification').first().json.inbox_reason, source_message_id: $('Get Capture').first().json.source_message_id, created_at: $('Get Capture').first().json.created_at, model: \"gemini-3.5-flash\", prompt_version: \"classifier-v1\" }) }}",
+        "sendBody": true
       },
       "id": "a1b2c3d4-cccc-cccc-cccc-cccccccccccc",
       "name": "Submit to Writer Service (inbox)",

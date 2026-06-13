@@ -90,9 +90,11 @@ fi
 echo ""
 echo "--- Filing test ---"
 
-TEST_CAPTURE_ID="SB-$(date +%Y%m%d)-TEST"
+TEST_CAPTURE_ID="SB-$(date -u +%Y%m%d)-$(date -u +%M%S)"
 FILING_RESULT="$(
-  docker exec "$WRITER_SERVICE_CONTAINER" \
+  docker exec \
+    -e WRITER_TOKEN="$WRITER_TOKEN" \
+    "$WRITER_SERVICE_CONTAINER" \
     python3 -c "
 import urllib.request, json, os, sys
 token = os.environ.get('WRITER_TOKEN', '')
@@ -127,8 +129,7 @@ req = urllib.request.Request(
 resp = urllib.request.urlopen(req)
 result = json.loads(resp.read())
 print(json.dumps(result))
-" 2>/dev/null || echo '{}'" \
-  -e WRITER_TOKEN="$WRITER_TOKEN" 2>/dev/null || echo "{}"
+" 2>/dev/null || echo "{}"
 )"
 
 NOTE_PATH="$(echo "$FILING_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('note_path',''))" 2>/dev/null || true)"
@@ -192,7 +193,9 @@ echo ""
 echo "--- Idempotency ---"
 
 REPLAY_RESULT="$(
-  docker exec "$WRITER_SERVICE_CONTAINER" \
+  docker exec \
+    -e WRITER_TOKEN="$WRITER_TOKEN" \
+    "$WRITER_SERVICE_CONTAINER" \
     python3 -c "
 import urllib.request, json, os
 token = os.environ.get('WRITER_TOKEN', '')
@@ -227,8 +230,7 @@ req = urllib.request.Request(
 resp = urllib.request.urlopen(req)
 result = json.loads(resp.read())
 print(json.dumps(result))
-" 2>/dev/null || echo '{}'" \
-  -e WRITER_TOKEN="$WRITER_TOKEN" 2>/dev/null || echo "{}"
+" 2>/dev/null || echo "{}"
 )"
 
 IDEMPOTENT_VALUE="$(echo "$REPLAY_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('idempotent',''))" 2>/dev/null || true)"

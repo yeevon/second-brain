@@ -31,11 +31,15 @@ class WriteResult:
 
 
 class VaultWriter:
-    def __init__(self, vault_path: Path | str) -> None:
+    def __init__(self, vault_path: Path | str, audit_log_path: Path | str | None = None) -> None:
         configured_path = Path(vault_path)
         if not configured_path.is_absolute():
             raise ValueError("vault_path must be absolute")
         self.vault_path = configured_path.resolve()
+        if audit_log_path is not None:
+            self.audit_log_path: Path = Path(audit_log_path)
+        else:
+            self.audit_log_path = self.vault_path / "99_log" / "events.ndjson"
 
     def write_note(
         self,
@@ -165,7 +169,7 @@ class VaultWriter:
         from writerservice.audit import append_audit_event
 
         append_audit_event(
-            log_path=Path(self.vault_path / "99_log" / "events.ndjson"),
+            log_path=self.audit_log_path,
             capture_id=capture_id,
             note_path=note_path,
             delivery_attempt=delivery_attempt,

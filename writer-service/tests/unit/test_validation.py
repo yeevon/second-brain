@@ -104,25 +104,44 @@ def test_delivery_attempt_below_one_rejected(tmp_path, monkeypatch):
 # ── Path traversal rejection ─────────────────────────────────────────────────
 
 
-def test_path_traversal_in_title_rejected(tmp_path, monkeypatch):
-    monkeypatch.setenv("VAULT_PATH", str(tmp_path / "vault"))
-    (tmp_path / "vault").mkdir(parents=True)
+def test_path_traversal_in_title_is_sanitized_safely(tmp_path, monkeypatch):
+    """sanitize_slug strips non-alnum characters, so traversal sequences become harmless slugs."""
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True)
+    monkeypatch.setenv("VAULT_PATH", str(vault))
     payload = _base_payload()
-    # sanitize_slug strips ., / etc so ../evil would become evil — no traversal possible
-    # But a title producing a component starting with . would be caught
     payload["classification"]["title"] = "..evil"
     resp = CLIENT.post("/internal/notes/file", json=payload, headers=_HEADERS)
-    # sanitize_slug converts ..evil → evil (strips leading/trailing hyphens after replacing non-alnum)
-    # So this should succeed — path traversal is via the slug sanitizer
-    assert resp.status_code in (200, 422)
+    assert resp.status_code == 200
+    note_path = resp.json()["note_path"]
+    assert ".." not in note_path
+    assert note_path.startswith("20_projects/")
+    assert (vault / note_path).is_file()
 
 
-def test_null_byte_in_title_rejected_or_sanitized(tmp_path, monkeypatch):
-    """null bytes are stripped by sanitize_slug (non-alnum → hyphen)."""
-    monkeypatch.setenv("VAULT_PATH", str(tmp_path / "vault"))
-    (tmp_path / "vault").mkdir(parents=True)
+def test_note_path_stays_inside_vault(tmp_path, monkeypatch):
+    """Filed note path must be relative and resolve inside the vault."""
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True)
+    monkeypatch.setenv("VAULT_PATH", str(vault))
+    resp = CLIENT.post("/internal/notes/file", json=_base_payload(), headers=_HEADERS)
+    assert resp.status_code == 200
+    note_path = resp.json()["note_path"]
+    assert not note_path.startswith("/")
+    assert ".." not in note_path
+    assert (vault / note_path).resolve().is_relative_to(vault.resolve())
+
+
+def test_null_byte_in_title_sanitized_safely(tmp_path, monkeypatch):
+    """null bytes are stripped by sanitize_slug (non-alnum → hyphen); the filed path stays inside the vault."""
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True)
+    monkeypatch.setenv("VAULT_PATH", str(vault))
     payload = _base_payload()
     payload["classification"]["title"] = "note\x00title"
     resp = CLIENT.post("/internal/notes/file", json=payload, headers=_HEADERS)
-    # _validate_path_components rejects null bytes in filename
-    assert resp.status_code in (200, 422)
+    assert resp.status_code == 200
+    note_path = resp.json()["note_path"]
+    assert "\x00" not in note_path
+    assert ".." not in note_path
+    assert (vault / note_path).resolve().is_relative_to(vault.resolve())

@@ -170,6 +170,46 @@ def test_intake_does_not_reference_writer_stub():
     assert "http://writer-stub" not in fixture_text
 
 
+def _writer_service_nodes(wf: dict) -> list[dict]:
+    return [
+        n for n in wf["nodes"]
+        if n.get("name") in (
+            "Submit to Writer Service",
+            "Submit to Writer Service (inbox)",
+        )
+    ]
+
+
+def test_intake_writer_service_nodes_send_body():
+    wf = _fixture()
+    nodes = _writer_service_nodes(wf)
+    assert len(nodes) == 2, "expected exactly two writer-service HTTP nodes"
+    for node in nodes:
+        assert node["parameters"].get("sendBody") is True, (
+            f"Node {node['name']!r} is missing sendBody: true"
+        )
+
+
+def test_intake_writer_service_nodes_specify_body_json():
+    wf = _fixture()
+    nodes = _writer_service_nodes(wf)
+    assert len(nodes) == 2
+    for node in nodes:
+        assert node["parameters"].get("specifyBody") == "json", (
+            f"Node {node['name']!r} must have specifyBody=json"
+        )
+
+
+def test_intake_writer_service_nodes_have_json_body():
+    wf = _fixture()
+    nodes = _writer_service_nodes(wf)
+    assert len(nodes) == 2
+    for node in nodes:
+        assert node["parameters"].get("jsonBody"), (
+            f"Node {node['name']!r} is missing jsonBody"
+        )
+
+
 def test_intake_has_no_stub_path_references():
     fixture_text = FIXTURE_PATH.read_text()
     assert "stub://" not in fixture_text

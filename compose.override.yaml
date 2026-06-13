@@ -62,13 +62,31 @@ services:
       start_period: 30s
 
   writer-service:
+    build:
+      context: .
+      dockerfile: writer-service/Dockerfile
+    container_name: second-brain-writer-service
+    restart: unless-stopped
+    env_file:
+      - ${WRITER_SERVICE_ENV_FILE:-writer-service.local.env}
     environment:
-      WRITER_SERVICE_TOKEN: ${WRITER_SERVICE_TOKEN:-dev-writer-service-token-change-me}
       VAULT_PATH: /opt/vault
       AUDIT_LOG_PATH: /opt/vault/99_log/events.ndjson
       GIT_SYNC_ENABLED: ${GIT_SYNC_ENABLED:-false}
     volumes:
       - second-brain-local-vault:/opt/vault
+    networks:
+      - backend
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
 secrets:
   n8n_encryption_key:

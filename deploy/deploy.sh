@@ -64,11 +64,6 @@ if [[ ! -d "$WRITER_VAULT_SOURCE" ]]; then
   exit 1
 fi
 
-if [[ ! -w "$WRITER_VAULT_SOURCE" ]]; then
-  echo "vault directory not writable: $WRITER_VAULT_SOURCE" >&2
-  exit 1
-fi
-
 cd "$APP_DIR"
 
 docker compose config >/dev/null
