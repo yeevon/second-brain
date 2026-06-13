@@ -45,7 +45,7 @@
     {
       "parameters": {
         "method": "GET",
-        "url": "=http://capture-service:8000/internal/downstream/captures/{{ $('Intake Webhook').first().json.capture_id }}",
+        "url": "=http://capture-service:8000/internal/downstream/captures/{{ $('Intake Webhook').first().json.body.capture_id }}",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {}
@@ -131,7 +131,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.capture_id }}/delivery/acknowledge-forwarded",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/acknowledge-forwarded",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -139,7 +139,7 @@
           "parameters": [
             {
               "name": "delivery_attempt",
-              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+              "value": "={{ $('Intake Webhook').first().json.body.delivery_attempt }}"
             }
           ]
         },
@@ -211,7 +211,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.capture_id }}/delivery/acknowledge-classifying",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/acknowledge-classifying",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -219,7 +219,7 @@
           "parameters": [
             {
               "name": "delivery_attempt",
-              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+              "value": "={{ $('Intake Webhook').first().json.body.delivery_attempt }}"
             }
           ]
         },
@@ -243,7 +243,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.capture_id }}/delivery/renew-lease",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/renew-lease",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -251,7 +251,7 @@
           "parameters": [
             {
               "name": "delivery_attempt",
-              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+              "value": "={{ $('Intake Webhook').first().json.body.delivery_attempt }}"
             }
           ]
         },
@@ -339,7 +339,7 @@
             },
             {
               "name": "delivery_attempt",
-              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+              "value": "={{ $('Intake Webhook').first().json.body.delivery_attempt }}"
             }
           ]
         },
@@ -422,7 +422,7 @@
         "genericAuthType": "httpHeaderAuth",
         "options": {},
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ capture_id: $('Intake Webhook').first().json.capture_id, delivery_attempt: $('Intake Webhook').first().json.delivery_attempt, classification: $('Parse Gemini Response').first().json.classification, inbox_reason: null, source_message_id: $('Get Capture').first().json.source_message_id, created_at: $('Get Capture').first().json.created_at, model: \"gemini-3.5-flash\", prompt_version: \"classifier-v1\" }) }}",
+        "jsonBody": "={{ JSON.stringify({ capture_id: $('Intake Webhook').first().json.body.capture_id, delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, classification: $('Parse Gemini Response').first().json.classification, inbox_reason: null, source_message_id: $('Get Capture').first().json.source_message_id, created_at: $('Get Capture').first().json.created_at, model: \"gemini-3.5-flash\", prompt_version: \"classifier-v1\" }) }}",
         "sendBody": true
       },
       "id": "a1b2c3d4-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
@@ -448,7 +448,7 @@
         "genericAuthType": "httpHeaderAuth",
         "options": {},
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ capture_id: $('Intake Webhook').first().json.capture_id, delivery_attempt: $('Intake Webhook').first().json.delivery_attempt, classification: $('Parse Gemini Response').first().json.classification, inbox_reason: $('Validate Classification').first().json.inbox_reason, source_message_id: $('Get Capture').first().json.source_message_id, created_at: $('Get Capture').first().json.created_at, model: \"gemini-3.5-flash\", prompt_version: \"classifier-v1\" }) }}",
+        "jsonBody": "={{ JSON.stringify({ capture_id: $('Intake Webhook').first().json.body.capture_id, delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, classification: $('Parse Gemini Response').first().json.classification, inbox_reason: $('Validate Classification').first().json.inbox_reason, source_message_id: $('Get Capture').first().json.source_message_id, created_at: $('Get Capture').first().json.created_at, model: \"gemini-3.5-flash\", prompt_version: \"classifier-v1\" }) }}",
         "sendBody": true
       },
       "id": "a1b2c3d4-cccc-cccc-cccc-cccccccccccc",
@@ -469,7 +469,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.capture_id }}/delivery/acknowledge-failed",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/acknowledge-failed",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -477,7 +477,7 @@
           "parameters": [
             {
               "name": "delivery_attempt",
-              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+              "value": "={{ $('Intake Webhook').first().json.body.delivery_attempt }}"
             },
             {
               "name": "reason_type",
@@ -522,7 +522,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.capture_id }}/delivery/acknowledge-filed",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/acknowledge-filed",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -530,7 +530,7 @@
           "parameters": [
             {
               "name": "delivery_attempt",
-              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+              "value": "={{ $('Intake Webhook').first().json.body.delivery_attempt }}"
             },
             {
               "name": "note_path",
@@ -562,7 +562,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.capture_id }}/delivery/acknowledge-inbox",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/acknowledge-inbox",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -570,7 +570,7 @@
           "parameters": [
             {
               "name": "delivery_attempt",
-              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+              "value": "={{ $('Intake Webhook').first().json.body.delivery_attempt }}"
             },
             {
               "name": "note_path",

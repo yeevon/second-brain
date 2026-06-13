@@ -170,6 +170,16 @@ def test_intake_does_not_reference_writer_stub():
     assert "http://writer-stub" not in fixture_text
 
 
+def test_intake_reads_posted_webhook_envelope_from_body():
+    fixture_text = FIXTURE_PATH.read_text()
+
+    assert "$('Intake Webhook').first().json.body.capture_id" in fixture_text
+    assert "$('Intake Webhook').first().json.body.delivery_attempt" in fixture_text
+
+    assert "$('Intake Webhook').first().json.capture_id" not in fixture_text
+    assert "$('Intake Webhook').first().json.delivery_attempt" not in fixture_text
+
+
 def _writer_service_nodes(wf: dict) -> list[dict]:
     return [
         n for n in wf["nodes"]

@@ -54,7 +54,11 @@ fi
 
 WRITER_TOKEN="${WRITER_SERVICE_TOKEN:-}"
 if [[ -z "$WRITER_TOKEN" ]] && [[ -f "$ENV_FILE" ]]; then
-  WRITER_TOKEN="$(grep '^WRITER_SERVICE_TOKEN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
+  WRITER_TOKEN="$(
+    grep '^WRITER_SERVICE_TOKEN=' "$ENV_FILE" 2>/dev/null \
+      | cut -d= -f2- \
+      || true
+  )"
 fi
 if [[ -z "$WRITER_TOKEN" ]]; then
   WRITER_TOKEN="dev-writer-service-token-change-me"
@@ -62,7 +66,11 @@ fi
 
 INTERNAL_TOKEN=""
 if [[ -f "$ENV_FILE" ]]; then
-  INTERNAL_TOKEN="$(grep '^CAPTURE_SERVICE_INTERNAL_TOKEN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
+  INTERNAL_TOKEN="$(
+    grep '^CAPTURE_SERVICE_INTERNAL_TOKEN=' "$ENV_FILE" 2>/dev/null \
+      | cut -d= -f2- \
+      || true
+  )"
 fi
 
 # ── Health endpoint ───────────────────────────────────────────────────────────
