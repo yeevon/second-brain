@@ -516,3 +516,10 @@ def test_override_local_vault_init_bootstraps_git_contract():
     assert "remote add origin /remote/repo.git" in command
     assert "remote set-url origin /remote/repo.git" in command
     assert "chown -R 10003:10003 /vault /remote" in command
+
+
+def test_override_local_vault_init_does_not_auto_stage_entire_vault():
+    svc = _override_compose()["services"]["local-vault-init"]
+    command = str(svc.get("command", ""))
+    assert "git -C /vault add -A" not in command
+    assert "git -C /vault add .gitignore 99_log/.gitkeep" in command

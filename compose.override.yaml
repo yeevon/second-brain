@@ -106,7 +106,7 @@ services:
         git -C /vault remote add origin /remote/repo.git
       fi
 
-      git -C /vault add -A
+      git -C /vault add .gitignore 99_log/.gitkeep
 
       if ! git -C /vault diff --cached --quiet; then
         git -C /vault commit -m "chore: initialize local vault"
