@@ -4,6 +4,74 @@ All notable changes to this project are documented here.
 
 ---
 
+## v1.0.4 — Milestone 4: Git-backed writer service
+
+**Branch:** `milestone_4`
+
+Replaced the writer-stub placeholder with a full `writer-service` that renders deterministic Markdown notes, writes them to a local vault filesystem (SB-114), adds a kernel-managed advisory `flock` and Git-backed vault sync (SB-115), and adds explicit safe-failure handling for every Git error the write sequence can encounter (SB-116). Also added a self-contained local vault initialization service so `docker compose up -d` works out of the box with no manual Git setup.
+
+### SB-114 — Create writer-service with a local-only vault
+
+Extracted the deterministic Markdown generation logic from the MVP into a standalone `writer-service` FastAPI container that replaces the `writer-stub`. All vault file writes now go through this service; no other container mounts or mutates the vault path.
+
+- **`writer-service/`** — new standalone FastAPI service (UID 10002, port 8001, not published to the host). Contains `main.py`, `config.py`, `api_models.py`, `writer.py`, `vault.py`, and `audit.py`. Preserves all MVP Markdown generation behavior: folder allowlist, title and project-slug sanitization, path traversal protection, deterministic filenames (`YYYY-MM-DD--<capture_id>--<title-slug>.md`), deterministic frontmatter field order, idempotency by `capture_id` frontmatter field, and append-only audit trail at `99_log/events.ndjson`.
+- **`GET /health`** — returns HTTP 200 when vault path is writable, HTTP 503 when not. No authentication required.
+- **`POST /internal/notes/file`** — requires `X-Second-Brain-Writer-Token`. Validates folder enum, action status, confidence range, `capture_id` format (`^SB-\d{8}-\d{4}$`), `delivery_attempt >= 1`, and path traversal on all derived components. Returns `{result, note_path, git_commit_hash, idempotent}`. When `inbox_reason` is non-null, writes to `00_inbox/` regardless of `classification.folder`.
+- **`compose.n8n.yaml`** — `writer-service` service added (replaces `writer-stub`). Backend network only, `cap_drop: ALL`, `no-new-privileges`, vault volume mount.
+- **`compose.override.yaml`** — `writer-stub` removed; `writer-service` added with local-safe environment defaults (`GIT_SYNC_ENABLED=false` for SB-114, `second-brain-local-vault` named volume).
+- **`deploy/writer-service.env.example`** — environment template with `WRITER_SERVICE_TOKEN`, `VAULT_PATH`, `AUDIT_LOG_PATH`, `LOG_LEVEL`.
+- **`n8n/workflows/second-brain-intake.json`** — updated `Second Brain - Intake` workflow. Both file and inbox branches now call `POST http://writer-service:8001/internal/notes/file` then the appropriate `acknowledge-filed` or `acknowledge-inbox` endpoint. Classification routing Code node extended to produce a typed `inbox_reason` slug (`classifier_selected_inbox`, `needs_clarification`, `low_confidence`). `stub://` path references removed.
+- **`src/secondbrain/api_models.py`** — `DownstreamCaptureResponse` extended with `source_message_id` and `created_at` fields so n8n can pass them in the filing request.
+- **`src/secondbrain/capture_api.py`** — `GET /internal/downstream/captures/:capture_id` response populates the new fields from existing `discord_message_id` and `received_at` columns. No migration required.
+- **`deploy/bootstrap-n8n.sh`** — upgrade path: if `Second Brain - Intake` already exists, the script exports its ID, sanitizes the updated fixture, injects the ID, and imports in-place so the workflow is updated without losing the existing credential binding.
+- **`deploy/local-stack-up.sh`** — all `writer-stub` references replaced with `writer-service`; post-health vault verification via `docker exec`.
+- **`deploy/deploy.sh`** / **`deploy/provision-host.sh`** — extended with `WRITER_SERVICE_ENV_FILE`, `WRITER_VAULT_SOURCE`, vault directory creation, and pre-start validation.
+- **`deploy/test-writer-service.sh`** — local regression script: container health, vault mount, `/health` 200, `POST /internal/notes/file` with real payload, note file present in vault, audit event appended, idempotent replay, `acknowledge-filed` count increment, n8n workflow references writer-service.
+- **`tests/architecture/test_writer_service_config.py`** — architecture assertions: pinned image, backend-only network, no published ports, vault volume, `cap_drop ALL`, `no-new-privileges`, `writer-stub` absent from `compose.n8n.yaml`.
+- **`tests/architecture/test_n8n_intake_workflow.py`** — updated: writer-service URL present, writer-stub URL absent, no `stub://` references, both branches call acknowledge endpoints after writer-service.
+- **`writer-service/tests/unit/`** — unit tests for token auth, classification input validation, path traversal rejection, Markdown generation (filename format, frontmatter field order, golden fixture), idempotency, audit log, and health endpoint.
+- **`writer-service/tests/integration/test_writer_service_filing.py`** — integration tests for normal filing, idempotent replay, and inbox routing using a temporary vault directory.
+
+### SB-115 — Add GitHub vault sync and serialized Git writes
+
+Added a Git-backed vault to `writer-service`. Every successful note write is now committed and pushed to a private GitHub repository. An OS-level advisory `flock` serializes all writes so concurrent requests never corrupt the repository.
+
+- **`writer-service/src/writerservice/flock.py`** — `WriterLock` context manager using `fcntl.flock(fd, fcntl.LOCK_EX)` on `/opt/vault/.writer.lock`. The kernel releases the lock automatically if the process terminates — no stale application lock possible.
+- **`writer-service/src/writerservice/git_ops.py`** — `GitVaultOps` class implementing the full atomic write sequence: acquire flock → `git fetch origin` → `git merge --ff-only origin/main` → idempotency check → write note file → append audit event → `git add` → `git commit` → `git push` → release flock → return `note_path` and `git_commit_hash`.
+- **`writer-service/src/writerservice/config.py`** — `GIT_SYNC_ENABLED` feature flag. When `false` (local default), notes are written to the local filesystem only with no Git operations. When `true`, the full Git sequence runs.
+- **`writer-service/src/writerservice/writer.py`** — updated to dispatch through `GitVaultOps` when `GIT_SYNC_ENABLED=true`; falls back to direct filesystem write when disabled.
+- **`deploy/provision-host.sh`** — extended with vault clone at `/opt/second-brain/vault`, SSH deploy key setup, and Git identity configuration for the writer-service user.
+- **`deploy/writer-service.env.example`** — `GIT_SYNC_ENABLED`, `GIT_REMOTE_URL`, `GIT_USER_NAME`, `GIT_USER_EMAIL`, `GIT_SSH_KEY_PATH` added.
+- **`writer-service/tests/unit/test_flock.py`** — 81 assertions covering lock acquisition, re-entrancy, and automatic kernel release.
+- **`writer-service/tests/unit/test_git_ops.py`** — 299 assertions covering the full write sequence, commit message format, push behavior, and flock hold timing.
+- **`writer-service/tests/integration/test_git_vault_sync.py`** — end-to-end integration tests: two near-simultaneous notes each produce exactly one committed file; killing writer-service while holding the lock does not leave an immortal application lock.
+
+### SB-116 — Add Git conflict and stale-lock failure handling
+
+Added explicit, typed failure detection for every bad state the Git-backed write sequence can reach. The guiding rule: fail visibly, preserve the raw SQLite capture, never blindly delete Git-internal lock files, never auto-resolve conflicts.
+
+- **`writer-service/src/writerservice/git_errors.py`** — typed error classes for all Git-layer failures: `GitMergeConflictError`, `GitPushRejectedError`, `GitIndexLockedError`, `GitCaptureIdDuplicateError`, `GitPathEscapeError`.
+- **`writer-service/src/writerservice/git_ops.py`** — updated to detect and raise typed errors:
+  - `git_merge_conflict` — `git merge --ff-only` exits non-zero. Returns HTTP 409. n8n routes to terminal (`acknowledge-failed`); operator must resolve the diverged local clone manually before retrying through capture-service.
+  - `git_push_rejected` — `git push` exits non-zero. Local filesystem write rolled back before flock release. Returns HTTP 409. n8n schedules automatic retry; the retry fetches the intervening commit and pushes cleanly.
+  - `git_index_locked` — `.git/index.lock` exists at write-sequence start. Returns HTTP 503. Never deleted automatically; operator must verify no live Git process holds it.
+  - `capture_id_duplicate` — idempotency scan finds `capture_id` in more than one vault file. Returns HTTP 409.
+  - `path_escape_attempt` — derived path component contains `..`, `/`, absolute segment, null byte, or leading `.`. Returns HTTP 422.
+- **`n8n/workflows/second-brain-error-handler.json`** — updated to route `git_merge_conflict`, `git_index_locked`, and `capture_id_duplicate` as terminal; `git_push_rejected` as retryable.
+- **`src/secondbrain/downstream_errors.py`** — `RETRYABLE_DOWNSTREAM_ERRORS` and `TERMINAL_DOWNSTREAM_ERRORS` extended with the new Git error types.
+- **`deploy/test-writer-safe-failure.sh`** — regression script: injects each Git failure type, verifies the correct HTTP status and `error_type`, confirms raw capture remains in SQLite, confirms vault working tree is in a known state.
+- **`deploy/verify.sh`** — extended with writer-service deployment checks: container running, vault mounted, health endpoint, Git sync configuration present.
+- **`writer-service/tests/integration/test_git_failure_handling.py`** — 284 assertions covering injected failures for all five error types, verifying HTTP response codes, error body structure, vault state after failure, and SQLite capture preservation.
+
+### Local dev: self-contained vault initialization
+
+Added a `local-vault-init` one-shot service to `compose.override.yaml` so `docker compose up -d` works with Git sync enabled out of the box — no manual `git init`, remote setup, or SSH key configuration required.
+
+- **`compose.override.yaml`** — `local-vault-init` one-shot service (`alpine/git:latest`) initializes both the vault working tree and a bare fake remote in separate named volumes before writer-service starts. `writer-service` now has `depends_on: local-vault-init: condition: service_completed_successfully`. `GIT_SYNC_ENABLED` defaults to `true` locally. `second-brain-local-vault-remote` named volume added so the fake remote persists across container recreates.
+- **`tests/architecture/test_writer_service_config.py`** — six architecture assertions added: `local-vault-init` service present, remote volume present, `depends_on` condition, `GIT_SYNC_ENABLED` default, remote mount, and init script content.
+
+---
+
 ## v1.0.3 — Local developer workflow and n8n operational hardening
 
 **Branch:** `tech_debt_one`
