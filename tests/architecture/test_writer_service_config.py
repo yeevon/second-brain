@@ -604,3 +604,15 @@ def test_local_n8n_init_verifies_webhook_registration():
     script = _n8n_init_script()
     assert "second-brain-intake" in script
     assert "404" in script
+
+
+def test_override_local_n8n_init_requires_gemini_api_key():
+    svc = _override_compose()["services"]["local-n8n-init"]
+    assert svc["environment"]["GEMINI_API_KEY"] == "${GEMINI_API_KEY:?GEMINI_API_KEY is required for local-n8n-init}"
+
+
+def test_local_n8n_init_fails_on_webhook_auth_errors():
+    script = _n8n_init_script()
+    assert "401" in script
+    assert "403" in script
+    assert "credential binding or Intake token configuration is broken" in script
