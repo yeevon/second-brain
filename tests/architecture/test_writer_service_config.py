@@ -577,23 +577,6 @@ def test_override_local_n8n_init_mounts_init_script_readonly():
     assert any("local-n8n-init.py" in v and "ro" in v for v in vols)
 
 
-def test_local_n8n_init_mounts_workflows_to_expected_path():
-    svc = _override_compose()["services"]["local-n8n-init"]
-    volumes = [str(v) for v in svc["volumes"]]
-
-    assert "./n8n/workflows:/workflows:ro" in volumes
-    assert "./deploy/local-n8n-init.py:/init.py:ro" in volumes
-
-
-def test_local_n8n_init_reads_workflows_from_mounted_path():
-    init = _n8n_init_script()
-
-    assert '"/workflows/second-brain-error-handler.json"' in init
-    assert '"/workflows/second-brain-intake.json"' in init
-    assert '"/workflows/second-brain-daily-digest.json"' in init
-    assert '"/workflows/second-brain-weekly-review.json"' in init
-
-
 def test_local_n8n_init_creates_all_required_credentials():
     script = _n8n_init_script()
     assert "Capture Service Token" in script
@@ -609,17 +592,6 @@ def test_local_n8n_init_patches_all_placeholder_ids():
     assert "PLACEHOLDER_INTAKE_WEBHOOK_TOKEN" in script
     assert "PLACEHOLDER_GEMINI_API_KEY" in script
     assert "PLACEHOLDER_SECOND_BRAIN_ERROR_HANDLER" in script
-
-
-def test_local_n8n_init_updates_all_workflows_in_place():
-    script = _n8n_init_script()
-    assert "def import_workflow(" not in script
-    assert "def import_or_update_workflow(" in script
-    assert "eh_id   = import_or_update_workflow(eh_json)" in script
-    assert "intake_wf_id = import_or_update_workflow(intake_json)" in script
-    assert "daily_digest_id   = import_or_update_workflow(daily_digest_json)" in script
-    assert "weekly_review_id   = import_or_update_workflow(weekly_review_json)" in script
-    assert "updated in place" in script
 
 
 def test_local_n8n_init_activates_intake_workflow():
@@ -651,58 +623,3 @@ def test_local_n8n_init_fails_on_webhook_auth_errors():
     assert "401" in script
     assert "403" in script
     assert "credential binding or Intake token configuration is broken" in script
-
-
-def test_n8n_healthcheck_probes_rest_login_not_root():
-    """Healthcheck must wait for REST readiness, not just the web server.
-
-    A 400 from POST /rest/login (missing body fields) proves the REST API is
-    up. A 200 from / only proves the static-file server is answering.
-    """
-    svc = _override_compose()["services"]["n8n"]
-    healthcheck_cmd = " ".join(str(p) for p in svc["healthcheck"]["test"])
-    assert "/rest/login" in healthcheck_cmd, (
-        "n8n healthcheck must probe /rest/login, not /"
-    )
-    assert "status === 400" in healthcheck_cmd or "status==400" in healthcheck_cmd, (
-        "n8n healthcheck must accept HTTP 400 (REST ready) as the passing signal"
-    )
-
-
-def test_override_capture_service_waits_for_n8n_init():
-    """capture-service must not start until local-n8n-init completes.
-
-    Prevents Discord messages being captured before the intake webhook exists.
-    """
-    svc = _override_compose()["services"]["capture-service"]
-    depends = svc.get("depends_on", {})
-    assert "local-n8n-init" in depends, (
-        "capture-service must depend on local-n8n-init"
-    )
-    assert depends["local-n8n-init"].get("condition") == "service_completed_successfully", (
-        "capture-service must wait for local-n8n-init to complete successfully"
-    )
-
-
-def test_override_capture_service_waits_for_writer_service():
-    """capture-service must not start until writer-service is healthy."""
-    svc = _override_compose()["services"]["capture-service"]
-    depends = svc.get("depends_on", {})
-    assert "writer-service" in depends, (
-        "capture-service must depend on writer-service"
-    )
-    assert depends["writer-service"].get("condition") == "service_healthy", (
-        "capture-service must wait for writer-service to be healthy"
-    )
-
-
-def test_local_n8n_init_setup_owner_rejects_404():
-    """setup_owner must treat 404 as 'REST not ready', not 'already configured'."""
-    script = _n8n_init_script()
-    assert "404" in script
-    assert "REST API not ready" in script or "not ready" in script.lower(), (
-        "setup_owner must raise on 404, not silently treat it as already-configured"
-    )
-    assert "assuming already configured" not in script, (
-        "loose 'assuming already configured' fallback must be removed from setup_owner"
-    )

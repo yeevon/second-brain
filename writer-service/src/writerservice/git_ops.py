@@ -32,7 +32,7 @@ def check_index_lock(vault_path: Path) -> None:
 def check_working_tree_clean(vault_path: Path) -> None:
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=no"],
+            ["git", "status", "--porcelain"],
             cwd=vault_path,
             capture_output=True,
             text=True,
@@ -68,7 +68,7 @@ def git_fetch(vault_path: Path) -> None:
         raise GitFetchError("git fetch timed out: network unreachable or SSH hung.")
     if result.returncode != 0:
         raise GitFetchError(
-            f"git fetch failed with exit code {result.returncode}: {result.stderr.strip()}"
+            f"git fetch failed with exit code {result.returncode}"
         )
 
 
@@ -143,7 +143,7 @@ def git_push(vault_path: Path) -> None:
                 "git push rejected: remote has advanced. Retry will fetch and re-attempt."
             )
         raise GitPushError(
-            f"git push failed with exit code {result.returncode}: {result.stderr.strip()}"
+            f"git push failed with exit code {result.returncode}"
         )
 
 

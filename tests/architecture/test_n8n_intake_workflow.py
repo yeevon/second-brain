@@ -157,17 +157,117 @@ def test_intake_acknowledge_forwarded_url_is_correct():
     assert "/delivery/acknowledge-forwarded" in fixture_text
 
 
-# ── Writer-stub URLs ──────────────────────────────────────────────────────────
+# ── Writer-service URLs ───────────────────────────────────────────────────────
 
 
-def test_intake_writer_stub_write_url_is_correct():
+def test_intake_writer_service_file_url_is_correct():
     fixture_text = FIXTURE_PATH.read_text()
-    assert "http://writer-stub:8001/write" in fixture_text
+    assert "http://writer-service:8001/internal/notes/file" in fixture_text
 
 
-def test_intake_writer_stub_inbox_url_is_correct():
+def test_intake_does_not_reference_writer_stub():
     fixture_text = FIXTURE_PATH.read_text()
-    assert "http://writer-stub:8001/inbox" in fixture_text
+    assert "http://writer-stub" not in fixture_text
+
+
+def test_intake_reads_posted_webhook_envelope_from_body():
+    fixture_text = FIXTURE_PATH.read_text()
+
+    assert "$('Intake Webhook').first().json.body.capture_id" in fixture_text
+    assert "$('Intake Webhook').first().json.body.delivery_attempt" in fixture_text
+
+    assert "$('Intake Webhook').first().json.capture_id" not in fixture_text
+    assert "$('Intake Webhook').first().json.delivery_attempt" not in fixture_text
+
+
+def _writer_service_nodes(wf: dict) -> list[dict]:
+    return [
+        n for n in wf["nodes"]
+        if n.get("name") in (
+            "Submit to Writer Service",
+            "Submit to Writer Service (inbox)",
+        )
+    ]
+
+
+def test_intake_writer_service_nodes_send_body():
+    wf = _fixture()
+    nodes = _writer_service_nodes(wf)
+    assert len(nodes) == 2, "expected exactly two writer-service HTTP nodes"
+    for node in nodes:
+        assert node["parameters"].get("sendBody") is True, (
+            f"Node {node['name']!r} is missing sendBody: true"
+        )
+
+
+def test_intake_writer_service_nodes_specify_body_json():
+    wf = _fixture()
+    nodes = _writer_service_nodes(wf)
+    assert len(nodes) == 2
+    for node in nodes:
+        assert node["parameters"].get("specifyBody") == "json", (
+            f"Node {node['name']!r} must have specifyBody=json"
+        )
+
+
+def test_intake_writer_service_nodes_have_json_body():
+    wf = _fixture()
+    nodes = _writer_service_nodes(wf)
+    assert len(nodes) == 2
+    for node in nodes:
+        assert node["parameters"].get("jsonBody"), (
+            f"Node {node['name']!r} is missing jsonBody"
+        )
+
+
+def test_intake_has_no_stub_path_references():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "stub://" not in fixture_text
+
+
+def test_intake_file_branch_calls_acknowledge_filed_after_writer_service():
+    # SB-116: writer → Evaluate Writer Response → Writer OK? (true) → Acknowledge Filed
+    wf = _fixture()
+    conns = wf.get("connections", {})
+    # Direct connection now goes to the evaluation layer
+    writer_conns = conns.get("Submit to Writer Service", {}).get("main", [])
+    assert writer_conns, "Submit to Writer Service has no connections"
+    direct_targets = [c["node"] for entry in writer_conns for c in entry]
+    assert "Evaluate Writer Response" in direct_targets
+
+    # Acknowledge Filed must be reachable via Writer OK? true branch
+    writer_ok_conns = conns.get("Writer OK?", {}).get("main", [])
+    ok_targets = [c["node"] for c in writer_ok_conns[0]] if writer_ok_conns else []
+    assert "Acknowledge Filed" in ok_targets
+
+
+def test_intake_inbox_branch_calls_acknowledge_inbox_after_writer_service():
+    # SB-116: writer (inbox) → Evaluate Writer Response (inbox) → Writer OK? (inbox) → Acknowledge Inbox
+    wf = _fixture()
+    conns = wf.get("connections", {})
+    writer_conns = conns.get("Submit to Writer Service (inbox)", {}).get("main", [])
+    assert writer_conns, "Submit to Writer Service (inbox) has no connections"
+    direct_targets = [c["node"] for entry in writer_conns for c in entry]
+    assert "Evaluate Writer Response (inbox)" in direct_targets
+
+    # Acknowledge Inbox must be reachable via Writer OK? (inbox) true branch
+    writer_ok_conns = conns.get("Writer OK? (inbox)", {}).get("main", [])
+    ok_targets = [c["node"] for c in writer_ok_conns[0]] if writer_ok_conns else []
+    assert "Acknowledge Inbox" in ok_targets
+
+
+def test_compose_override_does_not_define_writer_stub():
+    from pathlib import Path
+    content = (Path(".") / "compose.override.yaml").read_text()
+    assert "writer-stub" not in content
+
+
+def test_compose_override_defines_second_brain_local_vault_volume():
+    from pathlib import Path
+    import yaml
+    compose = yaml.safe_load((Path(".") / "compose.override.yaml").read_text())
+    volumes = compose.get("volumes", {})
+    assert "second-brain-local-vault" in volumes
 
 
 # ── Gemini URL ────────────────────────────────────────────────────────────────
@@ -256,3 +356,37 @@ def test_bootstrap_does_not_activate_intake():
     bootstrap = BOOTSTRAP_PATH.read_text()
     assert "--active=true" not in bootstrap
     assert "activate:workflow" not in bootstrap
+
+
+# ── Credential consistency ────────────────────────────────────────────────────
+
+
+def test_every_capture_service_node_uses_same_credential():
+    """Every node that calls capture-service:8000 must use the same credential id and name.
+
+    Prevents the hidden-credential-binding problem that plagued SB-114:
+    a mismatched placeholder causes silent failures on the first writer error path.
+    """
+    wf = _fixture()
+    capture_cred_ids: set[str] = set()
+    capture_cred_names: set[str] = set()
+    nodes_checked: list[str] = []
+
+    for node in wf["nodes"]:
+        url = node.get("parameters", {}).get("url", "")
+        if "capture-service" not in url:
+            continue
+        cred = node.get("credentials", {}).get("httpHeaderAuth")
+        if not cred:
+            continue
+        capture_cred_ids.add(cred["id"])
+        capture_cred_names.add(cred["name"])
+        nodes_checked.append(node["name"])
+
+    assert nodes_checked, "No capture-service HTTP nodes found in workflow"
+    assert capture_cred_ids == {"PLACEHOLDER_CAPTURE_SERVICE_TOKEN"}, (
+        f"Multiple credential IDs for capture-service nodes {nodes_checked}: {capture_cred_ids}"
+    )
+    assert capture_cred_names == {"Capture Service Token"}, (
+        f"Multiple credential names for capture-service nodes {nodes_checked}: {capture_cred_names}"
+    )

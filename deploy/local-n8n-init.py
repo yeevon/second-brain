@@ -50,10 +50,6 @@ with open("/workflows/second-brain-error-handler.json") as f:
     ERROR_HANDLER_WF = json.load(f)
 with open("/workflows/second-brain-intake.json") as f:
     INTAKE_WF = json.load(f)
-with open("/workflows/second-brain-daily-digest.json") as f:
-    DAILY_DIGEST_WF = json.load(f)
-with open("/workflows/second-brain-weekly-review.json") as f:
-    WEEKLY_REVIEW_WF = json.load(f)
 
 
 # ── HTTP helpers (cookie-aware) ───────────────────────────────────────────────
@@ -96,7 +92,7 @@ def _unwrap(body):
 # ── Owner setup ───────────────────────────────────────────────────────────────
 
 def setup_owner():
-    status, body = _api("POST", "/rest/owner/setup", {
+    status, _body = _api("POST", "/rest/owner/setup", {
         "firstName": LOCAL_FIRST,
         "lastName": LOCAL_LAST,
         "email": LOCAL_EMAIL,
@@ -104,17 +100,8 @@ def setup_owner():
     }, ok_statuses=None)
     if status == 200:
         print(f"  Owner created: {LOCAL_EMAIL}")
-    elif status == 400:
-        print(f"  Owner already configured — skipping setup")
-    elif status == 404:
-        raise RuntimeError(
-            "n8n REST API not ready: /rest/owner/setup returned 404. "
-            "The healthcheck should have prevented this — check n8n startup logs."
-        )
     else:
-        raise RuntimeError(
-            f"Unexpected status from /rest/owner/setup: HTTP {status} — {json.dumps(body)[:200]}"
-        )
+        print(f"  Owner setup returned HTTP {status} — assuming already configured")
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -172,26 +159,16 @@ def _find_workflow(name):
     return None
 
 
-def import_or_update_workflow(wf_json):
+def import_workflow(wf_json):
     name = wf_json["name"]
     existing = _find_workflow(name)
     if existing:
-        update_json = dict(wf_json)
-        update_json["id"] = existing
-        update_json.pop("versionId", None)
-        _api(
-            "PATCH",
-            f"/rest/workflows/{existing}?forceSave=true",
-            update_json,
-            ok_statuses=(200,),
-        )
-        print(f"  {name}: updated in place")
+        print(f"  Workflow exists:  {name!r} (id={existing})")
         return existing
-
     _, body = _api("POST", "/rest/workflows", wf_json)
     data = _unwrap(body)
     wf_id = str(data.get("id") if isinstance(data, dict) else body.get("id"))
-    print(f"  {name}: imported")
+    print(f"  Workflow imported: {name!r} (id={wf_id})")
     return wf_id
 
 
@@ -285,7 +262,7 @@ def main():
 
     print("Importing Error Handler workflow…")
     eh_json = patch_json(ERROR_HANDLER_WF, cred_patches)
-    eh_id   = import_or_update_workflow(eh_json)
+    eh_id   = import_workflow(eh_json)
 
     print("Activating Error Handler workflow…")
     activate_workflow(eh_id)
@@ -294,7 +271,7 @@ def main():
     intake_patches = dict(cred_patches)
     intake_patches["PLACEHOLDER_SECOND_BRAIN_ERROR_HANDLER"] = eh_id
     intake_json  = patch_json(INTAKE_WF, intake_patches)
-    intake_wf_id = import_or_update_workflow(intake_json)
+    intake_wf_id = import_workflow(intake_json)
 
     print("Activating Intake workflow…")
     activate_workflow(intake_wf_id)
@@ -302,20 +279,10 @@ def main():
     print("Verifying webhook registration…")
     verify_webhook()
 
-    print("Importing Daily Digest workflow…")
-    daily_digest_json = patch_json(DAILY_DIGEST_WF, cred_patches)
-    daily_digest_id   = import_or_update_workflow(daily_digest_json)
-
-    print("Importing Weekly Review workflow…")
-    weekly_review_json = patch_json(WEEKLY_REVIEW_WF, cred_patches)
-    weekly_review_id   = import_or_update_workflow(weekly_review_json)
-
     print("=== local-n8n-init complete ===")
     print(f"  Error Handler  id={eh_id} (active)")
     print(f"  Intake         id={intake_wf_id} (active)")
     print(f"  Webhook        POST {N8N_URL}/webhook/second-brain-intake")
-    print(f"  Daily Digest   id={daily_digest_id} (inactive — activate manually after setting DISCORD_DIGEST_WEBHOOK_URL)")
-    print(f"  Weekly Review  id={weekly_review_id} (inactive — activate manually after setting DISCORD_DIGEST_WEBHOOK_URL)")
 
 
 if __name__ == "__main__":

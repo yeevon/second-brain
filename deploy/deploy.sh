@@ -23,7 +23,8 @@ export N8N_IMAGE_TAG="${N8N_IMAGE_TAG:?N8N_IMAGE_TAG must be set}"
 export N8N_ENV_FILE="${N8N_ENV_FILE:-/opt/second-brain/config/n8n.env}"
 export N8N_ENCRYPTION_KEY_FILE="${N8N_ENCRYPTION_KEY_FILE:-/opt/second-brain/config/n8n-encryption-key}"
 export N8N_DATA_SOURCE="${N8N_DATA_SOURCE:-$DATA_DIR/n8n}"
-export WRITER_STUB_ENV_FILE="${WRITER_STUB_ENV_FILE:-/opt/second-brain/config/writer-stub.env}"
+export WRITER_SERVICE_ENV_FILE="${WRITER_SERVICE_ENV_FILE:-/opt/second-brain/config/writer-service.env}"
+export WRITER_VAULT_SOURCE="${WRITER_VAULT_SOURCE:-/opt/second-brain/vault}"
 export COMPOSE_FILE=compose.yaml:compose.n8n.yaml
 
 N8N_DATA_DIR="$N8N_DATA_SOURCE"
@@ -47,8 +48,19 @@ if [[ ! -s "$N8N_ENCRYPTION_KEY_FILE" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$WRITER_STUB_ENV_FILE" ]]; then
-  echo "writer-stub env file missing: $WRITER_STUB_ENV_FILE" >&2
+if [[ ! -f "$WRITER_SERVICE_ENV_FILE" ]]; then
+  echo "writer-service env file missing: $WRITER_SERVICE_ENV_FILE" >&2
+  exit 1
+fi
+
+WRITER_SERVICE_TOKEN="$(grep '^WRITER_SERVICE_TOKEN=' "$WRITER_SERVICE_ENV_FILE" | cut -d= -f2-)"
+if [[ -z "$WRITER_SERVICE_TOKEN" ]]; then
+  echo "WRITER_SERVICE_TOKEN is not set in $WRITER_SERVICE_ENV_FILE" >&2
+  exit 1
+fi
+
+if [[ ! -d "$WRITER_VAULT_SOURCE" ]]; then
+  echo "vault directory missing: $WRITER_VAULT_SOURCE" >&2
   exit 1
 fi
 

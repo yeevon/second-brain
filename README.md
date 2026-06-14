@@ -10,9 +10,9 @@ Two explicit modes are supported via `CAPTURE_PROCESSING_MODE`:
 
 | Mode | Where it runs | What it does |
 | --- | --- | --- |
-| `local-full` | Desktop | Capture → screen → persist → classify (Gemini) → file (Obsidian) → receipt |
-| `capture-only` | EC2 | Capture → screen → persist → receipt. Downstream filing disabled. |
-| `capture-only` | Local Docker | Same container image as EC2, validated locally via `deploy/local-up.sh`. |
+| `local-full` | Desktop | Capture → screen → persist → classify (Gemini) → file (Obsidian) → receipt. No Docker required. |
+| `capture-only` | EC2 | Capture → screen → persist → receipt. Downstream filing handled by n8n + writer-service. |
+| `capture-only` | Local Docker full stack | Same capture-service image as EC2, plus n8n, writer-service, and Git-backed local vault — all started by `docker compose up -d`. |
 
 The mode must be set explicitly. Startup fails if it is missing or unsupported.
 
@@ -63,21 +63,36 @@ src/secondbrain/
   observability.py    # structured JSON logging to stdout
   audit.py            # append-only audit log
 
-writer-stub/
-  app.py              # standalone FastAPI stub that receives /write and /inbox from n8n
-  Dockerfile          # Python 3.13-slim, UID 10002, port 8001
+writer-service/
+  Dockerfile                         # Python 3.13-slim, UID 10003, port 8001
+  src/writerservice/
+    main.py                          # FastAPI app, auth middleware, /health and /internal/notes/file
+    config.py                        # GIT_SYNC_ENABLED, VAULT_PATH, WRITER_SERVICE_TOKEN
+    api_models.py                    # FileNoteRequest, FileNoteResponse, Classification
+    writer.py                        # deterministic Markdown generation and vault write dispatch
+    vault.py                         # folder enum → physical directory mapping, path validation
+    audit.py                         # append-only 99_log/events.ndjson writes
+    flock.py                         # WriterLock — kernel-managed OS advisory flock (fcntl.LOCK_EX)
+    git_ops.py                       # GitVaultOps — fetch, merge, write, add, commit, push sequence
+    git_errors.py                    # typed Git-layer error classes
+  tests/
+    unit/                            # auth, validation, Markdown generation, idempotency, flock, git_ops
+    integration/                     # filing, idempotent replay, inbox routing, Git sync, Git failures
 
 deploy/
-  container-entrypoint.sh        # EBS sentinel check before container start
-  provision-host.sh               # EC2 host setup
-  deploy.sh                       # build and start on EC2
-  verify.sh                       # post-deployment checks
-  local-up.sh                     # build, initialize named volume, and start locally
-  local-down.sh                   # stop the local container (volume preserved)
-  local-reset.sh                  # destroy and recreate the local named volume
-  test-container-packaging.sh     # container packaging regression suite
+  container-entrypoint.sh           # EBS sentinel check before container start
+  provision-host.sh                  # EC2 host setup (includes vault clone and SSH key setup)
+  deploy.sh                          # build and start on EC2
+  verify.sh                          # post-deployment checks (includes writer-service checks)
+  local-stack-up.sh                  # build, start full stack, wait for healthy
+  local-stack-down.sh                # stop all services (volumes preserved)
+  test-container-packaging.sh        # container packaging regression suite
+  test-writer-service.sh             # writer-service regression: health, filing, idempotency, audit
+  test-writer-safe-failure.sh        # Git failure injection regression suite
+  test-n8n-error-workflow.sh         # n8n error workflow regression suite
   capture-service.env.example
-  README.md                       # EC2 provisioning and deployment guide
+  writer-service.env.example
+  README.md                          # EC2 provisioning and deployment guide
 ```
 
 ## Requirements
@@ -87,7 +102,7 @@ deploy/
 - A Discord bot token with Message Content Intent enabled
 - **`local-full` only:** a Gemini API key and an Obsidian vault directory
 - **`capture-only` (EC2):** Docker Engine and Docker Compose plugin
-- **`capture-only` (local validation):** Docker Desktop or Docker Engine with Compose plugin
+- **`capture-only` (local Docker full stack):** Docker Desktop or Docker Engine with Compose plugin; a Gemini API key (required by `local-n8n-init`)
 
 ## Setup — local-full (desktop)
 
@@ -154,31 +169,60 @@ Check status:
 uv run python -m secondbrain status
 ```
 
-## Setup — capture-only (local Docker validation)
+## Setup — local Docker full stack
 
-Fill in credentials, then use standard Docker Compose commands:
+`docker compose up -d` starts the complete local stack:
+
+- `capture-service` — Discord intake and SQLite ledger
+- `n8n` — classification orchestration
+- `local-n8n-init` — one-shot Python service that seeds n8n state (owner account, credentials, workflows, webhook)
+- `writer-service` — Markdown generation and Git-backed vault writes
+- `local-vault-init` — one-shot alpine/git service that initializes the local vault and fake remote
+
+`compose.override.yaml` is auto-loaded and provides local-safe defaults. The EBS sentinel marker and vault Git repository are both created automatically on first start.
+
+### Required env files
 
 ```bash
-cp .env.example .env                # fill in Discord credentials and internal token
-docker compose up -d                # build images, start all services
-docker compose down                 # stop services (named volumes preserved)
+cp .env.example .env                      # Discord credentials, internal tokens, GEMINI_API_KEY
+cp deploy/n8n.env.example n8n.local.env   # n8n environment (encryption key path, etc.)
+printf '%s' "$(openssl rand -hex 32)" > n8n-encryption-key.local
+```
+
+The `.env` file must include these variables for `local-n8n-init`:
+
+```env
+CAPTURE_SERVICE_INTERNAL_TOKEN=<at least 32 random characters>
+WRITER_SERVICE_TOKEN=<at least 32 random characters>
+N8N_INTAKE_WEBHOOK_TOKEN=<at least 32 random characters>
+GEMINI_API_KEY=<your Gemini API key>    # required — local-n8n-init fails without it
+```
+
+### Start and stop
+
+```bash
+docker compose up -d                # build images, start all services, seed n8n automatically
 docker compose logs -f              # follow logs
 docker compose ps                   # check status
+docker compose down                 # stop services — named volumes preserved
+docker compose down -v              # destructive reset — deletes all named volumes
 ```
 
-`compose.override.yaml` is auto-loaded and provides local-safe defaults for all required variables. The EBS sentinel marker is created automatically on first container start.
+Use `docker compose down` for normal shutdown. Use `docker compose down -v` only for a destructive local reset or acceptance testing — it permanently deletes all SQLite, n8n, and vault volume data.
 
-For a first-run convenience wrapper that also validates env files and waits for healthy containers:
+### Convenience wrapper
 
 ```bash
-deploy/local-stack-up.sh
+deploy/local-stack-up.sh            # validates env files, starts stack, waits for healthy, verifies vault
 ```
 
-Container packaging regression:
+### Regression scripts
 
 ```bash
 deploy/test-container-packaging.sh   # Python version, env overrides, invariants, SIGTERM
-deploy/local-reset.sh --confirm-delete-local-test-data   # wipe volumes and start fresh
+deploy/test-writer-service.sh        # writer-service health, filing, idempotency, audit log
+deploy/test-writer-safe-failure.sh   # Git failure injection: merge conflict, push rejected, index lock
+deploy/test-n8n-error-workflow.sh    # n8n error workflow end-to-end regression
 ```
 
 `test-container-packaging.sh` runs four tests. The SIGTERM test stops the container — run `docker compose up -d` again before the next test cycle.
@@ -234,11 +278,43 @@ n8n runs alongside capture-service in the `compose.n8n.yaml` overlay. Key facts:
 - Execution payloads not retained globally — raw capture text must never appear in n8n storage.
 - `Second Brain - Error Handler` and `Second Brain - Intake` workflows are bootstrapped once via `deploy/bootstrap-n8n.sh`.
 
-### Writer-stub (SB-112+)
+### Writer-service (SB-114+)
 
-`writer-stub` is a standalone FastAPI container (UID 10002, port 8001, never published to the host) that acts as n8n's filing agent. n8n sends classified captures to `/write` or `/inbox`; writer-stub writes `stub://<capture_id>` paths back to capture-service. This sidesteps the `N8N_CONCURRENCY_PRODUCTION_LIMIT=1` deadlock — n8n cannot call a webhook on itself while processing a webhook.
+`writer-service` is a standalone FastAPI container (UID 10003, port 8001, never published to the host) that is the sole vault writer. n8n sends classified captures to `POST /internal/notes/file`; writer-service renders a deterministic Markdown note, writes it to the vault, appends an audit event to `99_log/events.ndjson`, and returns the real filesystem note path. capture-service then edits the Discord receipt to show the filed location.
 
-Downstream delivery is enabled with `DOWNSTREAM_DELIVERY_ENABLED=true`. See `.env.example` and `deploy/writer-stub.env.example` for all required variables.
+Key filing behavior:
+
+- Filenames follow `YYYY-MM-DD--<capture_id>--<title-slug>.md`. The `capture_id` is embedded in the filename.
+- Idempotency is enforced by the `capture_id` frontmatter field. A duplicate request for the same `capture_id` returns the existing path without overwriting the note.
+- When `inbox_reason` is non-null (`classifier_selected_inbox`, `needs_clarification`, `low_confidence`), the note is always written to `00_inbox/` regardless of the classification folder.
+- `stub://` paths are no longer produced. All note paths are real vault filesystem paths.
+
+Downstream delivery is enabled with `DOWNSTREAM_DELIVERY_ENABLED=true`. See `.env.example` and `deploy/writer-service.env.example` for all required variables.
+
+### Git-backed vault sync (SB-115+)
+
+When `GIT_SYNC_ENABLED=true`, every successful note write is committed and pushed to the private vault GitHub repository. An OS-level advisory `flock` (`fcntl.LOCK_EX`) on `/opt/vault/.writer.lock` serializes all writes — the kernel releases the lock automatically if the process terminates, so no stale application lock is possible.
+
+The write sequence:
+
+```text
+acquire OS advisory flock on /opt/vault/.writer.lock
+git fetch origin
+git merge --ff-only origin/main
+idempotency check (capture_id in frontmatter)
+render Markdown note
+write file to vault
+append audit event to 99_log/events.ndjson
+git add <note_path> 99_log/events.ndjson
+git commit -m "note: <capture_id> via writer-service"
+git push origin main
+release flock
+return { note_path, git_commit_hash }
+```
+
+Locally, `GIT_SYNC_ENABLED` defaults to `true` via `compose.override.yaml`. The `local-vault-init` one-shot service (alpine/git) initializes both the vault working tree and a bare fake remote before writer-service starts, so `docker compose up -d` works with no manual Git setup.
+
+Git failure handling (SB-116): every bad state returns a typed error and preserves the raw SQLite capture. `git_push_rejected` is retryable; `git_merge_conflict`, `git_index_locked`, and `capture_id_duplicate` are terminal and require operator inspection. `.git/index.lock` is never deleted automatically.
 
 ### Error workflow (SB-113+)
 
@@ -250,7 +326,7 @@ POST /internal/captures/{id}/delivery/report-workflow-error
 
 The endpoint accepts `disposition` (`retryable` or `terminal`), `error_type`, `reason_type`, `stage`, and execution metadata. Retryable reports schedule a capped-backoff retry; terminal reports mark the capture `DELIVERY_FAILED`. All values are validated as safe slugs — no raw exception text enters the ledger. Duplicate and stale reports are handled idempotently.
 
-capture-service remains the sole owner of the capture ledger. n8n and writer-stub reach it over the private Compose backend network at `http://capture-service:8000`.
+capture-service remains the sole owner of the capture ledger. n8n and writer-service reach it over the private Compose backend network at `http://capture-service:8000`.
 
 See [deploy/README.md](deploy/README.md) for provisioning, bootstrap, and verification steps.
 
@@ -259,6 +335,6 @@ See [deploy/README.md](deploy/README.md) for provisioning, bootstrap, and verifi
 - Messages containing secrets are rejected before SQLite and before Gemini.
 - Attachment-only messages are saved to inbox without calling Gemini.
 - If Gemini returns low-confidence results, the note goes to `00_inbox/` — never silently dropped.
-- The internal API is not published outside the container. n8n and future writer-service reach it over the Compose bridge network.
+- The internal API is not published outside the container. n8n and writer-service reach it over the Compose bridge network.
 - The container entrypoint refuses to start if the EBS sentinel file is absent, preventing SQLite writes to the root filesystem after a failed EBS remount.
 - SIGTERM is owned by the outer runtime, not Uvicorn. The shutdown sequence records `capture_service_state = STOPPED` and closes SQLite before the process exits with code 0.

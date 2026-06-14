@@ -13,7 +13,10 @@
       "name": "Intake Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [260, 300],
+      "position": [
+        260,
+        300
+      ],
       "webhookId": "second-brain-intake",
       "credentials": {
         "httpHeaderAuth": {
@@ -34,12 +37,15 @@
       "name": "Respond to Webhook",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [1700, 60]
+      "position": [
+        1700,
+        60
+      ]
     },
     {
       "parameters": {
         "method": "GET",
-        "url": "=http://capture-service:8000/internal/downstream/captures/{{ $('Intake Webhook').first().json.capture_id }}",
+        "url": "=http://capture-service:8000/internal/downstream/captures/{{ $('Intake Webhook').first().json.body.capture_id }}",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {}
@@ -48,7 +54,10 @@
       "name": "Get Capture",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [500, 300],
+      "position": [
+        500,
+        300
+      ],
       "credentials": {
         "httpHeaderAuth": {
           "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
@@ -77,7 +86,10 @@
       "name": "Screen for Sensitive",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [740, 300],
+      "position": [
+        740,
+        300
+      ],
       "credentials": {
         "httpHeaderAuth": {
           "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
@@ -111,12 +123,15 @@
       "name": "Sensitive?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [980, 300]
+      "position": [
+        980,
+        300
+      ]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.capture_id }}/delivery/acknowledge-forwarded",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/acknowledge-forwarded",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -124,7 +139,7 @@
           "parameters": [
             {
               "name": "delivery_attempt",
-              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+              "value": "={{ $('Intake Webhook').first().json.body.delivery_attempt }}"
             }
           ]
         },
@@ -134,7 +149,10 @@
       "name": "Claim Attempt",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1220, 140],
+      "position": [
+        1220,
+        140
+      ],
       "credentials": {
         "httpHeaderAuth": {
           "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
@@ -168,7 +186,10 @@
       "name": "Claimed?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [1460, 140]
+      "position": [
+        1460,
+        140
+      ]
     },
     {
       "parameters": {
@@ -182,12 +203,15 @@
       "name": "Respond 202 Ignored",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [1700, 260]
+      "position": [
+        1700,
+        260
+      ]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.capture_id }}/delivery/acknowledge-classifying",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/acknowledge-classifying",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -195,7 +219,7 @@
           "parameters": [
             {
               "name": "delivery_attempt",
-              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+              "value": "={{ $('Intake Webhook').first().json.body.delivery_attempt }}"
             }
           ]
         },
@@ -205,7 +229,10 @@
       "name": "Acknowledge Classifying",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1940, 60],
+      "position": [
+        1940,
+        60
+      ],
       "credentials": {
         "httpHeaderAuth": {
           "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
@@ -216,7 +243,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.capture_id }}/delivery/renew-lease",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/renew-lease",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -224,7 +251,7 @@
           "parameters": [
             {
               "name": "delivery_attempt",
-              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+              "value": "={{ $('Intake Webhook').first().json.body.delivery_attempt }}"
             }
           ]
         },
@@ -234,7 +261,10 @@
       "name": "Renew Lease",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2180, 60],
+      "position": [
+        2180,
+        60
+      ],
       "credentials": {
         "httpHeaderAuth": {
           "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
@@ -250,7 +280,10 @@
       "name": "Prepare Gemini Prompt",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2420, 60]
+      "position": [
+        2420,
+        60
+      ]
     },
     {
       "parameters": {
@@ -267,7 +300,10 @@
       "name": "Classify with Gemini",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2660, 60],
+      "position": [
+        2660,
+        60
+      ],
       "credentials": {
         "httpHeaderAuth": {
           "id": "PLACEHOLDER_GEMINI_API_KEY",
@@ -283,7 +319,10 @@
       "name": "Parse Gemini Response",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2900, 60]
+      "position": [
+        2900,
+        60
+      ]
     },
     {
       "parameters": {
@@ -300,7 +339,7 @@
             },
             {
               "name": "delivery_attempt",
-              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+              "value": "={{ $('Intake Webhook').first().json.body.delivery_attempt }}"
             }
           ]
         },
@@ -310,7 +349,10 @@
       "name": "Validate Classification",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [3140, 60],
+      "position": [
+        3140,
+        60
+      ],
       "credentials": {
         "httpHeaderAuth": {
           "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
@@ -367,78 +409,83 @@
       "name": "File or Inbox?",
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3,
-      "position": [3380, 60]
+      "position": [
+        3380,
+        60
+      ]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "http://writer-stub:8001/write",
+        "url": "http://writer-service:8001/internal/notes/file",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
-        "sendBody": true,
-        "bodyParameters": {
-          "parameters": [
-            {
-              "name": "capture_id",
-              "value": "={{ $('Intake Webhook').first().json.capture_id }}"
-            },
-            {
-              "name": "delivery_attempt",
-              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json",
+              "fullResponse": true
             }
-          ]
+          }
         },
-        "options": {}
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ capture_id: $('Intake Webhook').first().json.body.capture_id, delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, classification: $('Parse Gemini Response').first().json.classification, inbox_reason: null, source_message_id: $('Get Capture').first().json.source_message_id, created_at: $('Get Capture').first().json.created_at, model: \"gemini-3.5-flash\", prompt_version: \"classifier-v1\" }) }}",
+        "sendBody": true
       },
       "id": "a1b2c3d4-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-      "name": "Write to Vault",
+      "name": "Submit to Writer Service",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [3620, -20],
+      "position": [
+        3620,
+        -20
+      ],
       "credentials": {
         "httpHeaderAuth": {
-          "id": "PLACEHOLDER_WRITER_STUB_TOKEN",
-          "name": "Writer Stub Token"
+          "id": "PLACEHOLDER_WRITER_SERVICE_TOKEN",
+          "name": "Second Brain - Writer Service Header"
         }
       }
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "http://writer-stub:8001/inbox",
+        "url": "http://writer-service:8001/internal/notes/file",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
-        "sendBody": true,
-        "bodyParameters": {
-          "parameters": [
-            {
-              "name": "capture_id",
-              "value": "={{ $('Intake Webhook').first().json.capture_id }}"
-            },
-            {
-              "name": "delivery_attempt",
-              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json",
+              "fullResponse": true
             }
-          ]
+          }
         },
-        "options": {}
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ capture_id: $('Intake Webhook').first().json.body.capture_id, delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, classification: $('Parse Gemini Response').first().json.classification, inbox_reason: $('Validate Classification').first().json.inbox_reason, source_message_id: $('Get Capture').first().json.source_message_id, created_at: $('Get Capture').first().json.created_at, model: \"gemini-3.5-flash\", prompt_version: \"classifier-v1\" }) }}",
+        "sendBody": true
       },
       "id": "a1b2c3d4-cccc-cccc-cccc-cccccccccccc",
-      "name": "Inbox (classified)",
+      "name": "Submit to Writer Service (inbox)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [3620, 140],
+      "position": [
+        3620,
+        140
+      ],
       "credentials": {
         "httpHeaderAuth": {
-          "id": "PLACEHOLDER_WRITER_STUB_TOKEN",
-          "name": "Writer Stub Token"
+          "id": "PLACEHOLDER_WRITER_SERVICE_TOKEN",
+          "name": "Second Brain - Writer Service Header"
         }
       }
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.capture_id }}/delivery/acknowledge-failed",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/acknowledge-failed",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -446,7 +493,7 @@
           "parameters": [
             {
               "name": "delivery_attempt",
-              "value": "={{ $('Intake Webhook').first().json.delivery_attempt }}"
+              "value": "={{ $('Intake Webhook').first().json.body.delivery_attempt }}"
             },
             {
               "name": "reason_type",
@@ -460,7 +507,10 @@
       "name": "Acknowledge Failed (sensitive)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1220, 460],
+      "position": [
+        1220,
+        460
+      ],
       "credentials": {
         "httpHeaderAuth": {
           "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
@@ -480,7 +530,328 @@
       "name": "Respond 202 Blocked",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [1460, 460]
+      "position": [
+        1460,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/acknowledge-filed",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "delivery_attempt",
+              "value": "={{ $('Intake Webhook').first().json.body.delivery_attempt }}"
+            },
+            {
+              "name": "note_path",
+              "value": "={{ $json.note_path }}"
+            },
+            {
+              "name": "git_commit_hash",
+              "value": "={{ $json.git_commit_hash }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-eeee-eeee-eeee-eeeeeeeeeeee",
+      "name": "Acknowledge Filed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3860,
+        -20
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/acknowledge-inbox",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "delivery_attempt",
+              "value": "={{ $('Intake Webhook').first().json.body.delivery_attempt }}"
+            },
+            {
+              "name": "note_path",
+              "value": "={{ $json.note_path }}"
+            },
+            {
+              "name": "git_commit_hash",
+              "value": "=null"
+            },
+            {
+              "name": "reason_type",
+              "value": "={{ $('Validate Classification').first().json.inbox_reason }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-ffff-ffff-ffff-ffffffffffff",
+      "name": "Acknowledge Inbox",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3860,
+        200
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize writer-service response. On 2xx, unwrap body for downstream nodes.\n// On error, map writer error_type → capture-service taxonomy and use the\n// writer-service's own retryable flag to determine routing.\nconst resp = $input.first().json;\nconst statusCode = resp.statusCode ?? 200;\nconst body = resp.body ?? resp;\n\nconst ERROR_MAP = {\n  'git_fetch_error':        'writer_git_fetch_error',\n  'git_add_error':          'writer_git_add_error',\n  'git_commit_error':       'writer_git_commit_error',\n  'git_push_error':         'writer_git_push_error',\n  'git_push_rejected':      'writer_git_push_rejected',\n  'git_index_locked':       'writer_git_index_locked',\n  'git_merge_conflict':     'writer_git_conflict',\n  'git_worktree_dirty':     'writer_git_worktree_dirty',\n  'path_traversal_attempt': 'writer_path_traversal',\n  'capture_id_duplicate':   'writer_capture_duplicate',\n};\n\nif (statusCode >= 200 && statusCode < 300) {\n  return [{ json: { ...body, _writer_ok: true } }];\n}\n\nconst writerErrorType = body.error_type ?? 'unknown';\nconst mappedErrorType = ERROR_MAP[writerErrorType] ?? 'writer_service_unavailable';\nreturn [{\n  json: {\n    _writer_ok: false,\n    _retryable: body.retryable === true,\n    _error_type: mappedErrorType,\n    _reason_type: 'writer_service_error',\n  }\n}];"
+      },
+      "id": "eval-writer-file",
+      "name": "Evaluate Writer Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4100,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "conditions": [
+            {
+              "id": "writer-ok",
+              "leftValue": "={{ $json._writer_ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "if-writer-ok-file",
+      "name": "Writer OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4340,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "conditions": [
+            {
+              "id": "writer-retryable",
+              "leftValue": "={{ $json._retryable }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "if-writer-retryable-file",
+      "name": "Writer Error Retryable?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4340,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/schedule-retry",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, error_type: $json._error_type, reason_type: $json._reason_type }) }}",
+        "options": {}
+      },
+      "id": "schedule-retry-writer",
+      "name": "Schedule Retry (writer)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        4580,
+        80
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/acknowledge-failed",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, reason_type: $json._error_type }) }}",
+        "options": {}
+      },
+      "id": "ack-failed-writer",
+      "name": "Acknowledge Failed (writer)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        4580,
+        260
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize writer-service response. On 2xx, unwrap body for downstream nodes.\n// On error, map writer error_type → capture-service taxonomy and use the\n// writer-service's own retryable flag to determine routing.\nconst resp = $input.first().json;\nconst statusCode = resp.statusCode ?? 200;\nconst body = resp.body ?? resp;\n\nconst ERROR_MAP = {\n  'git_fetch_error':        'writer_git_fetch_error',\n  'git_add_error':          'writer_git_add_error',\n  'git_commit_error':       'writer_git_commit_error',\n  'git_push_error':         'writer_git_push_error',\n  'git_push_rejected':      'writer_git_push_rejected',\n  'git_index_locked':       'writer_git_index_locked',\n  'git_merge_conflict':     'writer_git_conflict',\n  'git_worktree_dirty':     'writer_git_worktree_dirty',\n  'path_traversal_attempt': 'writer_path_traversal',\n  'capture_id_duplicate':   'writer_capture_duplicate',\n};\n\nif (statusCode >= 200 && statusCode < 300) {\n  return [{ json: { ...body, _writer_ok: true } }];\n}\n\nconst writerErrorType = body.error_type ?? 'unknown';\nconst mappedErrorType = ERROR_MAP[writerErrorType] ?? 'writer_service_unavailable';\nreturn [{\n  json: {\n    _writer_ok: false,\n    _retryable: body.retryable === true,\n    _error_type: mappedErrorType,\n    _reason_type: 'writer_service_error',\n  }\n}];"
+      },
+      "id": "eval-writer-inbox",
+      "name": "Evaluate Writer Response (inbox)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4100,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "conditions": [
+            {
+              "id": "writer-ok-inbox",
+              "leftValue": "={{ $json._writer_ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "if-writer-ok-inbox",
+      "name": "Writer OK? (inbox)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4340,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "conditions": [
+            {
+              "id": "writer-retryable-inbox",
+              "leftValue": "={{ $json._retryable }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "if-writer-retryable-inbox",
+      "name": "Writer Error Retryable? (inbox)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4340,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/schedule-retry",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, error_type: $json._error_type, reason_type: $json._reason_type }) }}",
+        "options": {}
+      },
+      "id": "schedule-retry-writer-inbox",
+      "name": "Schedule Retry (writer inbox)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        4580,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/acknowledge-failed",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, reason_type: $json._error_type }) }}",
+        "options": {}
+      },
+      "id": "ack-failed-writer-inbox",
+      "name": "Acknowledge Failed (writer inbox)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        4580,
+        460
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
     }
   ],
   "pinData": {},
@@ -657,14 +1028,130 @@
       "main": [
         [
           {
-            "node": "Write to Vault",
+            "node": "Submit to Writer Service",
             "type": "main",
             "index": 0
           }
         ],
         [
           {
-            "node": "Inbox (classified)",
+            "node": "Submit to Writer Service (inbox)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Submit to Writer Service": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Writer Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Submit to Writer Service (inbox)": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Writer Response (inbox)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Writer Response": {
+      "main": [
+        [
+          {
+            "node": "Writer OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Writer OK?": {
+      "main": [
+        [
+          {
+            "node": "Acknowledge Filed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Writer Error Retryable?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Writer Error Retryable?": {
+      "main": [
+        [
+          {
+            "node": "Schedule Retry (writer)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Acknowledge Failed (writer)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Writer Response (inbox)": {
+      "main": [
+        [
+          {
+            "node": "Writer OK? (inbox)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Writer OK? (inbox)": {
+      "main": [
+        [
+          {
+            "node": "Acknowledge Inbox",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Writer Error Retryable? (inbox)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Writer Error Retryable? (inbox)": {
+      "main": [
+        [
+          {
+            "node": "Schedule Retry (writer inbox)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Acknowledge Failed (writer inbox)",
             "type": "main",
             "index": 0
           }
