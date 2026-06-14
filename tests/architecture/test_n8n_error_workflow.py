@@ -49,6 +49,10 @@ def _node_code(workflow: dict, node_name: str) -> str:
     return ""
 
 
+def _error_handler_js(node_name: str) -> str:
+    return _node_code(_load(ERROR_HANDLER_PATH), node_name)
+
+
 def _all_urls(workflow: dict) -> list[str]:
     return [
         n["parameters"].get("url", "")
@@ -131,7 +135,7 @@ def test_error_handler_does_not_allow_writer_stub_stage():
 
 def test_error_handler_node_stage_map_has_no_chained_object_keys():
     """NODE_STAGE_MAP must not contain JS-invalid chained key syntax from malformed writer-stub removal."""
-    js = _node_code(_load(ERROR_HANDLER_PATH), "Normalize Safe Error Metadata")
+    js = _error_handler_js("Normalize Safe Error Metadata")
     assert js, "Normalize Safe Error Metadata node not found or has no jsCode"
     assert "'Write to Vault': 'Write to Inbox':" not in js, (
         "Malformed chained object key detected in NODE_STAGE_MAP"
