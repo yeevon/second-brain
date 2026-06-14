@@ -185,7 +185,7 @@ uv run python -m secondbrain status
 
 ```bash
 cp .env.example .env                      # Discord credentials, internal tokens, GEMINI_API_KEY
-cp n8n.local.env.example n8n.local.env    # n8n environment (encryption key path, etc.)
+cp deploy/n8n.env.example n8n.local.env   # n8n environment (encryption key path, etc.)
 printf '%s' "$(openssl rand -hex 32)" > n8n-encryption-key.local
 ```
 
