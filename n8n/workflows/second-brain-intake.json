@@ -309,7 +309,8 @@
           "id": "PLACEHOLDER_GEMINI_API_KEY",
           "name": "Gemini API Key"
         }
-      }
+      },
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -975,6 +976,67 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, error_type: \"invalid_classifier_output\", reason_type: \"classifier_invalid_json\" }) }}",
         "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
+    },
+    {
+      "id": "if-gemini-ok",
+      "name": "Gemini OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2900,
+        60
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "id": "check-no-error",
+              "leftValue": "={{ $json.error }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notExists"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "schedule-retry-gemini",
+      "name": "Schedule Retry (Gemini error)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3100,
+        260
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/schedule-retry",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, error_type: \"gemini_http_error\", reason_type: \"gemini_unavailable\" }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
       }
     }
   ],
@@ -1119,7 +1181,7 @@
       "main": [
         [
           {
-            "node": "Parse Gemini Response",
+            "node": "Gemini OK?",
             "type": "main",
             "index": 0
           }
@@ -1316,6 +1378,24 @@
         [
           {
             "node": "Schedule Retry (classifier)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini OK?": {
+      "main": [
+        [
+          {
+            "node": "Parse Gemini Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Schedule Retry (Gemini error)",
             "type": "main",
             "index": 0
           }
