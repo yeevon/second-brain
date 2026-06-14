@@ -8,13 +8,13 @@ All notable changes to this project are documented here.
 
 **Branch:** `milestone_4`
 
-Replaced the writer-stub placeholder with a full `writer-service` that renders deterministic Markdown notes, writes them to a local vault filesystem (SB-114), adds a kernel-managed advisory `flock` and Git-backed vault sync (SB-115), and adds explicit safe-failure handling for every Git error the write sequence can encounter (SB-116). Also added a self-contained local vault initialization service so `docker compose up -d` works out of the box with no manual Git setup.
+Replaced the writer-stub placeholder with a full `writer-service` that renders deterministic Markdown notes, writes them to a local vault filesystem (SB-114), adds a kernel-managed advisory `flock` and Git-backed vault sync (SB-115), and adds explicit safe-failure handling for every Git error the write sequence can encounter (SB-116). Also added two one-shot Compose services so `docker compose up -d` works out of the box with no manual setup: `local-vault-init` seeds the Git-backed local vault and fake remote, and `local-n8n-init` creates the n8n owner account, all four credentials, imports both workflows, activates them, and verifies the intake webhook.
 
 ### SB-114 — Create writer-service with a local-only vault
 
 Extracted the deterministic Markdown generation logic from the MVP into a standalone `writer-service` FastAPI container that replaces the `writer-stub`. All vault file writes now go through this service; no other container mounts or mutates the vault path.
 
-- **`writer-service/`** — new standalone FastAPI service (UID 10002, port 8001, not published to the host). Contains `main.py`, `config.py`, `api_models.py`, `writer.py`, `vault.py`, and `audit.py`. Preserves all MVP Markdown generation behavior: folder allowlist, title and project-slug sanitization, path traversal protection, deterministic filenames (`YYYY-MM-DD--<capture_id>--<title-slug>.md`), deterministic frontmatter field order, idempotency by `capture_id` frontmatter field, and append-only audit trail at `99_log/events.ndjson`.
+- **`writer-service/`** — new standalone FastAPI service (UID 10003, port 8001, not published to the host). Contains `main.py`, `config.py`, `api_models.py`, `writer.py`, `vault.py`, and `audit.py`. Preserves all MVP Markdown generation behavior: folder allowlist, title and project-slug sanitization, path traversal protection, deterministic filenames (`YYYY-MM-DD--<capture_id>--<title-slug>.md`), deterministic frontmatter field order, idempotency by `capture_id` frontmatter field, and append-only audit trail at `99_log/events.ndjson`.
 - **`GET /health`** — returns HTTP 200 when vault path is writable, HTTP 503 when not. No authentication required.
 - **`POST /internal/notes/file`** — requires `X-Second-Brain-Writer-Token`. Validates folder enum, action status, confidence range, `capture_id` format (`^SB-\d{8}-\d{4}$`), `delivery_attempt >= 1`, and path traversal on all derived components. Returns `{result, note_path, git_commit_hash, idempotent}`. When `inbox_reason` is non-null, writes to `00_inbox/` regardless of `classification.folder`.
 - **`compose.n8n.yaml`** — `writer-service` service added (replaces `writer-stub`). Backend network only, `cap_drop: ALL`, `no-new-privileges`, vault volume mount.
@@ -41,7 +41,7 @@ Added a Git-backed vault to `writer-service`. Every successful note write is now
 - **`writer-service/src/writerservice/config.py`** — `GIT_SYNC_ENABLED` feature flag. When `false` (local default), notes are written to the local filesystem only with no Git operations. When `true`, the full Git sequence runs.
 - **`writer-service/src/writerservice/writer.py`** — updated to dispatch through `GitVaultOps` when `GIT_SYNC_ENABLED=true`; falls back to direct filesystem write when disabled.
 - **`deploy/provision-host.sh`** — extended with vault clone at `/opt/second-brain/vault`, SSH deploy key setup, and Git identity configuration for the writer-service user.
-- **`deploy/writer-service.env.example`** — `GIT_SYNC_ENABLED`, `GIT_REMOTE_URL`, `GIT_USER_NAME`, `GIT_USER_EMAIL`, `GIT_SSH_KEY_PATH` added.
+- **`deploy/writer-service.env.example`** — `GIT_SYNC_ENABLED` and `VAULT_REMOTE` added. Branch is always `main`; no separate branch variable.
 - **`writer-service/tests/unit/test_flock.py`** — 81 assertions covering lock acquisition, re-entrancy, and automatic kernel release.
 - **`writer-service/tests/unit/test_git_ops.py`** — 299 assertions covering the full write sequence, commit message format, push behavior, and flock hold timing.
 - **`writer-service/tests/integration/test_git_vault_sync.py`** — end-to-end integration tests: two near-simultaneous notes each produce exactly one committed file; killing writer-service while holding the lock does not leave an immortal application lock.
@@ -56,7 +56,7 @@ Added explicit, typed failure detection for every bad state the Git-backed write
   - `git_push_rejected` — `git push` exits non-zero. Local filesystem write rolled back before flock release. Returns HTTP 409. n8n schedules automatic retry; the retry fetches the intervening commit and pushes cleanly.
   - `git_index_locked` — `.git/index.lock` exists at write-sequence start. Returns HTTP 503. Never deleted automatically; operator must verify no live Git process holds it.
   - `capture_id_duplicate` — idempotency scan finds `capture_id` in more than one vault file. Returns HTTP 409.
-  - `path_escape_attempt` — derived path component contains `..`, `/`, absolute segment, null byte, or leading `.`. Returns HTTP 422.
+  - `path_traversal_attempt` — derived path component contains `..`, `/`, absolute segment, null byte, or leading `.`. Returns HTTP 422.
 - **`n8n/workflows/second-brain-error-handler.json`** — updated to route `git_merge_conflict`, `git_index_locked`, and `capture_id_duplicate` as terminal; `git_push_rejected` as retryable.
 - **`src/secondbrain/downstream_errors.py`** — `RETRYABLE_DOWNSTREAM_ERRORS` and `TERMINAL_DOWNSTREAM_ERRORS` extended with the new Git error types.
 - **`deploy/test-writer-safe-failure.sh`** — regression script: injects each Git failure type, verifies the correct HTTP status and `error_type`, confirms raw capture remains in SQLite, confirms vault working tree is in a known state.
@@ -69,6 +69,20 @@ Added a `local-vault-init` one-shot service to `compose.override.yaml` so `docke
 
 - **`compose.override.yaml`** — `local-vault-init` one-shot service (`alpine/git:latest`) initializes both the vault working tree and a bare fake remote in separate named volumes before writer-service starts. `writer-service` now has `depends_on: local-vault-init: condition: service_completed_successfully`. `GIT_SYNC_ENABLED` defaults to `true` locally. `second-brain-local-vault-remote` named volume added so the fake remote persists across container recreates.
 - **`tests/architecture/test_writer_service_config.py`** — six architecture assertions added: `local-vault-init` service present, remote volume present, `depends_on` condition, `GIT_SYNC_ENABLED` default, remote mount, and init script content.
+
+### Local dev: self-contained n8n initialization
+
+Added a `local-n8n-init` one-shot service to `compose.override.yaml` so `docker compose up -d` seeds all local n8n state without manual bootstrap steps or any UI interaction.
+
+- **`deploy/local-n8n-init.py`** — Python script that runs once after n8n is healthy and performs seven steps, all idempotent:
+  1. Creates the local n8n owner account.
+  2. Logs in and stores the session cookie.
+  3. Creates four HTTP-header-auth credentials: `Capture Service Token`, `Second Brain - Writer Service Header`, `Intake Webhook Token`, and `Gemini API Key`.
+  4. Imports `Second Brain - Error Handler` with credential IDs patched in.
+  5. Activates `Second Brain - Error Handler`.
+  6. Imports `Second Brain - Intake` with credential IDs and the Error Handler workflow ID patched in.
+  7. Activates `Second Brain - Intake` and verifies `POST /webhook/second-brain-intake` responds non-404.
+- **`compose.override.yaml`** — `local-n8n-init` service (`python:3.13-alpine`) mounts `n8n/workflows/` read-only and `deploy/local-n8n-init.py`; depends on `n8n: condition: service_healthy`. Requires `CAPTURE_SERVICE_INTERNAL_TOKEN`, `WRITER_SERVICE_TOKEN`, `N8N_INTAKE_WEBHOOK_TOKEN`, and `GEMINI_API_KEY` (hard-required; startup fails if missing). `N8N_LOCAL_EMAIL` and `N8N_LOCAL_PASSWORD` default to local dev values.
 
 ---
 

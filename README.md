@@ -10,9 +10,9 @@ Two explicit modes are supported via `CAPTURE_PROCESSING_MODE`:
 
 | Mode | Where it runs | What it does |
 | --- | --- | --- |
-| `local-full` | Desktop | Capture → screen → persist → classify (Gemini) → file (Obsidian) → receipt |
-| `capture-only` | EC2 | Capture → screen → persist → receipt. Downstream filing disabled. |
-| `capture-only` | Local Docker | Same container image as EC2, validated locally via `deploy/local-up.sh`. |
+| `local-full` | Desktop | Capture → screen → persist → classify (Gemini) → file (Obsidian) → receipt. No Docker required. |
+| `capture-only` | EC2 | Capture → screen → persist → receipt. Downstream filing handled by n8n + writer-service. |
+| `capture-only` | Local Docker full stack | Same capture-service image as EC2, plus n8n, writer-service, and Git-backed local vault — all started by `docker compose up -d`. |
 
 The mode must be set explicitly. Startup fails if it is missing or unsupported.
 
@@ -64,7 +64,7 @@ src/secondbrain/
   audit.py            # append-only audit log
 
 writer-service/
-  Dockerfile                         # Python 3.13-slim, UID 10002, port 8001
+  Dockerfile                         # Python 3.13-slim, UID 10003, port 8001
   src/writerservice/
     main.py                          # FastAPI app, auth middleware, /health and /internal/notes/file
     config.py                        # GIT_SYNC_ENABLED, VAULT_PATH, WRITER_SERVICE_TOKEN
@@ -102,7 +102,7 @@ deploy/
 - A Discord bot token with Message Content Intent enabled
 - **`local-full` only:** a Gemini API key and an Obsidian vault directory
 - **`capture-only` (EC2):** Docker Engine and Docker Compose plugin
-- **`capture-only` (local validation):** Docker Desktop or Docker Engine with Compose plugin
+- **`capture-only` (local Docker full stack):** Docker Desktop or Docker Engine with Compose plugin; a Gemini API key (required by `local-n8n-init`)
 
 ## Setup — local-full (desktop)
 
@@ -169,31 +169,60 @@ Check status:
 uv run python -m secondbrain status
 ```
 
-## Setup — capture-only (local Docker validation)
+## Setup — local Docker full stack
 
-Fill in credentials, then use standard Docker Compose commands:
+`docker compose up -d` starts the complete local stack:
+
+- `capture-service` — Discord intake and SQLite ledger
+- `n8n` — classification orchestration
+- `local-n8n-init` — one-shot Python service that seeds n8n state (owner account, credentials, workflows, webhook)
+- `writer-service` — Markdown generation and Git-backed vault writes
+- `local-vault-init` — one-shot alpine/git service that initializes the local vault and fake remote
+
+`compose.override.yaml` is auto-loaded and provides local-safe defaults. The EBS sentinel marker and vault Git repository are both created automatically on first start.
+
+### Required env files
 
 ```bash
-cp .env.example .env                # fill in Discord credentials and internal token
-docker compose up -d                # build images, start all services
-docker compose down                 # stop services (named volumes preserved)
+cp .env.example .env                      # Discord credentials, internal tokens, GEMINI_API_KEY
+cp n8n.local.env.example n8n.local.env    # n8n environment (encryption key path, etc.)
+printf '%s' "$(openssl rand -hex 32)" > n8n-encryption-key.local
+```
+
+The `.env` file must include these variables for `local-n8n-init`:
+
+```env
+CAPTURE_SERVICE_INTERNAL_TOKEN=<at least 32 random characters>
+WRITER_SERVICE_TOKEN=<at least 32 random characters>
+N8N_INTAKE_WEBHOOK_TOKEN=<at least 32 random characters>
+GEMINI_API_KEY=<your Gemini API key>    # required — local-n8n-init fails without it
+```
+
+### Start and stop
+
+```bash
+docker compose up -d                # build images, start all services, seed n8n automatically
 docker compose logs -f              # follow logs
 docker compose ps                   # check status
+docker compose down                 # stop services — named volumes preserved
+docker compose down -v              # destructive reset — deletes all named volumes
 ```
 
-`compose.override.yaml` is auto-loaded and provides local-safe defaults for all required variables. The EBS sentinel marker is created automatically on first container start.
+Use `docker compose down` for normal shutdown. Use `docker compose down -v` only for a destructive local reset or acceptance testing — it permanently deletes all SQLite, n8n, and vault volume data.
 
-For a first-run convenience wrapper that also validates env files and waits for healthy containers:
+### Convenience wrapper
 
 ```bash
-deploy/local-stack-up.sh
+deploy/local-stack-up.sh            # validates env files, starts stack, waits for healthy, verifies vault
 ```
 
-Container packaging regression:
+### Regression scripts
 
 ```bash
 deploy/test-container-packaging.sh   # Python version, env overrides, invariants, SIGTERM
-deploy/local-reset.sh --confirm-delete-local-test-data   # wipe volumes and start fresh
+deploy/test-writer-service.sh        # writer-service health, filing, idempotency, audit log
+deploy/test-writer-safe-failure.sh   # Git failure injection: merge conflict, push rejected, index lock
+deploy/test-n8n-error-workflow.sh    # n8n error workflow end-to-end regression
 ```
 
 `test-container-packaging.sh` runs four tests. The SIGTERM test stops the container — run `docker compose up -d` again before the next test cycle.
@@ -251,7 +280,7 @@ n8n runs alongside capture-service in the `compose.n8n.yaml` overlay. Key facts:
 
 ### Writer-service (SB-114+)
 
-`writer-service` is a standalone FastAPI container (UID 10002, port 8001, never published to the host) that is the sole vault writer. n8n sends classified captures to `POST /internal/notes/file`; writer-service renders a deterministic Markdown note, writes it to the vault, appends an audit event to `99_log/events.ndjson`, and returns the real filesystem note path. capture-service then edits the Discord receipt to show the filed location.
+`writer-service` is a standalone FastAPI container (UID 10003, port 8001, never published to the host) that is the sole vault writer. n8n sends classified captures to `POST /internal/notes/file`; writer-service renders a deterministic Markdown note, writes it to the vault, appends an audit event to `99_log/events.ndjson`, and returns the real filesystem note path. capture-service then edits the Discord receipt to show the filed location.
 
 Key filing behavior:
 
