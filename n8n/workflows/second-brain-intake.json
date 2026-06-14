@@ -594,7 +594,7 @@
             },
             {
               "name": "git_commit_hash",
-              "value": "=null"
+              "value": "={{ $json.git_commit_hash }}"
             },
             {
               "name": "reason_type",

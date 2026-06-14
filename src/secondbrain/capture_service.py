@@ -1209,7 +1209,7 @@ def _safe_failure_error_type(reason: str) -> str:
     return "CaptureFailure"
 
 
-_WRITER_TOKEN_HEADER = "X-Writer-Service-Token"
+_WRITER_TOKEN_HEADER = "X-Second-Brain-Writer-Token"
 
 
 class WriterServiceClient:
