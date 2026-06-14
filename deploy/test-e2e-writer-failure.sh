@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # E2E regression for writer-service failure durability (SB-116 done condition).
 #
-# Requires a fully running local stack with the active Intake workflow.
+# Requires:
+#   - docker compose up -d
+#   - deploy/bootstrap-n8n.sh has imported workflows
+#   - Intake workflow active
+#   - required n8n credentials bound
+#
 # Tests the real n8n → writer-service → capture-service chain.
 #
 # Verified scenarios:
@@ -196,16 +201,64 @@ print('yes' if row and row[0] else 'no')
 PYEOF
 }
 
+# Check the Intake webhook route is registered before creating captures.
+# Sends a known-invalid payload; 404 = workflow missing/inactive, any other
+# response proves the route exists.
+_preflight_intake_webhook_registered() {
+  local status body_file
+  body_file="$(mktemp)"
+
+  status="$(
+    curl -sS \
+      --output "$body_file" \
+      --write-out "%{http_code}" \
+      --request POST \
+      --header "Content-Type: application/json" \
+      --header "X-Second-Brain-Intake-Token: $INTAKE_TOKEN" \
+      --data '{"capture_id":"SB-00000000-0000","delivery_attempt":1}' \
+      "$N8N_URL/webhook/second-brain-intake" || true
+  )"
+
+  if [[ "$status" == "404" ]]; then
+    echo "ERROR: n8n intake webhook is not registered." >&2
+    echo "  The Intake workflow is missing or inactive." >&2
+    echo "  If you ran docker compose down -v, n8n workflows/credentials were wiped." >&2
+    echo "  Run deploy/bootstrap-n8n.sh, bind credentials, set Error Workflow, and activate Intake." >&2
+    echo "" >&2
+    cat "$body_file" >&2 || true
+    rm -f "$body_file"
+    exit 1
+  fi
+
+  rm -f "$body_file"
+}
+
 # Trigger delivery through n8n intake webhook (same as the real dispatcher does).
+# Returns non-zero and prints the response body on non-2xx.
 _trigger_intake() {
   local cid="$1" attempt="$2"
-  curl -sf \
-    --request POST \
-    --header "Content-Type: application/json" \
-    --header "X-Second-Brain-Intake-Token: $INTAKE_TOKEN" \
-    --data "{\"capture_id\":\"$cid\",\"delivery_attempt\":$attempt}" \
-    "$N8N_URL/webhook/second-brain-intake" >/dev/null 2>&1 \
-    || true
+  local status body_file
+  body_file="$(mktemp)"
+
+  status="$(
+    curl -sS \
+      --output "$body_file" \
+      --write-out "%{http_code}" \
+      --request POST \
+      --header "Content-Type: application/json" \
+      --header "X-Second-Brain-Intake-Token: $INTAKE_TOKEN" \
+      --data "{\"capture_id\":\"$cid\",\"delivery_attempt\":$attempt}" \
+      "$N8N_URL/webhook/second-brain-intake"
+  )"
+
+  if [[ "$status" -lt 200 || "$status" -ge 300 ]]; then
+    echo "n8n intake webhook failed with HTTP $status" >&2
+    cat "$body_file" >&2 || true
+    rm -f "$body_file"
+    return 1
+  fi
+
+  rm -f "$body_file"
 }
 
 # Poll delivery_status until it matches expected or deadline passes.
@@ -228,6 +281,12 @@ _vault_clean() {
   [[ -z "$result" ]]
 }
 
+# ── n8n intake webhook preflight ─────────────────────────────────────────────
+echo "Checking n8n Intake webhook is registered..."
+_preflight_intake_webhook_registered
+echo "n8n Intake webhook preflight passed."
+echo ""
+
 # ── Test 1: normal write → COMPLETE ──────────────────────────────────────────
 
 echo "--- Test 1: normal write ---"
@@ -240,13 +299,16 @@ else
   ATT1="${result1##*:}"
   echo "  capture_id=$CID1  delivery_attempt=$ATT1"
 
-  _trigger_intake "$CID1" "$ATT1"
-  echo "  intake triggered — polling for COMPLETE (up to 40s)..."
-  status1="$(_poll_status "$CID1" "COMPLETE" 40 || true)"
-  if [[ "$status1" == "COMPLETE" ]]; then
-    _pass "normal write reaches delivery_status=COMPLETE"
+  if ! _trigger_intake "$CID1" "$ATT1"; then
+    _fail "trigger intake webhook failed"
   else
-    _fail "normal write delivery_status=$status1 after 40s (expected COMPLETE)"
+    echo "  intake triggered — polling for COMPLETE (up to 40s)..."
+    status1="$(_poll_status "$CID1" "COMPLETE" 40 || true)"
+    if [[ "$status1" == "COMPLETE" ]]; then
+      _pass "normal write reaches delivery_status=COMPLETE"
+    else
+      _fail "normal write delivery_status=$status1 after 40s (expected COMPLETE)"
+    fi
   fi
 fi
 
@@ -266,13 +328,16 @@ else
   ATT2="${result2##*:}"
   echo "  capture_id=$CID2  delivery_attempt=$ATT2"
 
-  _trigger_intake "$CID2" "$ATT2"
-  echo "  intake triggered — polling for RETRY_WAIT (up to 25s)..."
-  status2="$(_poll_status "$CID2" "RETRY_WAIT" 25 || true)"
-  if [[ "$status2" == "RETRY_WAIT" ]]; then
-    _pass "index lock → delivery_status=RETRY_WAIT"
+  if ! _trigger_intake "$CID2" "$ATT2"; then
+    _fail "trigger intake webhook failed"
   else
-    _fail "index lock → delivery_status=$status2 after 25s (expected RETRY_WAIT)"
+    echo "  intake triggered — polling for RETRY_WAIT (up to 25s)..."
+    status2="$(_poll_status "$CID2" "RETRY_WAIT" 25 || true)"
+    if [[ "$status2" == "RETRY_WAIT" ]]; then
+      _pass "index lock → delivery_status=RETRY_WAIT"
+    else
+      _fail "index lock → delivery_status=$status2 after 25s (expected RETRY_WAIT)"
+    fi
   fi
 
   raw_ok="$(_raw_text_present "$CID2" 2>/dev/null || echo no)"
@@ -342,14 +407,17 @@ else
     printf '---\ncapture_id: \"${CID4}\"\n---\n\n# Dup B\n' > /opt/vault/20_projects/dup-b/dup.md
   " 2>/dev/null
 
-  _trigger_intake "$CID4" "$ATT4"
-  # delivery_status column stores "FAILED" (the string constant DELIVERY_FAILED = "FAILED")
-  echo "  intake triggered — polling for FAILED (up to 30s)..."
-  status4="$(_poll_status "$CID4" "FAILED" 30 || true)"
-  if [[ "$status4" == "FAILED" ]]; then
-    _pass "duplicate capture_id → delivery_status=FAILED (terminal)"
+  if ! _trigger_intake "$CID4" "$ATT4"; then
+    _fail "trigger intake webhook failed"
   else
-    _fail "duplicate capture_id → delivery_status=$status4 after 30s (expected FAILED)"
+    # delivery_status column stores "FAILED" (the string constant DELIVERY_FAILED = "FAILED")
+    echo "  intake triggered — polling for FAILED (up to 30s)..."
+    status4="$(_poll_status "$CID4" "FAILED" 30 || true)"
+    if [[ "$status4" == "FAILED" ]]; then
+      _pass "duplicate capture_id → delivery_status=FAILED (terminal)"
+    else
+      _fail "duplicate capture_id → delivery_status=$status4 after 30s (expected FAILED)"
+    fi
   fi
 
   raw_dup="$(_raw_text_present "$CID4" 2>/dev/null || echo no)"
