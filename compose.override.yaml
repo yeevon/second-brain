@@ -124,6 +124,28 @@ services:
         grep -qxF ".writer.lock" /vault/.gitignore
         git -C /vault status --porcelain >/dev/null
 
+  local-n8n-init:
+    image: python:3.13-alpine
+    container_name: second-brain-local-n8n-init
+    restart: "no"
+    depends_on:
+      n8n:
+        condition: service_healthy
+    entrypoint: ["python", "/init.py"]
+    volumes:
+      - ./n8n/workflows:/workflows:ro
+      - ./deploy/local-n8n-init.py:/init.py:ro
+    environment:
+      N8N_URL: "http://n8n:5678"
+      N8N_LOCAL_EMAIL: ${N8N_LOCAL_EMAIL:-admin@second-brain.local}
+      N8N_LOCAL_PASSWORD: ${N8N_LOCAL_PASSWORD:-LocalDev-123!}
+      CAPTURE_SERVICE_INTERNAL_TOKEN: ${CAPTURE_SERVICE_INTERNAL_TOKEN}
+      WRITER_SERVICE_TOKEN: ${WRITER_SERVICE_TOKEN:-dev-writer-service-token-change-me}
+      N8N_INTAKE_WEBHOOK_TOKEN: ${N8N_INTAKE_WEBHOOK_TOKEN}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    networks:
+      - backend
+
   writer-service:
     build:
       context: .

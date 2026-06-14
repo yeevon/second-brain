@@ -4,9 +4,10 @@
 #
 # This script:
 #   1. Validates required local env files are present.
-#   2. Builds the capture-service image.
+#   2. Builds service images.
 #   3. Starts all services (compose.override.yaml is auto-loaded).
-#   4. Waits for all containers to become healthy.
+#   4. Waits for long-running containers to become healthy.
+#   5. Waits for one-shot init containers (local-vault-init, local-n8n-init) to exit 0.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,9 +39,9 @@ cd "$ROOT_DIR"
 
 docker compose build capture-service writer-service
 
-docker compose up -d capture-service n8n writer-service
+docker compose up -d
 
-echo "Waiting for containers to become healthy..."
+echo "Waiting for long-running containers to become healthy..."
 
 for container in second-brain-capture-service second-brain-n8n second-brain-writer-service; do
   health=""
@@ -76,6 +77,33 @@ grep -qxF ".writer.lock" /opt/vault/.gitignore
 git -C /opt/vault status --porcelain >/dev/null
 '
 echo "writer-service local Git vault is ready"
+
+echo "Waiting for init containers to exit..."
+
+for container in second-brain-local-vault-init second-brain-local-n8n-init; do
+  state=""
+  for _ in $(seq 1 90); do
+    state="$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)"
+    if [[ "$state" = "exited" ]]; then
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$state" != "exited" ]]; then
+    echo "$container did not finish (state=$state)" >&2
+    docker logs "$container" >&2 || true
+    exit 1
+  fi
+  exit_code="$(docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
+  if [[ "$exit_code" != "0" ]]; then
+    echo "$container exited with code $exit_code" >&2
+    docker logs "$container" >&2 || true
+    exit 1
+  fi
+  echo "$container exited 0"
+done
+
 echo ""
-echo "Open the n8n editor at http://127.0.0.1:5678"
-echo "Run deploy/bootstrap-n8n.sh after creating the owner account."
+echo "Stack is ready. Open the n8n editor at http://127.0.0.1:5678"
+echo "  Admin login: \${N8N_LOCAL_EMAIL:-admin@second-brain.local}"
+echo "  Intake webhook: POST http://127.0.0.1:5678/webhook/second-brain-intake"

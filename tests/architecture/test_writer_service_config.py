@@ -542,3 +542,65 @@ def test_override_writer_service_healthcheck_verifies_git_vault():
     assert "git -C /opt/vault rev-parse --is-inside-work-tree" in healthcheck
     assert "git -C /opt/vault remote get-url origin" in healthcheck
     assert ".writer.lock" in healthcheck
+
+
+# ── local-n8n-init compose contract ──────────────────────────────────────────
+
+N8N_INIT_SCRIPT = ROOT / "deploy" / "local-n8n-init.py"
+
+
+def _n8n_init_script() -> str:
+    return N8N_INIT_SCRIPT.read_text()
+
+
+def test_override_defines_local_n8n_init_service():
+    compose = _override_compose()
+    assert "local-n8n-init" in compose.get("services", {})
+
+
+def test_override_local_n8n_init_depends_on_n8n_healthy():
+    svc = _override_compose()["services"]["local-n8n-init"]
+    depends = svc.get("depends_on", {})
+    assert "n8n" in depends
+    assert depends["n8n"].get("condition") == "service_healthy"
+
+
+def test_override_local_n8n_init_mounts_workflows_readonly():
+    svc = _override_compose()["services"]["local-n8n-init"]
+    vols = [str(v) for v in svc.get("volumes", [])]
+    assert any("n8n/workflows" in v and "ro" in v for v in vols)
+
+
+def test_override_local_n8n_init_mounts_init_script_readonly():
+    svc = _override_compose()["services"]["local-n8n-init"]
+    vols = [str(v) for v in svc.get("volumes", [])]
+    assert any("local-n8n-init.py" in v and "ro" in v for v in vols)
+
+
+def test_local_n8n_init_creates_all_required_credentials():
+    script = _n8n_init_script()
+    assert "Capture Service Token" in script
+    assert "Second Brain - Writer Service Header" in script
+    assert "Intake Webhook Token" in script
+    assert "Gemini API Key" in script
+
+
+def test_local_n8n_init_patches_all_placeholder_ids():
+    script = _n8n_init_script()
+    assert "PLACEHOLDER_CAPTURE_SERVICE_TOKEN" in script
+    assert "PLACEHOLDER_WRITER_SERVICE_TOKEN" in script
+    assert "PLACEHOLDER_INTAKE_WEBHOOK_TOKEN" in script
+    assert "PLACEHOLDER_GEMINI_API_KEY" in script
+    assert "PLACEHOLDER_SECOND_BRAIN_ERROR_HANDLER" in script
+
+
+def test_local_n8n_init_activates_intake_workflow():
+    script = _n8n_init_script()
+    assert "/activate" in script
+    assert "Intake" in script
+
+
+def test_local_n8n_init_verifies_webhook_registration():
+    script = _n8n_init_script()
+    assert "second-brain-intake" in script
+    assert "404" in script
