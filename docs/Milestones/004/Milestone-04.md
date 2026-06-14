@@ -1,16 +1,16 @@
 # Milestone 4: Extract the Git-backed writer
 
-This is the next substantial architecture change. Your existing deterministic writer becomes the reference behavior.
+At this point, classification runs in n8n and the stub writer processes every capture. The vault remains unwritten. Milestone 4 extracts the Markdown generation logic into a real `writer-service` that writes notes to a local filesystem first, then adds the Git-backed vault sync.
 
 ---
 
-## SB-113 — Create writer-service with a local-only vault
+## SB-114 — Create writer-service with a local-only vault
 
-**Branch:** ```feature/writer-service-api```
+**Branch:** `feature/writer-service-api`
 
-Extract deterministic Markdown generation into a dedicated process with:
+Extract deterministic Markdown generation into a dedicated HTTP service with:
 
-```init
+```text
 GET  /health
 POST /internal/notes/file
 POST /internal/notes/update
@@ -19,35 +19,19 @@ GET  /internal/notes/by-capture/:capture_id
 
 Keep the initial implementation local to its filesystem. Do not add Git push in the first commit.
 
-### Preserve
+Preserve all existing Markdown generation behavior: schema validation, folder allowlist, title and project-slug sanitization, path traversal protection, deterministic filenames and frontmatter, idempotency by `capture_id`, and the `99_log/events.ndjson` audit trail.
 
-- Schema validation.
-- Folder allowlist.
-- Title and project-slug sanitization.
-- Path traversal protection.
-- Deterministic filenames and frontmatter.
-- Idempotency by capture_id.
-- 99_log/events.ndjson.
-
-Only ```writer-service``` should eventually mutate the EC2-side clone.
-
-**Done when:** the n8n workflow files a note through the service API with the same Markdown output your MVP already generated.
+**Done when:** the n8n workflow files a note through the writer-service API with the same Markdown output the MVP already generated, and the writer-stub container can be removed from the stack.
 
 ---
 
-## SB-114 — Add GitHub vault sync and serialized Git writes
+## SB-115 — Add GitHub vault sync and serialized Git writes
 
-**Branch:** ```feature/writer-git-sync```
+**Branch:** `feature/writer-git-sync`
 
-Create the private vault repository and EC2-side clone at:
+Create the private vault repository and EC2-side clone at `/opt/second-brain/vault`. Add a kernel-managed advisory `flock` around every write so concurrent processes never corrupt the repository:
 
-```init
-/opt/second-brain/vault
-```
-
-Implement this locked sequence:
-
-```init
+```text
 acquire OS advisory flock
 git fetch origin
 git merge --ff-only origin/main
@@ -61,27 +45,27 @@ release flock
 return note path and commit hash
 ```
 
-Do not use “lock file exists” as the locking rule. Hold a real kernel-managed advisory ```flock``` on an open file descriptor.
+Do not use a lock-file existence check as the locking rule. Hold a real kernel-managed advisory `flock` on an open file descriptor.
 
 **Done when:** two near-simultaneous notes each produce exactly one committed file, and killing the writer while it holds the lock does not leave an immortal application lock.
 
 ---
 
-## SB-115 — Add Git conflict and stale-lock failure handling
+## SB-116 — Add Git conflict and stale-lock failure handling
 
-**Branch:** ```feature/writer-safe-failure```
+**Branch:** `feature/writer-safe-failure`
 
-Add explicit behavior for:
+Add explicit failure behavior for every bad state the Git-backed write sequence can reach:
 
-- Non-fast-forward merge failure.
-- Rejected push.
-- Existing .git/index.lock.
-- Duplicate capture_id.
-- More than one vault note containing the same capture_id.
-- Path escape attempt.
+```text
+non-fast-forward merge failure
+rejected push
+existing .git/index.lock
+duplicate capture_id
+more than one vault note containing the same capture_id
+path escape attempt
+```
 
 Fail visibly. Do not overwrite, auto-resolve, or blindly delete Git-internal lock files.
 
-**Done when:** every injected Git failure preserves the raw SQLite capture and creates a readable failure state.
-
----
+**Done when:** every injected Git failure preserves the raw SQLite capture and creates a readable failure state that the operator can inspect and resolve manually.

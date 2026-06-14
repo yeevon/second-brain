@@ -215,7 +215,7 @@ Then open `http://127.0.0.1:5678` in the browser. The tunnel must remain open wh
 
 `compose.override.yaml` is auto-loaded by Docker Compose when no `COMPOSE_FILE` is set.
 It provides local-safe defaults for all required variables and includes n8n and
-writer-stub. After completing first-time setup, plain Docker commands work:
+writer-service. After completing first-time setup, plain Docker commands work:
 
 ```bash
 docker compose up -d     # start all services
@@ -235,10 +235,10 @@ Run once per fresh checkout (or after `docker compose down -v`):
 deploy/local-stack-up.sh
 ```
 
-This validates that `.env`, `n8n.local.env`, `n8n-encryption-key.local`, and
-`writer-stub.local.env` exist, builds the images, and waits for all three containers
-to become healthy. The EBS sentinel marker is created automatically by the container
-entrypoint on first start — no separate `docker run` step required.
+This validates that `.env`, `n8n.local.env`, and `n8n-encryption-key.local` exist,
+builds the images, and waits for all containers to become healthy. The EBS sentinel
+marker is created automatically by the container entrypoint on first start — no
+separate `docker run` step required.
 
 After healthy containers, follow the n8n bootstrap steps below, then run
 `deploy/bootstrap-n8n.sh`.
@@ -296,7 +296,7 @@ Bind these four credentials:
 | `Intake Webhook Token` | HTTP Header Auth | `X-Second-Brain-Intake-Token` — must match `N8N_INTAKE_WEBHOOK_TOKEN` |
 | `Capture Service Token` | HTTP Header Auth | `X-Second-Brain-Internal-Token` — must match `CAPTURE_SERVICE_INTERNAL_TOKEN` |
 | `Gemini API Key` | HTTP Header Auth | `X-Goog-Api-Key` — your Google AI Studio key |
-| `Writer Stub Token` | HTTP Header Auth | `X-Writer-Stub-Token` — must match `WRITER_STUB_INTERNAL_TOKEN` |
+| `Second Brain - Writer Service Header` | HTTP Header Auth | `X-Second-Brain-Writer-Token` — must match `WRITER_SERVICE_TOKEN` |
 
 Then wire the Error Workflow:
 
@@ -307,17 +307,19 @@ Then wire the Error Workflow:
 > The fixture stores a placeholder in `errorWorkflow`. n8n assigns the real workflow ID on
 > import and only resolves it by name in the UI — the placeholder must be replaced manually.
 
-### Writer-stub environment file (SB-112+)
+### Writer-service environment file (SB-114+)
 
-Create `/opt/second-brain/config/writer-stub.env` from `deploy/writer-stub.env.example`:
+Create `/opt/second-brain/config/writer-service.env` from `deploy/writer-service.env.example`:
 
 ```dotenv
-WRITER_STUB_INTERNAL_TOKEN=<at least 32 random characters>
-CAPTURE_SERVICE_URL=http://capture-service:8000
-CAPTURE_SERVICE_INTERNAL_TOKEN=<same value as in capture-service.env>
+WRITER_SERVICE_TOKEN=<at least 32 random characters>
+VAULT_PATH=/opt/vault
+AUDIT_LOG_PATH=/opt/vault/99_log/events.ndjson
+GIT_SYNC_ENABLED=true
+VAULT_REMOTE=git@github.com:<org>/<vault-repo>.git
 ```
 
-The `WRITER_STUB_INTERNAL_TOKEN` is the shared secret between n8n and writer-stub (the `Writer Stub Token` credential above). Never print or commit it.
+The `WRITER_SERVICE_TOKEN` is the shared secret between n8n and writer-service (the `Second Brain - Writer Service Header` credential above). Never print or commit it.
 
 ### Enable downstream delivery in capture-service (SB-112+)
 

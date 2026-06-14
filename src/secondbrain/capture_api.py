@@ -92,6 +92,8 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             delivery_attempt=capture.delivery_attempts,
             status=capture.status,
             delivery_status=capture.delivery_status,
+            source_message_id=capture.discord_message_id,
+            created_at=capture.received_at,
         )
 
     # ------------------------------------------------------------------
@@ -128,6 +130,7 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
 
         errors: list[str] = []
         route: str | None = None
+        inbox_reason: str | None = None
         valid = False
         confidence_met = False
 
@@ -138,8 +141,15 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             if threshold is None:
                 threshold = 0.75
             confidence_met = classification.confidence >= threshold
-            if classification.needs_clarification or not confidence_met:
+            if classification.folder == "inbox":
                 route = "inbox"
+                inbox_reason = "classifier_selected_inbox"
+            elif classification.needs_clarification:
+                route = "inbox"
+                inbox_reason = "needs_clarification"
+            elif not confidence_met:
+                route = "inbox"
+                inbox_reason = "low_confidence"
             else:
                 route = "file"
         except ValidationError as exc:
@@ -151,6 +161,7 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             valid=valid,
             route=route,
             confidence_met=confidence_met,
+            inbox_reason=inbox_reason,
             errors=errors,
         )
 

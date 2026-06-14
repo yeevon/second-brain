@@ -160,3 +160,94 @@ if [[ "$n8n_cs_reachable" != "0" ]]; then
 fi
 
 echo "n8n foundation deployment checks passed"
+
+# ── writer-service Git-sync checks ───────────────────────────────────────────
+
+WRITER_CONTAINER="${WRITER_CONTAINER:-second-brain-writer-service}"
+VAULT_DIR="${VAULT_DIR:-/opt/second-brain/vault}"
+DEPLOY_KEY_FILE="${VAULT_DEPLOY_KEY_FILE:-/opt/second-brain/config/vault-deploy-key}"
+KNOWN_HOSTS_FILE="${GITHUB_KNOWN_HOSTS_FILE:-/opt/second-brain/config/github_known_hosts}"
+EXPECTED_VAULT_REMOTE="${VAULT_REMOTE:-}"
+
+docker inspect "$WRITER_CONTAINER" >/dev/null
+
+writer_running="$(docker inspect --format '{{.State.Running}}' "$WRITER_CONTAINER")"
+if [[ "$writer_running" != "true" ]]; then
+  echo "writer-service container is not running" >&2
+  exit 1
+fi
+
+writer_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$WRITER_CONTAINER")"
+if [[ "$writer_health" != "healthy" ]]; then
+  echo "writer-service container health: $writer_health" >&2
+  exit 1
+fi
+
+if [[ ! -d "$VAULT_DIR" ]]; then
+  echo "vault directory missing: $VAULT_DIR" >&2
+  exit 1
+fi
+
+if [[ ! -d "$VAULT_DIR/.git" ]]; then
+  echo "vault is not a Git repository: $VAULT_DIR/.git missing" >&2
+  exit 1
+fi
+
+vault_branch="$(docker exec "$WRITER_CONTAINER" git -C /opt/vault rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+if [[ "$vault_branch" != "main" ]]; then
+  echo "vault is not on branch main (got: $vault_branch)" >&2
+  exit 1
+fi
+
+if [[ -n "$EXPECTED_VAULT_REMOTE" ]]; then
+  actual_remote="$(docker exec "$WRITER_CONTAINER" git -C /opt/vault remote get-url origin 2>/dev/null || true)"
+  if [[ "$actual_remote" != "$EXPECTED_VAULT_REMOTE" ]]; then
+    echo "vault remote mismatch: expected $EXPECTED_VAULT_REMOTE, got $actual_remote" >&2
+    exit 1
+  fi
+fi
+
+vault_dirty="$(docker exec "$WRITER_CONTAINER" git -C /opt/vault status --porcelain 2>/dev/null || true)"
+if [[ -n "$vault_dirty" ]]; then
+  echo "vault working tree is not clean (uncommitted changes detected)" >&2
+  exit 1
+fi
+
+if [[ ! -f "$DEPLOY_KEY_FILE" ]]; then
+  echo "deploy key file missing: $DEPLOY_KEY_FILE" >&2
+  exit 1
+fi
+
+deploy_key_perms="$(stat -c '%a' "$DEPLOY_KEY_FILE")"
+if [[ "$deploy_key_perms" != "600" ]]; then
+  echo "deploy key file permissions are $deploy_key_perms (expected 600)" >&2
+  exit 1
+fi
+
+if [[ ! -f "$KNOWN_HOSTS_FILE" ]]; then
+  echo "github_known_hosts file missing: $KNOWN_HOSTS_FILE" >&2
+  exit 1
+fi
+
+writer_git_ssh="$(docker inspect --format '{{range .Config.Env}}{{.}} {{end}}' "$WRITER_CONTAINER" | tr ' ' '\n' | grep '^GIT_SSH_COMMAND=' || true)"
+if [[ -z "$writer_git_ssh" ]]; then
+  echo "GIT_SSH_COMMAND is not set in writer-service container" >&2
+  exit 1
+fi
+
+ls_remote_result="$(
+  docker exec "$WRITER_CONTAINER" \
+    sh -c 'git ls-remote origin HEAD 2>/dev/null' \
+    || true
+)"
+if ! echo "$ls_remote_result" | grep -qE '^[0-9a-f]{40}'; then
+  echo "writer-service cannot reach GitHub via Git (git ls-remote origin HEAD failed)" >&2
+  exit 1
+fi
+
+if ! grep -qxF '.writer.lock' "$VAULT_DIR/.gitignore" 2>/dev/null; then
+  echo "vault .gitignore does not contain '.writer.lock' — writer lock file would be tracked by Git" >&2
+  exit 1
+fi
+
+echo "writer-service Git-sync checks passed"

@@ -34,17 +34,29 @@ services:
       retries: 5
       start_period: 30s
 
-  writer-stub:
+  writer-service:
     build:
-      context: writer-stub
-      dockerfile: Dockerfile
-    container_name: second-brain-writer-stub
+      context: .
+      dockerfile: writer-service/Dockerfile
+    container_name: second-brain-writer-service
     restart: unless-stopped
-    init: true
     env_file:
-      - ${WRITER_STUB_ENV_FILE:?WRITER_STUB_ENV_FILE must be set}
-    expose:
-      - "8001"
+      - ${WRITER_SERVICE_ENV_FILE:?WRITER_SERVICE_ENV_FILE must be set}
+    environment:
+      GIT_SSH_COMMAND: >-
+        ssh -i /run/secrets/vault_deploy_key
+        -o StrictHostKeyChecking=yes
+        -o UserKnownHostsFile=/run/secrets/github_known_hosts
+        -o BatchMode=yes
+      GIT_AUTHOR_NAME: "Second Brain Writer"
+      GIT_AUTHOR_EMAIL: "writer@second-brain.local"
+      GIT_COMMITTER_NAME: "Second Brain Writer"
+      GIT_COMMITTER_EMAIL: "writer@second-brain.local"
+    secrets:
+      - vault_deploy_key
+      - github_known_hosts
+    volumes:
+      - ${WRITER_VAULT_SOURCE:?WRITER_VAULT_SOURCE must be set}:/opt/vault
     networks:
       - backend
     cap_drop:
@@ -57,16 +69,20 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health').read()",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')",
         ]
       interval: 30s
       timeout: 5s
-      retries: 3
-      start_period: 10s
+      retries: 5
+      start_period: 20s
 
 secrets:
   n8n_encryption_key:
     file: ${N8N_ENCRYPTION_KEY_FILE:?N8N_ENCRYPTION_KEY_FILE must be set}
+  vault_deploy_key:
+    file: ${VAULT_DEPLOY_KEY_FILE:?VAULT_DEPLOY_KEY_FILE must be set}
+  github_known_hosts:
+    file: ${GITHUB_KNOWN_HOSTS_FILE:?GITHUB_KNOWN_HOSTS_FILE must be set}
 
 volumes:
   second-brain-local-n8n-data:

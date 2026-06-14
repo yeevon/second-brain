@@ -61,17 +61,108 @@ services:
       retries: 5
       start_period: 30s
 
-  writer-stub:
+  local-vault-init:
+    image: alpine/git:latest
+    container_name: second-brain-local-vault-init
+    restart: "no"
+    user: "0:0"
+    volumes:
+      - second-brain-local-vault:/vault
+      - second-brain-local-vault-remote:/remote
+    entrypoint:
+      - /bin/sh
+    command:
+      - -lc
+      - |
+        set -eu
+
+        mkdir -p /vault /remote
+
+        # Root runs this init container. The final repo is owned by writer-service UID.
+        git config --global --add safe.directory /vault || true
+        git config --global --add safe.directory /remote/repo.git || true
+
+        if [ ! -d /remote/repo.git ]; then
+          git init --bare -b main /remote/repo.git
+        fi
+
+        if [ ! -d /vault/.git ]; then
+          git -C /vault init -b main
+        fi
+
+        git -C /vault config user.name "Second Brain Writer"
+        git -C /vault config user.email "writer@second-brain.local"
+
+        mkdir -p /vault/99_log
+
+        if ! grep -qxF ".writer.lock" /vault/.gitignore 2>/dev/null; then
+          printf ".writer.lock\n" >> /vault/.gitignore
+        fi
+
+        touch /vault/99_log/.gitkeep
+
+        if git -C /vault remote get-url origin >/dev/null 2>&1; then
+          git -C /vault remote set-url origin /remote/repo.git
+        else
+          git -C /vault remote add origin /remote/repo.git
+        fi
+
+        git -C /vault add .gitignore 99_log/.gitkeep
+
+        if ! git -C /vault diff --cached --quiet; then
+          git -C /vault commit -m "chore: initialize local vault"
+        fi
+
+        # Local-only fake remote. Normal push first; force only repairs mismatched local volumes.
+        git -C /vault push -u origin main || git -C /vault push -u origin main --force
+
+        chown -R 10003:10003 /vault /remote
+
+        test -d /vault/.git
+        git -C /vault rev-parse --is-inside-work-tree
+        git -C /vault remote get-url origin | grep -qxF "/remote/repo.git"
+        grep -qxF ".writer.lock" /vault/.gitignore
+        git -C /vault status --porcelain >/dev/null
+
+  local-n8n-init:
+    image: python:3.13-alpine
+    container_name: second-brain-local-n8n-init
+    restart: "no"
+    depends_on:
+      n8n:
+        condition: service_healthy
+    entrypoint: ["python", "/init.py"]
+    volumes:
+      - ./n8n/workflows:/workflows:ro
+      - ./deploy/local-n8n-init.py:/init.py:ro
+    environment:
+      N8N_URL: "http://n8n:5678"
+      N8N_LOCAL_EMAIL: ${N8N_LOCAL_EMAIL:-admin@second-brain.local}
+      N8N_LOCAL_PASSWORD: ${N8N_LOCAL_PASSWORD:-LocalDev-123!}
+      CAPTURE_SERVICE_INTERNAL_TOKEN: ${CAPTURE_SERVICE_INTERNAL_TOKEN}
+      WRITER_SERVICE_TOKEN: ${WRITER_SERVICE_TOKEN:-dev-writer-service-token-change-me}
+      N8N_INTAKE_WEBHOOK_TOKEN: ${N8N_INTAKE_WEBHOOK_TOKEN}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?GEMINI_API_KEY is required for local-n8n-init}
+    networks:
+      - backend
+
+  writer-service:
     build:
-      context: writer-stub
-      dockerfile: Dockerfile
-    container_name: second-brain-writer-stub
+      context: .
+      dockerfile: writer-service/Dockerfile
+    container_name: second-brain-writer-service
     restart: unless-stopped
-    init: true
-    env_file:
-      - ${WRITER_STUB_ENV_FILE:-writer-stub.local.env}
-    expose:
-      - "8001"
+    depends_on:
+      local-vault-init:
+        condition: service_completed_successfully
+    environment:
+      WRITER_SERVICE_TOKEN: ${WRITER_SERVICE_TOKEN:-dev-writer-service-token-change-me}
+      VAULT_PATH: /opt/vault
+      AUDIT_LOG_PATH: /opt/vault/99_log/events.ndjson
+      GIT_SYNC_ENABLED: ${GIT_SYNC_ENABLED:-true}
+    volumes:
+      - second-brain-local-vault:/opt/vault
+      - second-brain-local-vault-remote:/remote
     networks:
       - backend
     cap_drop:
@@ -81,15 +172,13 @@ services:
     healthcheck:
       test:
         [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health').read()",
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')\" && test \"$$GIT_SYNC_ENABLED\" = \"true\" && git -C /opt/vault rev-parse --is-inside-work-tree >/dev/null && git -C /opt/vault remote get-url origin >/dev/null && grep -qxF '.writer.lock' /opt/vault/.gitignore"
         ]
       interval: 30s
       timeout: 5s
-      retries: 3
-      start_period: 10s
+      retries: 5
+      start_period: 20s
 
 secrets:
   n8n_encryption_key:
@@ -100,3 +189,7 @@ volumes:
     name: second-brain-local-data
   second-brain-local-n8n-data:
     name: second-brain-local-n8n-data
+  second-brain-local-vault:
+    name: second-brain-local-vault
+  second-brain-local-vault-remote:
+    name: second-brain-local-vault-remote

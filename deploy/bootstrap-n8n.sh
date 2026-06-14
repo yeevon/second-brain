@@ -82,7 +82,35 @@ fi
 # ── Intake Workflow ──────────────────────────────────────────────────────────
 
 if echo "$existing_names" | grep -qxF "$INTAKE_NAME"; then
-  echo "  Second Brain - Intake: skipped (already exists)"
+  # Upgrade path: update existing workflow in place by ID
+  existing_intake_id="$(
+    jq -r '.[] | select(.name == "'"$INTAKE_NAME"'") | .id' \
+      "$TMP_DIR/existing-workflows.json" 2>/dev/null || true
+  )"
+
+  if [[ -n "$existing_intake_id" ]]; then
+    jq --arg id "$existing_intake_id" \
+      'del(.versionId) | .id = $id' \
+      "$INTAKE_FIXTURE" \
+      > "$TMP_DIR/upgrade-intake.json"
+
+    docker cp \
+      "$TMP_DIR/upgrade-intake.json" \
+      "$CONTAINER:/tmp/upgrade-intake.json"
+
+    docker exec "$CONTAINER" \
+      n8n import:workflow --input=/tmp/upgrade-intake.json
+
+    docker exec --user root "$CONTAINER" \
+      rm -f /tmp/upgrade-intake.json
+
+    echo "  Second Brain - Intake: updated in place (left inactive)"
+    echo ""
+    echo "  ACTION REQUIRED: Rebind 'Second Brain - Writer Service Header' credential"
+    echo "  in the Second Brain - Intake workflow and reactivate."
+  else
+    echo "  Second Brain - Intake: skipped (exists but id not found)"
+  fi
 else
   jq --arg id "$(python3 -c 'import uuid; print(str(uuid.uuid4()))')" \
     'del(.id, .versionId) | .id = $id' \
@@ -141,11 +169,11 @@ echo "     Type: HTTP Header Auth | Header: X-Second-Brain-Internal-Token"
 echo "  d. Save the workflow (leave inactive — it is triggered by n8n, not manually)."
 echo ""
 echo "Step 2 — Second Brain - Intake"
-echo "  a. Bind these four credentials:"
-echo "     - Intake Webhook Token   (HTTP Header Auth: X-Second-Brain-Intake-Token)"
-echo "     - Capture Service Token  (HTTP Header Auth: X-Second-Brain-Internal-Token)"
-echo "     - Gemini API Key         (HTTP Header Auth: X-Goog-Api-Key)"
-echo "     - Writer Stub Token      (HTTP Header Auth: X-Writer-Stub-Token)"
+echo "  a. Bind these five credentials:"
+echo "     - Intake Webhook Token              (HTTP Header Auth: X-Second-Brain-Intake-Token)"
+echo "     - Capture Service Token             (HTTP Header Auth: X-Second-Brain-Internal-Token)"
+echo "     - Gemini API Key                    (HTTP Header Auth: X-Goog-Api-Key)"
+echo "     - Second Brain - Writer Service Header (HTTP Header Auth: X-Second-Brain-Writer-Token)"
 echo "  b. Open Workflow Settings (... menu → Settings)."
 echo "  c. Under 'Error Workflow', select 'Second Brain - Error Handler'."
 echo "     NOTE: the fixture contains a placeholder — this must be set manually in the UI."
