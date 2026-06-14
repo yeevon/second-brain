@@ -2,78 +2,39 @@
 
 These are useful, but they should not distract from durable intake, retries, and backups.
 
----
-
-## SB-119 — Add daily digest workflow
-
-**Branch:** ```feature/daily-digest```
-
-### Include
-
-- New captures.
-- Filed notes.
-- Inbox backlog.
-- Awaiting clarification.
-- Open tasks.
-- Failed and retried captures.
-- Sensitive-rejection counts only.
-- Attachment warnings.
-
-Send to ```#brain-digest``` or DM.
+This milestone implements Architecture Phase 5: scheduled digests, local query access, and Obsidian sync.
 
 ---
 
-## SB-120 — Add weekly review workflow
+## SB-120 — Add daily digest workflow
 
-**Branch:** ```feature/weekly-review```
+**Branch:** `feature/daily-digest`
 
-### Include
-
-- Explicitly completed actions.
-- Explicitly created tasks.
-- Outstanding tasks.
-- Decisions.
-- Inbox backlog.
-- Corrections.
-- Failures and retries.
-- A clearly labeled AI-generated priorities section.
-
-Do not infer completion from vague prose. Base progress claims on explicit ```task:```, ```done:```, ```decision:```, ```note:```, and ```fix:``` state changes.
+See [SB-120.md](SB-120.md) for the full spec.
 
 ---
 
-## SB-121 — Add local pull-only Obsidian sync wrapper
+## SB-121 — Add weekly review workflow
 
-**Branch:** ```feature/local-vault-pull```
+**Branch:** `feature/weekly-review`
 
-### Implement
-
-```init
-git fetch origin
-git merge --ff-only origin/main
-verify clean worktree
-fail visibly on dirty tree or conflict
-```
-
-Keep Obsidian pull-only for version one. The architecture intentionally avoids two writers until you design a conflict policy.
+See [SB-121.md](SB-121.md) for the full spec.
 
 ---
 
-## SB-122 — Add the local read-only MCP server
+## SB-122 — Add local pull-only Obsidian sync wrapper
 
-**Branch:** ```feature/read-only-mcp```
+**Branch:** `feature/local-vault-pull`
 
-Implement only after the rest of the pipeline is stable:
+See [SB-122.md](SB-122.md) for the full spec.
 
-```init
-search_notes(query, folder?, project?, tags?, limit?)
-read_note(note_path)
-list_recent_notes(days?, folder?, limit?)
-list_open_tasks(project?, limit?)
-get_sync_status()
-```
+---
 
-Add path-root enforcement, result limits, no shell execution, no mutation tools, and a sync preflight before queries.
+## SB-123 — Add the local read-only MCP server
+
+**Branch:** `feature/read-only-mcp`
+
+See [SB-123.md](SB-123.md) for the full spec.
 
 ---
 
@@ -91,22 +52,3 @@ Leave these in the backlog until the simpler design proves insufficient:
 - Multi-user capture.
 
 The canonical architecture deliberately defers each of these until there is evidence that the simpler implementation is inadequate.
-
-
-## What I would implement next
-
-Start with this exact sequence:
-
-```init
-SB-101  Regression suite
-SB-102  Internal capture-service boundary
-SB-103  capture-service HTTP API
-SB-104  EC2 deployment
-SB-105  SQLite service hardening
-SB-106  Periodic reconciliation
-SB-107  Delivery leases and retry state
-SB-108  Stale-lease reaper
-SB-109  Expanded status command
-```
-
-Do not start n8n until those are working. The next architectural risk is not classification quality. It is making sure the always-on intake service can survive downtime, dropped events, restarts, and stuck work without silently losing a thought.
