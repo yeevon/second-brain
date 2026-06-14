@@ -471,3 +471,48 @@ def test_path_traversal_error_is_422_not_retryable():
     ge = _load_git_errors()
     assert ge.PathTraversalError.http_status == 422
     assert ge.PathTraversalError.retryable is False
+
+
+# ── local-vault-init compose contract (SB-115) ───────────────────────────────
+
+
+def test_override_defines_local_vault_init_service():
+    compose = _override_compose()
+    assert "local-vault-init" in compose.get("services", {})
+
+
+def test_override_defines_local_vault_remote_volume():
+    compose = _override_compose()
+    volumes = compose.get("volumes", {})
+    assert "second-brain-local-vault-remote" in volumes
+
+
+def test_override_writer_service_depends_on_local_vault_init():
+    svc = _override_compose()["services"]["writer-service"]
+    depends_on = svc.get("depends_on", {})
+    assert "local-vault-init" in depends_on
+    assert depends_on["local-vault-init"].get("condition") == "service_completed_successfully"
+
+
+def test_override_writer_service_defaults_git_sync_enabled_true():
+    svc = _override_compose()["services"]["writer-service"]
+    env = svc.get("environment", {})
+    assert env.get("GIT_SYNC_ENABLED") == "${GIT_SYNC_ENABLED:-true}"
+
+
+def test_override_writer_service_mounts_local_vault_remote():
+    svc = _override_compose()["services"]["writer-service"]
+    volumes = [str(v) for v in svc.get("volumes", [])]
+    assert any("second-brain-local-vault-remote:/remote" in v for v in volumes)
+
+
+def test_override_local_vault_init_bootstraps_git_contract():
+    svc = _override_compose()["services"]["local-vault-init"]
+    command = str(svc.get("command", ""))
+
+    assert "git init --bare -b main /remote/repo.git" in command
+    assert "git -C /vault init -b main" in command
+    assert ".writer.lock" in command
+    assert "remote add origin /remote/repo.git" in command
+    assert "remote set-url origin /remote/repo.git" in command
+    assert "chown -R 10003:10003 /vault /remote" in command

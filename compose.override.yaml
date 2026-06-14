@@ -61,19 +61,79 @@ services:
       retries: 5
       start_period: 30s
 
+  local-vault-init:
+    image: alpine/git:latest
+    container_name: second-brain-local-vault-init
+    restart: "no"
+    user: "0:0"
+    volumes:
+      - second-brain-local-vault:/vault
+      - second-brain-local-vault-remote:/remote
+    entrypoint:
+      - /bin/sh
+      - -lc
+    command: |
+      set -eu
+
+      mkdir -p /vault /remote
+
+      # Root runs this init container. The final repo is owned by writer-service UID.
+      git config --global --add safe.directory /vault || true
+      git config --global --add safe.directory /remote/repo.git || true
+
+      if [ ! -d /remote/repo.git ]; then
+        git init --bare -b main /remote/repo.git
+      fi
+
+      if [ ! -d /vault/.git ]; then
+        git -C /vault init -b main
+      fi
+
+      git -C /vault config user.name "Second Brain Writer"
+      git -C /vault config user.email "writer@second-brain.local"
+
+      mkdir -p /vault/99_log
+
+      if ! grep -qxF ".writer.lock" /vault/.gitignore 2>/dev/null; then
+        printf ".writer.lock\n" >> /vault/.gitignore
+      fi
+
+      touch /vault/99_log/.gitkeep
+
+      if git -C /vault remote get-url origin >/dev/null 2>&1; then
+        git -C /vault remote set-url origin /remote/repo.git
+      else
+        git -C /vault remote add origin /remote/repo.git
+      fi
+
+      git -C /vault add -A
+
+      if ! git -C /vault diff --cached --quiet; then
+        git -C /vault commit -m "chore: initialize local vault"
+      fi
+
+      # Local-only fake remote. Normal push first; force only repairs mismatched local volumes.
+      git -C /vault push -u origin main || git -C /vault push -u origin main --force
+
+      chown -R 10003:10003 /vault /remote
+
   writer-service:
     build:
       context: .
       dockerfile: writer-service/Dockerfile
     container_name: second-brain-writer-service
     restart: unless-stopped
+    depends_on:
+      local-vault-init:
+        condition: service_completed_successfully
     environment:
       WRITER_SERVICE_TOKEN: ${WRITER_SERVICE_TOKEN:-dev-writer-service-token-change-me}
       VAULT_PATH: /opt/vault
       AUDIT_LOG_PATH: /opt/vault/99_log/events.ndjson
-      GIT_SYNC_ENABLED: ${GIT_SYNC_ENABLED:-false}
+      GIT_SYNC_ENABLED: ${GIT_SYNC_ENABLED:-true}
     volumes:
       - second-brain-local-vault:/opt/vault
+      - second-brain-local-vault-remote:/remote
     networks:
       - backend
     cap_drop:
@@ -98,3 +158,5 @@ volumes:
     name: second-brain-local-n8n-data
   second-brain-local-vault:
     name: second-brain-local-vault
+  second-brain-local-vault-remote:
+    name: second-brain-local-vault-remote

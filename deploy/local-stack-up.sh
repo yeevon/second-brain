@@ -65,6 +65,17 @@ done
 echo "capture-service local container is healthy"
 echo "n8n local container is healthy"
 echo "writer-service local container is healthy"
+
+echo "Verifying local writer-service Git vault..."
+docker exec second-brain-writer-service sh -lc '
+set -e
+test "$(printenv GIT_SYNC_ENABLED)" = "true"
+git -C /opt/vault rev-parse --is-inside-work-tree >/dev/null
+git -C /opt/vault remote get-url origin >/dev/null
+grep -qxF ".writer.lock" /opt/vault/.gitignore
+git -C /opt/vault status --porcelain >/dev/null
+'
+echo "writer-service local Git vault is ready"
 echo ""
 echo "Open the n8n editor at http://127.0.0.1:5678"
 echo "Run deploy/bootstrap-n8n.sh after creating the owner account."

@@ -74,7 +74,7 @@ echo "Pre-flight: all containers running."
 echo "Checking writer-service Git-sync configuration..."
 if ! docker exec "$WRITER_CONTAINER" sh -c '
   test "$(printenv GIT_SYNC_ENABLED)" = "true" || {
-    echo "GIT_SYNC_ENABLED is not true inside $WRITER_SERVICE_CONTAINER" >&2; exit 1
+    echo "GIT_SYNC_ENABLED is not true inside '"$WRITER_CONTAINER"'" >&2; exit 1
   }
   git -C /opt/vault rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
     echo "/opt/vault is not a Git repository" >&2; exit 1
@@ -83,13 +83,14 @@ if ! docker exec "$WRITER_CONTAINER" sh -c '
     echo "git status failed inside /opt/vault" >&2; exit 1
   }
   grep -qxF ".writer.lock" /opt/vault/.gitignore 2>/dev/null || {
-    echo ".writer.lock not in vault .gitignore (run provision-host.sh to repair)" >&2; exit 1
+    echo ".writer.lock not in vault .gitignore" >&2; exit 1
   }
 ' 2>&1; then
   echo ""
   echo "ERROR: writer-service Git-sync preflight failed." >&2
-  echo "  Set GIT_SYNC_ENABLED=true and ensure /opt/vault is a Git repo before running this script." >&2
-  echo "  For local dev: export GIT_SYNC_ENABLED=true and re-run deploy/local-stack-up.sh." >&2
+  echo "  Local dev should be initialized by plain: docker compose up -d" >&2
+  echo "  Inspect init logs with: docker logs second-brain-local-vault-init" >&2
+  echo "  Then verify: docker exec second-brain-writer-service git -C /opt/vault status" >&2
   exit 1
 fi
 echo "Git-sync preflight passed."
