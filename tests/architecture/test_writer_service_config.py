@@ -600,6 +600,13 @@ def test_local_n8n_init_activates_intake_workflow():
     assert "Intake" in script
 
 
+def test_local_n8n_init_activates_error_handler_before_intake():
+    script = _n8n_init_script()
+    assert "Activating Error Handler workflow" in script
+    assert "activate_workflow(eh_id)" in script
+    assert script.index("activate_workflow(eh_id)") < script.index("activate_workflow(intake_wf_id)")
+
+
 def test_local_n8n_init_verifies_webhook_registration():
     script = _n8n_init_script()
     assert "second-brain-intake" in script

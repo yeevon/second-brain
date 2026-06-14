@@ -264,6 +264,9 @@ def main():
     eh_json = patch_json(ERROR_HANDLER_WF, cred_patches)
     eh_id   = import_workflow(eh_json)
 
+    print("Activating Error Handler workflow…")
+    activate_workflow(eh_id)
+
     print("Importing Intake workflow…")
     intake_patches = dict(cred_patches)
     intake_patches["PLACEHOLDER_SECOND_BRAIN_ERROR_HANDLER"] = eh_id
@@ -277,7 +280,7 @@ def main():
     verify_webhook()
 
     print("=== local-n8n-init complete ===")
-    print(f"  Error Handler  id={eh_id}")
+    print(f"  Error Handler  id={eh_id} (active)")
     print(f"  Intake         id={intake_wf_id} (active)")
     print(f"  Webhook        POST {N8N_URL}/webhook/second-brain-intake")
 
