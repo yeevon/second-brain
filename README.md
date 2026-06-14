@@ -91,9 +91,21 @@ writer-service/
     unit/                            # auth, validation, Markdown generation, idempotency, flock, git_ops
     integration/                     # filing, idempotent replay, inbox routing, Git sync, Git failures
 
-writer-stub/
-  app.py              # standalone FastAPI stub that receives /write and /inbox from n8n
-  Dockerfile          # Python 3.13-slim, UID 10002, port 8001
+writer-service/
+  Dockerfile                         # Python 3.13-slim, UID 10003, port 8001
+  src/writerservice/
+    main.py                          # FastAPI app, auth middleware, /health and /internal/notes/file
+    config.py                        # GIT_SYNC_ENABLED, VAULT_PATH, WRITER_SERVICE_TOKEN
+    api_models.py                    # FileNoteRequest, FileNoteResponse, Classification
+    writer.py                        # deterministic Markdown generation and vault write dispatch
+    vault.py                         # folder enum → physical directory mapping, path validation
+    audit.py                         # append-only 99_log/events.ndjson writes
+    flock.py                         # WriterLock — kernel-managed OS advisory flock (fcntl.LOCK_EX)
+    git_ops.py                       # GitVaultOps — fetch, merge, write, add, commit, push sequence
+    git_errors.py                    # typed Git-layer error classes
+  tests/
+    unit/                            # auth, validation, Markdown generation, idempotency, flock, git_ops
+    integration/                     # filing, idempotent replay, inbox routing, Git sync, Git failures
 
 deploy/
   container-entrypoint.sh           # EBS sentinel check before container start
