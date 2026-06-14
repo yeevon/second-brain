@@ -876,6 +876,16 @@ class CaptureService:
             return None
 
         raw_text = message.content.strip() if message.content else ""
+
+        # Correction commands are handled by the gateway path. Reconciliation
+        # must not persist them as normal captures.
+        if _FIX_REPLY_RE.match(raw_text) or _FIX_EXPLICIT_RE.match(raw_text):
+            log_metadata(
+                "correction_command_skipped_for_capture",
+                discord_message_id=str(message.id),
+            )
+            return None
+
         secret_result = screen_text(raw_text)
         if secret_result.is_sensitive:
             return await self._persist_sensitive_rejection(message, secret_result)
