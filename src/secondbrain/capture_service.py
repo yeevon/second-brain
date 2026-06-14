@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -99,6 +100,10 @@ class CaptureService:
         self._receipt_client = client
 
     async def handle_gateway_message(self, message) -> None:
+        content = (message.content or "").strip()
+        if _FIX_REPLY_RE.match(content) or _FIX_EXPLICIT_RE.match(content):
+            await self.handle_gateway_correction(message)
+            return
         await self._capture_if_allowed(message, notify_downstream=True)
 
     async def startup_reconcile(self, client: Any) -> ReconcileResult:
@@ -640,6 +645,40 @@ class CaptureService:
             )
         return outcome
 
+    # ------------------------------------------------------------------
+    # SB-117: Clarification handling
+    # ------------------------------------------------------------------
+
+    async def record_clarification(self, *, capture_id: str, question: str) -> bool:
+        capture = self.get_capture(capture_id)
+        recorded = self._ledger.record_clarification(capture_id=capture_id, question=question)
+        if recorded:
+            log_metadata(
+                "clarification_sent",
+                capture_id=capture_id,
+                discord_message_id=capture.discord_message_id,
+            )
+            try:
+                await self.edit_receipt(
+                    capture_id=capture_id,
+                    content=_format_clarification_receipt(capture_id=capture_id, question=question),
+                )
+            except ReceiptDeliveryError:
+                pass
+        return recorded
+
+    async def resolve_clarification(self, capture_id: str) -> bool:
+        resolved = self._ledger.resolve_clarification(capture_id)
+        if resolved:
+            log_metadata("clarification_resolved", capture_id=capture_id)
+        return resolved
+
+    def captures_needing_clarification(self) -> list[CaptureRecord]:
+        return self._ledger.captures_needing_clarification()
+
+    def count_needs_clarification(self) -> int:
+        return self._ledger.count_needs_clarification()
+
     def manual_retry_capture(self, *, capture_id: str) -> bool:
         from datetime import UTC, datetime
         try:
@@ -656,6 +695,134 @@ class CaptureService:
         else:
             log_metadata("manual_retry_rejected", capture_id=capture_id, reason="invalid_state")
         return changed
+
+    # ------------------------------------------------------------------
+    # SB-118: Correction handling
+    # ------------------------------------------------------------------
+
+    async def apply_correction(
+        self,
+        *,
+        capture_id: str,
+        new_folder: str,
+        correction_reason: str,
+        new_project: str | None = None,
+    ) -> dict | None:
+        capture = self.get_capture(capture_id)
+        if capture.derived_note_path is None:
+            return None
+
+        writer_result = await self._call_writer_move(
+            capture_id=capture_id,
+            new_folder=new_folder,
+            new_project=new_project,
+            correction_reason=correction_reason,
+        )
+        if writer_result is None:
+            return None
+
+        correction_id = self._ledger.record_correction(
+            capture_id=capture_id,
+            old_note_path=writer_result["old_note_path"],
+            new_note_path=writer_result["new_note_path"],
+            git_commit_hash=writer_result.get("git_commit_hash"),
+            correction_reason=correction_reason,
+        )
+        log_metadata(
+            "correction_applied",
+            capture_id=capture_id,
+            correction_id=correction_id,
+            old_note_path=writer_result["old_note_path"],
+            new_note_path=writer_result["new_note_path"],
+        )
+
+        try:
+            await self.edit_receipt(
+                capture_id=capture_id,
+                content=_format_correction_receipt(
+                    capture_id=capture_id,
+                    new_note_path=writer_result["new_note_path"],
+                ),
+            )
+        except ReceiptDeliveryError:
+            pass
+
+        return {
+            "correction_id": correction_id,
+            "old_note_path": writer_result["old_note_path"],
+            "new_note_path": writer_result["new_note_path"],
+            "git_commit_hash": writer_result.get("git_commit_hash"),
+        }
+
+    async def _call_writer_move(
+        self,
+        *,
+        capture_id: str,
+        new_folder: str,
+        new_project: str | None,
+        correction_reason: str,
+    ) -> dict | None:
+        if self._receipt_client is None:
+            return None
+        writer_client = getattr(self._receipt_client, "writer_client", None)
+        if writer_client is None:
+            return None
+        try:
+            result = await writer_client.move_note(
+                capture_id=capture_id,
+                new_folder=new_folder,
+                new_project=new_project,
+                correction_reason=correction_reason,
+            )
+            return result
+        except Exception as exc:
+            log_metadata(
+                "correction_writer_move_failed",
+                capture_id=capture_id,
+                error_type=type(exc).__name__,
+            )
+            return None
+
+    async def handle_gateway_correction(self, message) -> bool:
+        """Parse and apply a fix: correction command from a Discord message.
+
+        Returns True if a correction was dispatched, False if the message is
+        not a valid correction command.
+        """
+        content = (message.content or "").strip()
+        capture_id_or_sentinel, new_folder, reason = _parse_fix_command(content, message)
+        if capture_id_or_sentinel is None:
+            # Bare unthreaded fix: — rejected per spec
+            log_metadata("correction_rejected_unthreaded", reason="no_reply_thread_and_no_explicit_id")
+            return False
+
+        # Resolve receipt sentinel to actual capture_id
+        if capture_id_or_sentinel.startswith("__receipt__"):
+            receipt_message_id = capture_id_or_sentinel[len("__receipt__"):]
+            record = self._ledger.get_capture_by_receipt_message_id(receipt_message_id)
+            if record is None:
+                log_metadata("correction_receipt_not_found", receipt_message_id=receipt_message_id)
+                return False
+            capture_id = record.capture_id
+        else:
+            capture_id = capture_id_or_sentinel
+
+        try:
+            capture = self.get_capture(capture_id)
+        except CaptureNotFoundError:
+            log_metadata("correction_capture_not_found", capture_id=capture_id)
+            return False
+
+        # Resolve clarification if one was pending
+        if capture.clarification_status == "NEEDS_CLARIFICATION":
+            await self.resolve_clarification(capture_id)
+
+        result = await self.apply_correction(
+            capture_id=capture_id,
+            new_folder=new_folder,
+            correction_reason=reason,
+        )
+        return result is not None
 
     async def run_stale_lease_reaper_loop(self) -> None:
         from secondbrain.reaper import run_stale_lease_reaper
@@ -947,6 +1114,83 @@ def _safe_inbox_error_type(reason: str | None) -> str | None:
     if len(parts) < 2:
         return "ClassifierError"
     return parts[1].strip() or "ClassifierError"
+
+
+# Matches: fix SB-YYYYMMDD-NNNN: <reason including folder>
+_FIX_EXPLICIT_RE = re.compile(
+    r"^fix\s+(SB-\d{8}-\d{4})\s*:\s*(.+)$", re.IGNORECASE | re.DOTALL
+)
+# Matches: fix: <reason including folder> (reply-to-receipt form)
+_FIX_REPLY_RE = re.compile(r"^fix\s*:\s*(.+)$", re.IGNORECASE | re.DOTALL)
+
+# Simple keyword-to-folder mapping used when parsing a correction reason
+_FOLDER_KEYWORDS = {
+    "inbox": "inbox",
+    "people": "people",
+    "project": "projects",
+    "projects": "projects",
+    "idea": "ideas",
+    "ideas": "ideas",
+    "learning": "learning",
+    "admin": "admin",
+}
+
+
+def _infer_folder_from_reason(reason: str) -> str:
+    lower = reason.lower()
+    for keyword, folder in _FOLDER_KEYWORDS.items():
+        if keyword in lower:
+            return folder
+    return "inbox"
+
+
+def _parse_fix_command(
+    content: str,
+    message,
+) -> tuple[str | None, str, str]:
+    """Return (capture_id, new_folder, reason) or (None, ...) if not a valid fix command."""
+    explicit = _FIX_EXPLICIT_RE.match(content)
+    if explicit:
+        capture_id = explicit.group(1)
+        reason = explicit.group(2).strip()
+        folder = _infer_folder_from_reason(reason)
+        return capture_id, folder, reason
+
+    reply_match = _FIX_REPLY_RE.match(content)
+    if reply_match:
+        # Must be a reply to a receipt message (reference field set)
+        referenced_id = _referenced_message_id(message)
+        if referenced_id is None:
+            # Bare unthreaded fix: — reject
+            return None, "", ""
+        reason = reply_match.group(1).strip()
+        folder = _infer_folder_from_reason(reason)
+        # Return the referenced message id as a sentinel; caller resolves capture
+        return f"__receipt__{referenced_id}", folder, reason
+
+    return None, "", ""
+
+
+def _referenced_message_id(message) -> str | None:
+    ref = getattr(message, "reference", None)
+    if ref is None:
+        return None
+    return str(ref.message_id) if ref.message_id else None
+
+
+def _format_clarification_receipt(*, capture_id: str, question: str) -> str:
+    return (
+        f"**Needs clarification** (`{capture_id}`)\n"
+        f"Filed to inbox. {question}\n"
+        "Reply to this message with your answer to re-classify."
+    )
+
+
+def _format_correction_receipt(*, capture_id: str, new_note_path: str) -> str:
+    return (
+        f"**Correction applied** (`{capture_id}`)\n"
+        f"Note moved to: `{new_note_path}`"
+    )
 
 
 def _safe_failure_error_type(reason: str) -> str:

@@ -156,6 +156,9 @@ def test_minimal_schema_tables_columns_and_indexes_match_mvp(tmp_path):
         "delivery_reason_type",
         # Added by migration 004
         "retry_attempts",
+        # Added by migration 005
+        "clarification_status",
+        "clarification_question",
     ]
     assert table_columns(ledger, "capture_events") == [
         "id",
@@ -332,7 +335,7 @@ def test_existing_mvp_database_is_adopted_without_data_loss(tmp_path):
     migration_count = ledger._runtime.read(
         lambda conn: conn.execute("SELECT COUNT(*) AS c FROM schema_migrations").fetchone()["c"]
     )
-    assert migration_count == 4  # 001 initial + 002 delivery_leases + 003 terminal_fields + 004 stale_lease_reaper
+    assert migration_count == 5  # 001 initial + 002 delivery_leases + 003 terminal_fields + 004 stale_lease_reaper + 005 clarifications_and_corrections
     # Verify delivery columns were added and existing row has correct default
     capture = ledger.get_capture("SB-20260607-0001")
     assert capture.delivery_status == "PENDING_FORWARD"

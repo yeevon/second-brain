@@ -17,6 +17,10 @@ INBOX = "INBOX"
 REJECTED_SENSITIVE = "REJECTED_SENSITIVE"
 FAILED = "FAILED"
 
+# Clarification sub-states (stored in clarification_status column, not main status)
+NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
+CLARIFICATION_RESOLVED = "RESOLVED"
+
 ALL_STATUSES = {RECEIVED, FORWARDED, CLASSIFYING, FILED, INBOX, REJECTED_SENSITIVE, FAILED}
 TERMINAL_STATUSES = {FILED, INBOX, REJECTED_SENSITIVE, FAILED}
 
@@ -76,6 +80,8 @@ class CaptureRecord:
     retry_attempts: int = 0
     delivery_commit_hash: str | None = None
     delivery_reason_type: str | None = None
+    clarification_status: str | None = None
+    clarification_question: str | None = None
 
 
 @dataclass(frozen=True)

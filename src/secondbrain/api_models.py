@@ -237,3 +237,27 @@ class ReceiptDeliveryResponse(BaseModel):
     delivered: bool
     replaced: bool
     receipt_message_id: str | None
+
+
+class ClarificationRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=500)
+
+
+class ClarificationResponse(BaseModel):
+    capture_id: str
+    clarification_status: str
+    question_sent: bool
+
+
+class CorrectionRequest(BaseModel):
+    new_folder: str = Field(min_length=1, max_length=50)
+    correction_reason: str = Field(min_length=1, max_length=500)
+    receipt_message_id: str | None = Field(default=None)
+
+
+class CorrectionResponse(BaseModel):
+    capture_id: str
+    correction_id: str
+    old_note_path: str
+    new_note_path: str
+    git_commit_hash: str | None

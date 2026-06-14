@@ -88,6 +88,10 @@ class OperationalStatusSnapshot:
     capture_service_last_heartbeat_at: datetime | None
     capture_service_stopped_at: datetime | None
 
+    captures_needing_clarification: int
+    last_successful_backup_at: datetime | None
+    last_successful_restore_validation_at: datetime | None
+
 
 def calculate_capture_service_health(
     *,
@@ -253,6 +257,19 @@ def _query_snapshot(
         stale_after_seconds=settings.capture_service_health_stale_after_seconds,
     )
 
+    # SB-117: captures needing clarification
+    try:
+        clarification_row = conn.execute(
+            "SELECT COUNT(*) AS c FROM captures WHERE clarification_status = 'NEEDS_CLARIFICATION'"
+        ).fetchone()
+        captures_needing_clarification = int(clarification_row["c"])
+    except Exception:
+        captures_needing_clarification = 0
+
+    # SB-119: backup timestamps
+    last_successful_backup_at = parse_dt(get_state("last_successful_backup_at"))
+    last_successful_restore_validation_at = parse_dt(get_state("last_successful_restore_validation_at"))
+
     return OperationalStatusSnapshot(
         generated_at=now,
         timezone_name=settings.status_timezone,
@@ -276,6 +293,9 @@ def _query_snapshot(
         capture_service_started_at=service_started_at,
         capture_service_last_heartbeat_at=service_heartbeat_at,
         capture_service_stopped_at=service_stopped_at,
+        captures_needing_clarification=captures_needing_clarification,
+        last_successful_backup_at=last_successful_backup_at,
+        last_successful_restore_validation_at=last_successful_restore_validation_at,
     )
 
 
@@ -303,6 +323,7 @@ def format_operational_status(snapshot: OperationalStatusSnapshot) -> str:
         "Note lifecycle",
         f"  captures filed today: {snapshot.captures_filed_today}",
         f"  captures in inbox: {snapshot.captures_in_inbox}",
+        f"  captures needing clarification: {snapshot.captures_needing_clarification}",
         f"  captures failed: {snapshot.captures_failed}",
         f"  last successful vault write: {_fmt(snapshot.last_successful_vault_write)}",
         "",
@@ -322,5 +343,9 @@ def format_operational_status(snapshot: OperationalStatusSnapshot) -> str:
         f"  capture-service started at: {_fmt(snapshot.capture_service_started_at)}",
         f"  capture-service last heartbeat: {_fmt(snapshot.capture_service_last_heartbeat_at)}",
         f"  capture-service stopped at: {_fmt(snapshot.capture_service_stopped_at)}",
+        "",
+        "Backup",
+        f"  last successful backup: {_fmt(snapshot.last_successful_backup_at)}",
+        f"  last successful restore validation: {_fmt(snapshot.last_successful_restore_validation_at)}",
     ]
     return "\n".join(lines)

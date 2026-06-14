@@ -453,6 +453,76 @@ class Ledger:
             self._normalize_delivery_for_local_full,
         )
 
+    # ------------------------------------------------------------------
+    # SB-117: Clarification methods
+    # ------------------------------------------------------------------
+
+    def record_clarification(
+        self,
+        *,
+        capture_id: str,
+        question: str,
+    ) -> bool:
+        return self._write(
+            "record_clarification",
+            lambda conn: self._record_clarification(conn, capture_id=capture_id, question=question),
+        )
+
+    def resolve_clarification(self, capture_id: str) -> bool:
+        return self._write(
+            "resolve_clarification",
+            lambda conn: self._resolve_clarification(conn, capture_id),
+        )
+
+    def captures_needing_clarification(self) -> list[CaptureRecord]:
+        return self._read(
+            "captures_needing_clarification",
+            self._captures_needing_clarification,
+        )
+
+    def count_needs_clarification(self) -> int:
+        return self._read(
+            "count_needs_clarification",
+            self._count_needs_clarification,
+        )
+
+    # ------------------------------------------------------------------
+    # SB-118: Correction methods
+    # ------------------------------------------------------------------
+
+    def get_capture_by_receipt_message_id(self, receipt_message_id: str) -> CaptureRecord | None:
+        return self._read(
+            "get_capture_by_receipt_message_id",
+            lambda conn: self._get_capture_by_receipt_message_id(conn, receipt_message_id),
+        )
+
+    def record_correction(
+        self,
+        *,
+        capture_id: str,
+        old_note_path: str,
+        new_note_path: str,
+        git_commit_hash: str | None,
+        correction_reason: str | None,
+    ) -> str:
+        return self._write(
+            "record_correction",
+            lambda conn: self._record_correction(
+                conn,
+                capture_id=capture_id,
+                old_note_path=old_note_path,
+                new_note_path=new_note_path,
+                git_commit_hash=git_commit_hash,
+                correction_reason=correction_reason,
+            ),
+        )
+
+    def corrections_for_capture(self, capture_id: str) -> list[dict[str, Any]]:
+        return self._read(
+            "corrections_for_capture",
+            lambda conn: self._corrections_for_capture(conn, capture_id),
+        )
+
     def capture_events(self, capture_id: str) -> list[dict[str, Any]]:
         return self._read(
             "capture_events",
@@ -2012,10 +2082,144 @@ class Ledger:
         )
 
 
+    # ------------------------------------------------------------------
+    # SB-117: Clarification private implementations
+    # ------------------------------------------------------------------
+
+    def _record_clarification(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        capture_id: str,
+        question: str,
+    ) -> bool:
+        now = _iso(_now())
+        cursor = conn.execute(
+            """
+            UPDATE captures
+            SET clarification_status = 'NEEDS_CLARIFICATION',
+                clarification_question = ?,
+                updated_at = ?
+            WHERE capture_id = ? AND status = 'INBOX'
+            """,
+            (question, now, capture_id),
+        )
+        if cursor.rowcount == 0:
+            return False
+        self._append_event(
+            conn,
+            capture_id,
+            "CLARIFICATION_SENT",
+            {"question": question},
+        )
+        return True
+
+    def _resolve_clarification(self, conn: sqlite3.Connection, capture_id: str) -> bool:
+        now = _iso(_now())
+        cursor = conn.execute(
+            """
+            UPDATE captures
+            SET clarification_status = 'RESOLVED',
+                updated_at = ?
+            WHERE capture_id = ? AND clarification_status = 'NEEDS_CLARIFICATION'
+            """,
+            (now, capture_id),
+        )
+        if cursor.rowcount == 0:
+            return False
+        self._append_event(conn, capture_id, "CLARIFICATION_RESOLVED", {})
+        return True
+
+    def _captures_needing_clarification(self, conn: sqlite3.Connection) -> list[CaptureRecord]:
+        rows = conn.execute(
+            "SELECT * FROM captures WHERE clarification_status = 'NEEDS_CLARIFICATION' ORDER BY id"
+        ).fetchall()
+        return [_record_from_row(row) for row in rows]
+
+    def _count_needs_clarification(self, conn: sqlite3.Connection) -> int:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM captures WHERE clarification_status = 'NEEDS_CLARIFICATION'"
+        ).fetchone()
+        return int(row["c"])
+
+    # ------------------------------------------------------------------
+    # SB-118: Correction private implementations
+    # ------------------------------------------------------------------
+
+    def _get_capture_by_receipt_message_id(
+        self, conn: sqlite3.Connection, receipt_message_id: str
+    ) -> CaptureRecord | None:
+        row = conn.execute(
+            "SELECT * FROM captures WHERE receipt_message_id = ?",
+            (receipt_message_id,),
+        ).fetchone()
+        return None if row is None else _record_from_row(row)
+
+    def _record_correction(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        capture_id: str,
+        old_note_path: str,
+        new_note_path: str,
+        git_commit_hash: str | None,
+        correction_reason: str | None,
+    ) -> str:
+        now = _iso(_now())
+        correction_id = f"COR-{_now().strftime('%Y%m%d-%H%M%S')}-{capture_id}"
+        conn.execute(
+            """
+            INSERT INTO corrections
+                (correction_id, capture_id, old_note_path, new_note_path,
+                 git_commit_hash, correction_reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (correction_id, capture_id, old_note_path, new_note_path,
+             git_commit_hash, correction_reason, now),
+        )
+        conn.execute(
+            """
+            UPDATE captures
+            SET derived_note_path = ?, updated_at = ?
+            WHERE capture_id = ?
+            """,
+            (new_note_path, now, capture_id),
+        )
+        self._append_event(
+            conn,
+            capture_id,
+            "CORRECTION_APPLIED",
+            {
+                "correction_id": correction_id,
+                "old_note_path": old_note_path,
+                "new_note_path": new_note_path,
+                "git_commit_hash": git_commit_hash,
+                "correction_reason": correction_reason,
+            },
+        )
+        return correction_id
+
+    def _corrections_for_capture(
+        self, conn: sqlite3.Connection, capture_id: str
+    ) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT correction_id, capture_id, old_note_path, new_note_path,
+                   git_commit_hash, correction_reason, created_at
+            FROM corrections
+            WHERE capture_id = ?
+            ORDER BY id
+            """,
+            (capture_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def _record_from_row(row: sqlite3.Row) -> CaptureRecord:
     def _parse_dt(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value) if value else None
 
+    keys = row.keys()
     return CaptureRecord(
         capture_id=row["capture_id"],
         discord_message_id=row["discord_message_id"],
@@ -2036,9 +2240,11 @@ def _record_from_row(row: sqlite3.Row) -> CaptureRecord:
         receipt_message_id=row["receipt_message_id"],
         derived_note_path=row["derived_note_path"],
         last_error=row["last_error"],
-        retry_attempts=row["retry_attempts"] if "retry_attempts" in row.keys() else 0,
+        retry_attempts=row["retry_attempts"] if "retry_attempts" in keys else 0,
         delivery_commit_hash=row["delivery_commit_hash"],
         delivery_reason_type=row["delivery_reason_type"],
+        clarification_status=row["clarification_status"] if "clarification_status" in keys else None,
+        clarification_question=row["clarification_question"] if "clarification_question" in keys else None,
     )
 
 
