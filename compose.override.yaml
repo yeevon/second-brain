@@ -71,51 +71,58 @@ services:
       - second-brain-local-vault-remote:/remote
     entrypoint:
       - /bin/sh
+    command:
       - -lc
-    command: |
-      set -eu
+      - |
+        set -eu
 
-      mkdir -p /vault /remote
+        mkdir -p /vault /remote
 
-      # Root runs this init container. The final repo is owned by writer-service UID.
-      git config --global --add safe.directory /vault || true
-      git config --global --add safe.directory /remote/repo.git || true
+        # Root runs this init container. The final repo is owned by writer-service UID.
+        git config --global --add safe.directory /vault || true
+        git config --global --add safe.directory /remote/repo.git || true
 
-      if [ ! -d /remote/repo.git ]; then
-        git init --bare -b main /remote/repo.git
-      fi
+        if [ ! -d /remote/repo.git ]; then
+          git init --bare -b main /remote/repo.git
+        fi
 
-      if [ ! -d /vault/.git ]; then
-        git -C /vault init -b main
-      fi
+        if [ ! -d /vault/.git ]; then
+          git -C /vault init -b main
+        fi
 
-      git -C /vault config user.name "Second Brain Writer"
-      git -C /vault config user.email "writer@second-brain.local"
+        git -C /vault config user.name "Second Brain Writer"
+        git -C /vault config user.email "writer@second-brain.local"
 
-      mkdir -p /vault/99_log
+        mkdir -p /vault/99_log
 
-      if ! grep -qxF ".writer.lock" /vault/.gitignore 2>/dev/null; then
-        printf ".writer.lock\n" >> /vault/.gitignore
-      fi
+        if ! grep -qxF ".writer.lock" /vault/.gitignore 2>/dev/null; then
+          printf ".writer.lock\n" >> /vault/.gitignore
+        fi
 
-      touch /vault/99_log/.gitkeep
+        touch /vault/99_log/.gitkeep
 
-      if git -C /vault remote get-url origin >/dev/null 2>&1; then
-        git -C /vault remote set-url origin /remote/repo.git
-      else
-        git -C /vault remote add origin /remote/repo.git
-      fi
+        if git -C /vault remote get-url origin >/dev/null 2>&1; then
+          git -C /vault remote set-url origin /remote/repo.git
+        else
+          git -C /vault remote add origin /remote/repo.git
+        fi
 
-      git -C /vault add .gitignore 99_log/.gitkeep
+        git -C /vault add .gitignore 99_log/.gitkeep
 
-      if ! git -C /vault diff --cached --quiet; then
-        git -C /vault commit -m "chore: initialize local vault"
-      fi
+        if ! git -C /vault diff --cached --quiet; then
+          git -C /vault commit -m "chore: initialize local vault"
+        fi
 
-      # Local-only fake remote. Normal push first; force only repairs mismatched local volumes.
-      git -C /vault push -u origin main || git -C /vault push -u origin main --force
+        # Local-only fake remote. Normal push first; force only repairs mismatched local volumes.
+        git -C /vault push -u origin main || git -C /vault push -u origin main --force
 
-      chown -R 10003:10003 /vault /remote
+        chown -R 10003:10003 /vault /remote
+
+        test -d /vault/.git
+        git -C /vault rev-parse --is-inside-work-tree
+        git -C /vault remote get-url origin | grep -qxF "/remote/repo.git"
+        grep -qxF ".writer.lock" /vault/.gitignore
+        git -C /vault status --porcelain >/dev/null
 
   writer-service:
     build:
@@ -141,7 +148,11 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')"]
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')\" && test \"$GIT_SYNC_ENABLED\" = \"true\" && git -C /opt/vault rev-parse --is-inside-work-tree >/dev/null && git -C /opt/vault remote get-url origin >/dev/null && grep -qxF '.writer.lock' /opt/vault/.gitignore"
+        ]
       interval: 30s
       timeout: 5s
       retries: 5

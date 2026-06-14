@@ -76,16 +76,18 @@ if ! docker exec "$WRITER_CONTAINER" sh -c '
   test "$(printenv GIT_SYNC_ENABLED)" = "true" || {
     echo "GIT_SYNC_ENABLED is not true inside '"$WRITER_CONTAINER"'" >&2; exit 1
   }
-  git -C /opt/vault rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
-    echo "/opt/vault is not a Git repository" >&2; exit 1
+  git -C /opt/vault rev-parse --is-inside-work-tree || {
+    echo "writer-service cannot use /opt/vault as a Git repository" >&2
+    exit 1
   }
-  git -C /opt/vault status --porcelain >/dev/null 2>&1 || {
-    echo "git status failed inside /opt/vault" >&2; exit 1
+  git -C /opt/vault status --porcelain || {
+    echo "git status failed inside writer-service /opt/vault" >&2
+    exit 1
   }
   grep -qxF ".writer.lock" /opt/vault/.gitignore 2>/dev/null || {
     echo ".writer.lock not in vault .gitignore" >&2; exit 1
   }
-' 2>&1; then
+' ; then
   echo ""
   echo "ERROR: writer-service Git-sync preflight failed." >&2
   echo "  Local dev should be initialized by plain: docker compose up -d" >&2

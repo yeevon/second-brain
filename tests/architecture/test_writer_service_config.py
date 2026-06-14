@@ -523,3 +523,22 @@ def test_override_local_vault_init_does_not_auto_stage_entire_vault():
     command = str(svc.get("command", ""))
     assert "git -C /vault add -A" not in command
     assert "git -C /vault add .gitignore 99_log/.gitkeep" in command
+
+
+def test_override_local_vault_init_self_verifies_git_repo():
+    svc = _override_compose()["services"]["local-vault-init"]
+    command = str(svc.get("command", ""))
+
+    assert "test -d /vault/.git" in command
+    assert "git -C /vault rev-parse --is-inside-work-tree" in command
+    assert 'grep -qxF "/remote/repo.git"' in command
+    assert 'grep -qxF ".writer.lock" /vault/.gitignore' in command
+
+
+def test_override_writer_service_healthcheck_verifies_git_vault():
+    svc = _override_compose()["services"]["writer-service"]
+    healthcheck = str(svc.get("healthcheck", {}))
+
+    assert "git -C /opt/vault rev-parse --is-inside-work-tree" in healthcheck
+    assert "git -C /opt/vault remote get-url origin" in healthcheck
+    assert ".writer.lock" in healthcheck
