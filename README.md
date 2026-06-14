@@ -28,11 +28,13 @@ The mode must be set explicitly. Startup fails if it is missing or unsupported.
 6. **Corrections** — `fix: <reason>` as a reply to a receipt, or `fix SB-YYYYMMDD-NNNN: <reason>` as a standalone message, moves a filed note to a new folder. Bare `fix:` with no target is rejected. Correction history is append-only.
 7. **Internal API** — Exposes an authenticated HTTP API inside the process for state transitions and health checks.
 
-### `local-full` only
+### Downstream classification and filing
 
-1. **Classifies** — Sends the text to Gemini in a background worker. Gemini returns structured JSON (folder, title, tags, body, actions).
-2. **Files** — Writes a deterministic Markdown note into the Obsidian vault under the correct folder.
-3. **Clarifications** — When Gemini flags `needs_clarification: true`, the note is filed to `00_inbox/` and a follow-up question is sent via the Discord receipt. The capture stays in `NEEDS_CLARIFICATION` until a reply resolves it.
+Both `local-full` (in-process Gemini worker) and the local Docker full stack / EC2 (`capture-only` + n8n + writer-service) support the steps below. The difference is where the work runs: `local-full` runs classification inside the capture-service process; the `capture-only` modes hand off to n8n and writer-service via webhook.
+
+1. **Classifies** — Gemini returns structured JSON (folder, title, tags, body, actions).
+2. **Files** — Writes a deterministic Markdown note into the vault under the correct folder.
+3. **Clarifications** — When Gemini flags `needs_clarification: true`, the note is filed to `00_inbox/` and a follow-up question is sent via the Discord receipt. The capture remains `INBOX` with `clarification_status = NEEDS_CLARIFICATION` until a user reply resolves it. `secondbrain status` reports unresolved clarifications as a separate count.
 4. **Final receipt** — Edits the original Discord message to show the filed location, inbox reason, or clarification question.
 
 ## Project layout
@@ -92,6 +94,10 @@ deploy/
   test-writer-service.sh             # writer-service regression: health, filing, idempotency, audit
   test-writer-safe-failure.sh        # Git failure injection regression suite
   test-n8n-error-workflow.sh         # n8n error workflow regression suite
+  backup.sh                          # nightly encrypted snapshot (SQLite, vault, n8n data volume)
+  restore-validate.sh                # weekly restore validation into a temporary directory
+  backup.env.example                 # backup environment template
+  second-brain-backup.cron           # cron schedule for backup and restore-validate jobs
   capture-service.env.example
   writer-service.env.example
   README.md                          # EC2 provisioning and deployment guide
@@ -286,7 +292,7 @@ The intake workflow includes explicit error handling at every external boundary:
 
 - **Gemini failures** — HTTP 429/403/5xx and timeouts route to `Schedule Retry (Gemini error)` with `error_type: gemini_http_error` instead of leaking a stale lease. `Classify with Gemini` uses `temperature: 0` and `maxOutputTokens: 2048` for deterministic, compact output.
 - **Invalid classification** — `Valid Classification?` IF node catches empty route or `valid: false` and routes to `Schedule Retry (classifier)` with `error_type: invalid_classifier_output`.
-- **Clarification branch** — `Needs Clarification?` IF node routes to `Record Clarification` after inbox filing, transitioning the capture to `NEEDS_CLARIFICATION` in capture-service.
+- **Clarification branch** — `Needs Clarification?` IF node routes to `Record Clarification` after inbox filing, setting `clarification_status = NEEDS_CLARIFICATION` on the capture in capture-service.
 
 ### Writer-service (SB-114+)
 
@@ -328,7 +334,7 @@ Git failure handling (SB-116): every bad state returns a typed error and preserv
 
 ### Encrypted off-host backups (SB-119+)
 
-Nightly encrypted snapshots cover all durable state: SQLite ledger (via `sqlite3 .backup`, never a raw file copy), the EC2 vault clone, and the n8n data volume. Secrets are excluded or redacted from configuration backups. A weekly restore validation runs into a temporary directory only — it never touches live volumes. `sb status` reports the last successful backup and restore validation timestamps.
+Nightly encrypted snapshots cover all durable state: SQLite ledger (via `sqlite3 .backup`, never a raw file copy), the EC2 vault clone, and the n8n data volume. Secrets are excluded or redacted from configuration backups. A weekly restore validation runs into a temporary directory only — it never touches live volumes. `secondbrain status` reports the last successful backup and restore validation timestamps.
 
 - **`deploy/backup.sh`** — nightly snapshot script.
 - **`deploy/restore-validate.sh`** — restore validation against a temporary location.

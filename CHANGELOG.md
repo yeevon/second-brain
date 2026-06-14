@@ -12,13 +12,13 @@ Completed the full note lifecycle: ambiguous captures ask a clarification questi
 
 ### SB-117 — Clarification handling
 
-When Gemini returns `needs_clarification: true`, the note is filed into `00_inbox/` and a follow-up question is sent to the Discord receipt via the receipt/edit API. The capture transitions to `NEEDS_CLARIFICATION` and remains there until a user reply resolves it.
+When Gemini returns `needs_clarification: true`, the note is filed into `00_inbox/` and a follow-up question is sent to the Discord receipt via the receipt/edit API. The capture remains `INBOX`, with `clarification_status = NEEDS_CLARIFICATION`, until a user reply resolves it.
 
-- **`POST /internal/clarifications/:capture_id`** — records the clarification question and transitions the capture to `NEEDS_CLARIFICATION`. Idempotent: a duplicate request for the same capture returns the existing record.
-- **`src/secondbrain/ledger.py`** — `record_clarification()` write job. Stores the clarification question text, receipt message ID, and timestamp. Enforces that only `INBOX`-status captures can transition to `NEEDS_CLARIFICATION`.
+- **`POST /internal/clarifications/:capture_id`** — records the clarification question and sets `clarification_status = NEEDS_CLARIFICATION` on the capture. Idempotent: a duplicate request for the same capture returns the existing record.
+- **`src/secondbrain/ledger.py`** — `record_clarification()` write job. Stores the clarification question text, receipt message ID, and timestamp. Only `INBOX`-status captures can have a clarification recorded.
 - **`src/secondbrain/capture_service.py`** — `record_clarification()` facade. Correction commands (`fix:`, `fix SB-…:`) detected before persistence and skipped by `_capture_if_allowed` so they are never saved as notes.
 - **`n8n/workflows/second-brain-intake.json`** — `Needs Clarification?` IF node branches after inbox acknowledgement. True branch calls `POST /internal/clarifications/:capture_id` via `Record Clarification` HTTP node.
-- **`secondbrain status`** — unresolved clarifications appear as a separate count; captures in `NEEDS_CLARIFICATION` are excluded from the inbox count.
+- **`secondbrain status`** — unresolved clarifications appear as a separate count alongside the inbox count.
 - Timeout does not delete or reclassify the note. It remains in `00_inbox/` until a reply resolves it.
 
 ### SB-118 — Corrections
@@ -39,7 +39,7 @@ Added nightly encrypted snapshots of all durable state and a weekly restore vali
 - **SQLite backup** — uses `sqlite3 .backup` (WAL-safe) rather than a raw `cp` of the live database file.
 - **Vault and n8n data** — EC2 vault clone and n8n data volume included in each snapshot.
 - **Encryption** — backup output encrypted before leaving the host. Secrets excluded or redacted from configuration backups.
-- **Restore validation** — validates a backup into a temporary directory or container only. Never mounts or touches live volumes.
+- **Restore validation** — validates a backup into a temporary directory only. Never mounts or touches live volumes.
 - **`deploy/backup.sh`** / **`deploy/restore-validate.sh`** — nightly and weekly scripts; both are idempotent and exit non-zero on failure.
 - **`secondbrain status`** — reports last successful backup timestamp and last successful restore validation timestamp.
 
@@ -55,7 +55,7 @@ Several correctness and reliability issues identified during milestone testing w
 - **Gemini error branch** — `Classify with Gemini` is wrapped in a `Gemini OK?` IF node. HTTP 429/403/5xx and timeouts route to `Schedule Retry (Gemini error)` with `error_type: gemini_http_error` instead of leaking a stale lease.
 - **Invalid classification routing** — `Valid Classification?` IF node inserted between `Validate Classification` and `File or Inbox?`. Empty route or `valid: false` routes to `Schedule Retry (classifier)` with `error_type: invalid_classifier_output` rather than silently dropping the execution.
 - **Gemini classifier config** — `temperature: 0` (fully deterministic), `maxOutputTokens: 2048`. Prompt hardened: "Return compact JSON only. No explanation. No markdown. Body under 80 words. At most one action."
-- **Startup order enforced** — n8n healthcheck now probes `POST /rest/login` (HTTP 400 = REST route exists) instead of `GET /` (only proves static server is up). `capture-service` depends on `local-n8n-init: service_completed_successfully` and `writer-service: service_healthy` so `docker compose up -d` cannot start Discord intake before the n8n webhook is registered. `setup_owner()` in `local-n8n-init.py` now hard-fails on HTTP 404 ("REST not ready") and only accepts 200 (created) or 400 (already configured).
+- **Startup order enforced** — `compose.override.yaml` (local dev only) n8n healthcheck now probes `POST /rest/login` (HTTP 400 = REST route exists) instead of `GET /` (only proves static server is up). `capture-service` depends on `local-n8n-init: service_completed_successfully` and `writer-service: service_healthy` so `docker compose up -d` cannot start Discord intake before the n8n webhook is registered. `setup_owner()` in `local-n8n-init.py` now hard-fails on HTTP 404 ("REST not ready") and only accepts 200 (created) or 400 (already configured).
 - **Test environment leakage** — `DOWNSTREAM_DELIVERY_ENABLED=false` added to `BASE_ENV` in capture-only unit tests; `GIT_SYNC_ENABLED=false` added to the autouse fixture in writer-service tests. Both prevent leaked environment variables from producing false failures.
 
 ---
