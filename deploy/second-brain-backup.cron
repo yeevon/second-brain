@@ -1,5 +1,6 @@
 # SB-119: Cron schedule for nightly encrypted backups and weekly restore validation.
-# Install with: crontab -l | cat - second-brain-backup.cron | crontab -
+# Install: cp second-brain-backup.cron /etc/cron.d/second-brain-backup && chmod 644 /etc/cron.d/second-brain-backup
+# This file uses /etc/cron.d format (user column present); do NOT paste into a user crontab.
 # Adjust paths to match your deployment.
 
 # Nightly encrypted snapshot at 02:00 UTC

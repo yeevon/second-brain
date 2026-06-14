@@ -621,6 +621,72 @@
     },
     {
       "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "clarif-needs",
+              "leftValue": "={{ $('Validate Classification').first().json.inbox_reason }}",
+              "rightValue": "needs_clarification",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "clarif-low-conf",
+              "leftValue": "={{ $('Validate Classification').first().json.inbox_reason }}",
+              "rightValue": "low_confidence",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-1117-1117-1117-111711171117",
+      "name": "Needs Clarification?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4100,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://capture-service:8000/internal/clarifications/{{ $('Intake Webhook').first().json.body.capture_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ question: $('Parse Gemini Response').first().json.classification.clarifying_question || 'Please clarify where this belongs.' }) }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-1118-1118-1118-111811181118",
+      "name": "Record Clarification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4340,
+        140
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
+    },
+    {
+      "parameters": {
         "jsCode": "// Normalize writer-service response. On 2xx, unwrap body for downstream nodes.\n// On error, map writer error_type → capture-service taxonomy and use the\n// writer-service's own retryable flag to determine routing.\nconst resp = $input.first().json;\nconst statusCode = resp.statusCode ?? 200;\nconst body = resp.body ?? resp;\n\nconst ERROR_MAP = {\n  'git_fetch_error':        'writer_git_fetch_error',\n  'git_add_error':          'writer_git_add_error',\n  'git_commit_error':       'writer_git_commit_error',\n  'git_push_error':         'writer_git_push_error',\n  'git_push_rejected':      'writer_git_push_rejected',\n  'git_index_locked':       'writer_git_index_locked',\n  'git_merge_conflict':     'writer_git_conflict',\n  'git_worktree_dirty':     'writer_git_worktree_dirty',\n  'path_traversal_attempt': 'writer_path_traversal',\n  'capture_id_duplicate':   'writer_capture_duplicate',\n};\n\nif (statusCode >= 200 && statusCode < 300) {\n  return [{ json: { ...body, _writer_ok: true } }];\n}\n\nconst writerErrorType = body.error_type ?? 'unknown';\nconst mappedErrorType = ERROR_MAP[writerErrorType] ?? 'writer_service_unavailable';\nreturn [{\n  json: {\n    _writer_ok: false,\n    _retryable: body.retryable === true,\n    _error_type: mappedErrorType,\n    _reason_type: 'writer_service_error',\n  }\n}];"
       },
       "id": "eval-writer-file",
@@ -1134,6 +1200,28 @@
         [
           {
             "node": "Writer Error Retryable? (inbox)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Acknowledge Inbox": {
+      "main": [
+        [
+          {
+            "node": "Needs Clarification?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Clarification?": {
+      "main": [
+        [
+          {
+            "node": "Record Clarification",
             "type": "main",
             "index": 0
           }

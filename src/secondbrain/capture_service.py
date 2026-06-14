@@ -5,6 +5,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
+
 from secondbrain.capture_models import (
     CLASSIFYING,
     FAILED,
@@ -80,6 +82,13 @@ class CaptureService:
         # local-full mode processes notes locally; downstream delivery is not applicable
         mode = getattr(settings, "capture_processing_mode", None)
         self._initial_delivery_status = NOT_APPLICABLE if mode == "local-full" else PENDING_FORWARD
+        writer_url = getattr(settings, "writer_service_url", None)
+        writer_token = getattr(settings, "writer_service_token", None)
+        self._writer_client: WriterServiceClient | None = (
+            WriterServiceClient(url=writer_url, token=writer_token)
+            if writer_url and writer_token
+            else None
+        )
 
     @classmethod
     def open(
@@ -762,19 +771,15 @@ class CaptureService:
         new_project: str | None,
         correction_reason: str,
     ) -> dict | None:
-        if self._receipt_client is None:
-            return None
-        writer_client = getattr(self._receipt_client, "writer_client", None)
-        if writer_client is None:
+        if self._writer_client is None:
             return None
         try:
-            result = await writer_client.move_note(
+            return await self._writer_client.move_note(
                 capture_id=capture_id,
                 new_folder=new_folder,
                 new_project=new_project,
                 correction_reason=correction_reason,
             )
-            return result
         except Exception as exc:
             log_metadata(
                 "correction_writer_move_failed",
@@ -1202,3 +1207,37 @@ def _safe_failure_error_type(reason: str) -> str:
         if len(parts) >= 2:
             return parts[1].strip() or "CaptureFailure"
     return "CaptureFailure"
+
+
+_WRITER_TOKEN_HEADER = "X-Writer-Service-Token"
+
+
+class WriterServiceClient:
+    """Calls writer-service directly for note move operations (SB-118)."""
+
+    def __init__(self, *, url: str, token: str, timeout_seconds: int = 30) -> None:
+        self._url = url.rstrip("/")
+        self._token = token
+        self._timeout = timeout_seconds
+
+    async def move_note(
+        self,
+        *,
+        capture_id: str,
+        new_folder: str,
+        new_project: str | None,
+        correction_reason: str,
+    ) -> dict:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.post(
+                f"{self._url}/internal/notes/move",
+                json={
+                    "capture_id": capture_id,
+                    "new_folder": new_folder,
+                    "new_project": new_project,
+                    "correction_reason": correction_reason,
+                },
+                headers={_WRITER_TOKEN_HEADER: self._token},
+            )
+        response.raise_for_status()
+        return response.json()

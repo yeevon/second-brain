@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import sqlite3
 from typing import Any
+import uuid
 
 from secondbrain.capture_models import (
     ALL_DELIVERY_STATUSES,
@@ -2166,7 +2167,7 @@ class Ledger:
         correction_reason: str | None,
     ) -> str:
         now = _iso(_now())
-        correction_id = f"COR-{_now().strftime('%Y%m%d-%H%M%S')}-{capture_id}"
+        correction_id = f"COR-{uuid.uuid4().hex}-{capture_id}"
         conn.execute(
             """
             INSERT INTO corrections
@@ -2180,10 +2181,10 @@ class Ledger:
         conn.execute(
             """
             UPDATE captures
-            SET derived_note_path = ?, updated_at = ?
+            SET derived_note_path = ?, delivery_commit_hash = ?, updated_at = ?
             WHERE capture_id = ?
             """,
-            (new_note_path, now, capture_id),
+            (new_note_path, git_commit_hash, now, capture_id),
         )
         self._append_event(
             conn,
