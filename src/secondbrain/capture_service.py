@@ -797,7 +797,11 @@ class CaptureService:
         content = (message.content or "").strip()
         capture_id_or_sentinel, new_folder, reason = _parse_fix_command(content, message)
         if capture_id_or_sentinel is None:
-            # Bare unthreaded fix: — rejected per spec
+            await message.reply(
+                "Could not identify which capture to update.\n"
+                "Reply directly to a filing receipt with `fix: <correction>`, or include the capture ID:\n"
+                "`fix SB-YYYYMMDD-NNNN: <correction>`"
+            )
             log_metadata("correction_rejected_unthreaded", reason="no_reply_thread_and_no_explicit_id")
             return False
 

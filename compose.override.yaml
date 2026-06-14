@@ -23,6 +23,9 @@ services:
       - |
         touch /var/lib/second-brain/.second-brain-ebs-volume 2>/dev/null || true
         exec /usr/local/bin/secondbrain-entrypoint /app/.venv/bin/python -m secondbrain run
+    environment:
+      WRITER_SERVICE_URL: http://writer-service:8001
+      WRITER_SERVICE_TOKEN: ${WRITER_SERVICE_TOKEN:-dev-writer-service-token-change-me}
     volumes:
       - second-brain-local-data:/var/lib/second-brain
 
