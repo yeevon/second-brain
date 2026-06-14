@@ -25,7 +25,7 @@ The mode must be set explicitly. Startup fails if it is missing or unsupported.
 3. **Persists** — Writes the capture durably to SQLite before doing anything else.
 4. **Receipts** — Sends an immediate Discord confirmation. Receipt text reflects actual delivery state: "Queued for downstream filing" when `DOWNSTREAM_DELIVERY_ENABLED=true`, or "Downstream filing is not enabled yet" when disabled.
 5. **Reconciles** — On startup, replays Discord history to recover any messages missed while the service was offline.
-6. **Corrections** — `fix: <reason>` as a reply to a receipt, or `fix SB-YYYYMMDD-NNNN: <reason>` as a standalone message, moves a filed note to a new folder. Bare `fix:` with no target is rejected. Correction history is append-only.
+6. **Corrections** — In writer-service-backed modes, `fix: <reason>` as a reply to a receipt, or `fix SB-YYYYMMDD-NNNN: <reason>` as a standalone message, moves a filed note to a new folder. Bare `fix:` with no target is rejected. Correction history is append-only.
 7. **Internal API** — Exposes an authenticated HTTP API inside the process for state transitions and health checks.
 
 ### Downstream classification and filing

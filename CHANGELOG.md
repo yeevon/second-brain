@@ -8,7 +8,7 @@ All notable changes to this project are documented here.
 
 **Branch:** `milestone_5`
 
-Completed the full note lifecycle: ambiguous captures ask a clarification question and wait for a reply before filing; filed notes can be corrected by replying to the receipt or supplying an explicit capture ID; the entire corpus — SQLite ledger, vault, and n8n data volume — is backed up nightly to an encrypted off-host snapshot with a weekly restore validation. Several pipeline reliability bugs were also fixed during milestone delivery.
+Completed the full note lifecycle: ambiguous captures are filed to inbox, ask a clarification question, and remain pending until a reply resolves them; filed notes can be corrected by replying to the receipt or supplying an explicit capture ID; the entire corpus — SQLite ledger, vault, and n8n data volume — is backed up nightly to an encrypted off-host snapshot with a weekly restore validation. Several pipeline reliability bugs were also fixed during milestone delivery.
 
 ### SB-117 — Clarification handling
 
