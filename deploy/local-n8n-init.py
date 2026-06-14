@@ -5,15 +5,19 @@ Automated local-dev n8n setup.
 Runs once as the local-n8n-init Compose service after n8n is healthy.
 Uses n8n's internal /rest/ API (N8N_PUBLIC_API_DISABLED=true in local env).
 
+Auth: n8n 2.x uses cookie-based sessions. We POST /rest/login and replay
+the Set-Cookie header automatically via a CookieJar opener.
+
 Steps:
   1. Set up owner account (idempotent — skips if owner already exists)
-  2. Login and obtain JWT
+  2. Login (session cookie stored automatically)
   3. Create four HTTP-header-auth credentials (idempotent)
   4. Import Second Brain - Error Handler (patch credential IDs)
   5. Import Second Brain - Intake (patch credential IDs + error-workflow ref)
   6. Activate the Intake workflow (registers the production webhook)
   7. Verify /webhook/second-brain-intake responds non-404
 """
+import http.cookiejar
 import json
 import os
 import sys
@@ -32,35 +36,37 @@ def _require(key, default=None):
     return val
 
 
-N8N_URL            = os.environ.get("N8N_URL", "http://n8n:5678")
-LOCAL_EMAIL        = os.environ.get("N8N_LOCAL_EMAIL", "admin@second-brain.local")
-LOCAL_PASSWORD     = _require("N8N_LOCAL_PASSWORD")
-LOCAL_FIRST        = os.environ.get("N8N_LOCAL_FIRST_NAME", "Local")
-LOCAL_LAST         = os.environ.get("N8N_LOCAL_LAST_NAME", "Dev")
-CAPTURE_TOKEN      = _require("CAPTURE_SERVICE_INTERNAL_TOKEN")
-WRITER_TOKEN       = _require("WRITER_SERVICE_TOKEN")
-INTAKE_TOKEN       = _require("N8N_INTAKE_WEBHOOK_TOKEN")
-GEMINI_KEY         = os.environ.get("GEMINI_API_KEY", "")
+N8N_URL        = os.environ.get("N8N_URL", "http://n8n:5678")
+LOCAL_EMAIL    = os.environ.get("N8N_LOCAL_EMAIL", "admin@second-brain.local")
+LOCAL_PASSWORD = _require("N8N_LOCAL_PASSWORD")
+LOCAL_FIRST    = os.environ.get("N8N_LOCAL_FIRST_NAME", "Local")
+LOCAL_LAST     = os.environ.get("N8N_LOCAL_LAST_NAME", "Dev")
+CAPTURE_TOKEN  = _require("CAPTURE_SERVICE_INTERNAL_TOKEN")
+WRITER_TOKEN   = _require("WRITER_SERVICE_TOKEN")
+INTAKE_TOKEN   = _require("N8N_INTAKE_WEBHOOK_TOKEN")
+GEMINI_KEY     = _require("GEMINI_API_KEY")
 
 with open("/workflows/second-brain-error-handler.json") as f:
     ERROR_HANDLER_WF = json.load(f)
 with open("/workflows/second-brain-intake.json") as f:
     INTAKE_WF = json.load(f)
 
-_AUTH_TOKEN = None
 
+# ── HTTP helpers (cookie-aware) ───────────────────────────────────────────────
 
-# ── HTTP helpers ──────────────────────────────────────────────────────────────
+_cookie_jar = http.cookiejar.CookieJar()
+_opener = urllib.request.build_opener(
+    urllib.request.HTTPCookieProcessor(_cookie_jar)
+)
+
 
 def _api(method, path, body=None, *, ok_statuses=(200, 201)):
     url = f"{N8N_URL}{path}"
     data = json.dumps(body).encode() if body is not None else None
     headers = {"Content-Type": "application/json"}
-    if _AUTH_TOKEN:
-        headers["Authorization"] = f"Bearer {_AUTH_TOKEN}"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req) as resp:
+        with _opener.open(req) as resp:
             raw = resp.read()
             return resp.status, (json.loads(raw) if raw else {})
     except urllib.error.HTTPError as exc:
@@ -86,7 +92,7 @@ def _unwrap(body):
 # ── Owner setup ───────────────────────────────────────────────────────────────
 
 def setup_owner():
-    status, body = _api("POST", "/rest/owner/setup", {
+    status, _body = _api("POST", "/rest/owner/setup", {
         "firstName": LOCAL_FIRST,
         "lastName": LOCAL_LAST,
         "email": LOCAL_EMAIL,
@@ -101,17 +107,16 @@ def setup_owner():
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 def login():
-    global _AUTH_TOKEN
-    _, body = _api("POST", "/rest/login", {
-        "email": LOCAL_EMAIL,
+    # n8n 2.x login: response body carries the user object; the session
+    # is maintained via the Set-Cookie header, captured by _cookie_jar.
+    status, body = _api("POST", "/rest/login", {
+        "emailOrLdapLoginId": LOCAL_EMAIL,
         "password": LOCAL_PASSWORD,
     })
     data = _unwrap(body)
-    token = data.get("token") if isinstance(data, dict) else None
-    if not token:
-        raise RuntimeError(f"Login returned no token. Response: {body}")
-    _AUTH_TOKEN = token
-    print(f"  Logged in as {LOCAL_EMAIL}")
+    if not isinstance(data, dict) or "email" not in data:
+        raise RuntimeError(f"Login response did not contain user object: {body}")
+    print(f"  Logged in as {data['email']}")
 
 
 # ── Credentials ───────────────────────────────────────────────────────────────
@@ -168,7 +173,13 @@ def import_workflow(wf_json):
 
 
 def activate_workflow(wf_id):
-    _api("POST", f"/rest/workflows/{wf_id}/activate")
+    # n8n 2.x requires versionId in the activate body to prevent race conditions.
+    _, body = _api("GET", f"/rest/workflows/{wf_id}")
+    data = _unwrap(body)
+    version_id = data.get("versionId") if isinstance(data, dict) else None
+    if not version_id:
+        raise RuntimeError(f"Workflow {wf_id} has no versionId: {body}")
+    _api("POST", f"/rest/workflows/{wf_id}/activate", {"versionId": version_id})
     print(f"  Activated workflow id={wf_id}")
 
 
@@ -200,6 +211,11 @@ def verify_webhook():
                 status = resp.status
         except urllib.error.HTTPError as exc:
             status = exc.code
+        if status in (401, 403):
+            raise RuntimeError(
+                f"Intake webhook returned HTTP {status} — "
+                "credential binding or Intake token configuration is broken"
+            )
         if status != 404:
             print(f"  Webhook verified (HTTP {status})")
             return
@@ -251,8 +267,8 @@ def main():
     print("Importing Intake workflow…")
     intake_patches = dict(cred_patches)
     intake_patches["PLACEHOLDER_SECOND_BRAIN_ERROR_HANDLER"] = eh_id
-    intake_json   = patch_json(INTAKE_WF, intake_patches)
-    intake_wf_id  = import_workflow(intake_json)
+    intake_json  = patch_json(INTAKE_WF, intake_patches)
+    intake_wf_id = import_workflow(intake_json)
 
     print("Activating Intake workflow…")
     activate_workflow(intake_wf_id)
