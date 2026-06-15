@@ -77,6 +77,9 @@ services:
     # Bind-mount mode:   LOCAL_UID set  → runs as host user → files owned correctly, no chown needed.
     user: "${LOCAL_UID:-0}:${LOCAL_GID:-0}"
     environment:
+      # HOME=/tmp prevents "could not lock config file //.gitconfig" when running as a
+      # UID that has no home directory entry (e.g. LOCAL_UID=1000 without a passwd entry).
+      HOME: /tmp
       # Passed through so the init script can detect bind-mount vs named-volume mode.
       LOCAL_VAULT_PATH: ${LOCAL_VAULT_PATH:-}
     volumes:
@@ -209,10 +212,10 @@ services:
     cap_drop:
       - ALL
     cap_add:
-      - CHOWN        # entrypoint: chown home dir and SSH keys
-      - DAC_OVERRIDE # entrypoint: groupadd/useradd write to /etc/shadow
-      - SETUID       # gosu: drop from root to runtime UID
-      - SETGID       # gosu: drop from root to runtime GID
+      - CHOWN        # entrypoint: chown SSH key files and home dir to runtime UID
+      - DAC_OVERRIDE # entrypoint: groupadd/useradd write to /etc/group, /etc/passwd
+      - SETUID       # gosu: switch process UID from root to runtime UID
+      - SETGID       # gosu: switch process GID from root to runtime GID
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -230,7 +233,7 @@ secrets:
   n8n_encryption_key:
     file: ${N8N_ENCRYPTION_KEY_FILE:-n8n-encryption-key.local}
   vault_deploy_key:
-    file: ${VAULT_DEPLOY_KEY_FILE:?VAULT_DEPLOY_KEY_FILE is required when GIT_SYNC_ENABLED=true}
+    file: ${VAULT_DEPLOY_KEY_FILE:?VAULT_DEPLOY_KEY_FILE is required (set in .env; see .env.example)}
   github_known_hosts:
     file: ${GITHUB_KNOWN_HOSTS_FILE:-deploy/github_known_hosts}
 

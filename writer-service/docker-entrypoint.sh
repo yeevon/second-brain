@@ -38,4 +38,17 @@ chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${RUNTIME_HOME}"
 export HOME="${RUNTIME_HOME}"
 export GIT_SSH_COMMAND="ssh -i ${RUNTIME_HOME}/.ssh/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=${RUNTIME_HOME}/.ssh/known_hosts -o StrictHostKeyChecking=yes"
 
+if [ "${GIT_SYNC_ENABLED:-true}" = "true" ]; then
+  if [ ! -f "${RUNTIME_HOME}/.ssh/id_ed25519" ]; then
+    echo "ERROR: GIT_SYNC_ENABLED=true but deploy key is missing at ${RUNTIME_HOME}/.ssh/id_ed25519" >&2
+    echo "  Set VAULT_DEPLOY_KEY_FILE in .env to point at your GitHub deploy key." >&2
+    exit 1
+  fi
+  if [ ! -f "${RUNTIME_HOME}/.ssh/known_hosts" ]; then
+    echo "ERROR: GIT_SYNC_ENABLED=true but known_hosts is missing at ${RUNTIME_HOME}/.ssh/known_hosts" >&2
+    echo "  Set GITHUB_KNOWN_HOSTS_FILE in .env or ensure deploy/github_known_hosts exists." >&2
+    exit 1
+  fi
+fi
+
 exec gosu "${RUNTIME_UID}:${RUNTIME_GID}" "$@"
