@@ -351,6 +351,14 @@ Milestone 6 adds scheduled n8n review workflows that post Discord summaries from
 - **Activation** — both scheduled workflows are imported inactive. Bind the Capture Service Token credential and configure `DISCORD_DIGEST_WEBHOOK_URL` in n8n before activating them.
 - **No-wipe updates** — local `docker compose up -d --build` runs `local-n8n-init`, which updates all four local workflows in place by existing ID. EC2/staging bootstrap updates Intake, Daily Digest, and Weekly Review in place; Error Handler is imported only when missing.
 
+### Intake pipeline reliability
+
+The intake workflow includes explicit error handling at every external boundary:
+
+- **Gemini failures** — HTTP 429/403/5xx and timeouts route to `Schedule Retry (Gemini error)` with `error_type: gemini_http_error` instead of leaking a stale lease. `Classify with Gemini` uses `temperature: 0` and `maxOutputTokens: 2048` for deterministic, compact output.
+- **Invalid classification** — `Valid Classification?` IF node catches empty route or `valid: false` and routes to `Schedule Retry (classifier)` with `error_type: invalid_classifier_output`.
+- **Clarification branch** — `Needs Clarification?` IF node routes to `Record Clarification` after inbox filing, setting `clarification_status = NEEDS_CLARIFICATION` on the capture in capture-service.
+
 ### Writer-service (SB-114+)
 
 `writer-service` is a standalone FastAPI container (port 8001, never published to the host) that is the sole vault writer. The container runs as the host user UID when `LOCAL_UID` is set, or as UID 10003 by default, via a gosu entrypoint that creates the runtime user dynamically at start. n8n sends classified captures to `POST /internal/notes/file`; writer-service renders a deterministic Markdown note, writes it to the vault, appends an audit event to `99_log/events.ndjson`, and returns the real filesystem note path. capture-service then edits the Discord receipt to show the filed location.
