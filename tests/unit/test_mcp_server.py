@@ -421,8 +421,26 @@ class TestVaultPreflight:
         (tmp_path / "note.md").write_text("initial")
         subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
         subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)
-        # Make it dirty
+        # Make a tracked file dirty
         (tmp_path / "note.md").write_text("modified")
         err = _vault_preflight(tmp_path)
         assert err is not None
         assert "stale" in err or "uncommitted" in err
+
+    def test_untracked_obsidian_files_do_not_trigger_warning(self, tmp_path):
+        """Obsidian writes untracked workspace/cache files; preflight must not block on them."""
+        import subprocess
+        subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, capture_output=True)
+        (tmp_path / "note.md").write_text("content")
+        subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)
+        # Simulate Obsidian writing untracked files
+        obsidian = tmp_path / ".obsidian"
+        obsidian.mkdir()
+        (obsidian / "workspace.json").write_text("{}")
+        (tmp_path / ".trash").mkdir()
+        (tmp_path / ".trash" / "old-note.md").write_text("deleted")
+        err = _vault_preflight(tmp_path)
+        assert err is None

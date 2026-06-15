@@ -74,6 +74,9 @@ services:
     container_name: second-brain-local-vault-init
     restart: "no"
     user: "0:0"
+    environment:
+      # Passed through so the init script can detect bind-mount vs named-volume mode.
+      LOCAL_VAULT_PATH: ${LOCAL_VAULT_PATH:-}
     volumes:
       - ${LOCAL_VAULT_PATH:-second-brain-local-vault}:/vault
       - second-brain-local-vault-remote:/remote
@@ -86,13 +89,8 @@ services:
 
         mkdir -p /vault /remote
 
-        # Root runs this init container. The final repo is owned by writer-service UID.
         git config --global --add safe.directory /vault || true
         git config --global --add safe.directory /remote/repo.git || true
-
-        if [ ! -d /remote/repo.git ]; then
-          git init --bare -b main /remote/repo.git
-        fi
 
         if [ ! -d /vault/.git ]; then
           git -C /vault init -b main
@@ -109,26 +107,44 @@ services:
 
         touch /vault/99_log/.gitkeep
 
-        if git -C /vault remote get-url origin >/dev/null 2>&1; then
-          git -C /vault remote set-url origin /remote/repo.git
+        if [ -n "${LOCAL_VAULT_PATH:-}" ]; then
+          # Bind-mount mode: /vault is a real host directory.
+          # Skip remote rewrite, fake-remote push, and chown — all three
+          # would corrupt a GitHub-backed or Obsidian vault.
+          git -C /vault add .gitignore 99_log/.gitkeep 2>/dev/null || true
+          if ! git -C /vault diff --cached --quiet 2>/dev/null; then
+            git -C /vault commit -m "chore: initialize local vault"
+          fi
         else
-          git -C /vault remote add origin /remote/repo.git
+          # Named-volume mode: init the fake local bare remote and push.
+          # Root owns the container volume, so chown to writer-service UID.
+          if [ ! -d /remote/repo.git ]; then
+            git init --bare -b main /remote/repo.git
+          fi
+
+          if git -C /vault remote get-url origin >/dev/null 2>&1; then
+            git -C /vault remote set-url origin /remote/repo.git
+          else
+            git -C /vault remote add origin /remote/repo.git
+          fi
+
+          git -C /vault add .gitignore 99_log/.gitkeep
+
+          if ! git -C /vault diff --cached --quiet; then
+            git -C /vault commit -m "chore: initialize local vault"
+          fi
+
+          # Local-only fake remote. Normal push first; force only repairs mismatched local volumes.
+          git -C /vault push -u origin main || git -C /vault push -u origin main --force
+
+          chown -R 10003:10003 /vault /remote
         fi
-
-        git -C /vault add .gitignore 99_log/.gitkeep
-
-        if ! git -C /vault diff --cached --quiet; then
-          git -C /vault commit -m "chore: initialize local vault"
-        fi
-
-        # Local-only fake remote. Normal push first; force only repairs mismatched local volumes.
-        git -C /vault push -u origin main || git -C /vault push -u origin main --force
-
-        chown -R 10003:10003 /vault /remote
 
         test -d /vault/.git
         git -C /vault rev-parse --is-inside-work-tree
-        git -C /vault remote get-url origin | grep -qxF "/remote/repo.git"
+        if [ -z "${LOCAL_VAULT_PATH:-}" ]; then
+          git -C /vault remote get-url origin | grep -qxF "/remote/repo.git"
+        fi
         grep -qxF ".writer.lock" /vault/.gitignore
         git -C /vault status --porcelain >/dev/null
 
@@ -163,6 +179,10 @@ services:
     depends_on:
       local-vault-init:
         condition: service_completed_successfully
+    # Run as host UID/GID when LOCAL_VAULT_PATH is a bind mount so the
+    # container can write to a host-owned vault without permission errors.
+    # Falls back to the image's default UID 10003 for named-volume mode.
+    user: "${LOCAL_UID:-10003}:${LOCAL_GID:-10003}"
     environment:
       WRITER_SERVICE_TOKEN: ${WRITER_SERVICE_TOKEN:-dev-writer-service-token-change-me}
       VAULT_PATH: /opt/vault

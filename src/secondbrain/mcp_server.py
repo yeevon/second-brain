@@ -85,7 +85,7 @@ def _vault_preflight(vault_path: Path | None) -> str | None:
         return f"vault path does not exist: {vault_path}"
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "status", "--porcelain", "--untracked-files=no"],
             cwd=vault_path,
             capture_output=True,
             text=True,
@@ -269,7 +269,7 @@ def _do_get_sync_status(ledger_path: Path | None, vault_path: Path | None) -> di
     if vault_path is not None and vault_path.exists():
         try:
             git_status = subprocess.run(
-                ["git", "status", "--porcelain"],
+                ["git", "status", "--porcelain", "--untracked-files=no"],
                 cwd=vault_path,
                 capture_output=True,
                 text=True,
