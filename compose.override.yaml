@@ -73,7 +73,9 @@ services:
     image: alpine/git:latest
     container_name: second-brain-local-vault-init
     restart: "no"
-    user: "0:0"
+    # Named-volume mode: LOCAL_UID unset → runs as root → can chown to 10003.
+    # Bind-mount mode:   LOCAL_UID set  → runs as host user → files owned correctly, no chown needed.
+    user: "${LOCAL_UID:-0}:${LOCAL_GID:-0}"
     environment:
       # Passed through so the init script can detect bind-mount vs named-volume mode.
       LOCAL_VAULT_PATH: ${LOCAL_VAULT_PATH:-}
@@ -109,8 +111,18 @@ services:
 
         if [ -n "${LOCAL_VAULT_PATH:-}" ]; then
           # Bind-mount mode: /vault is a real host directory.
-          # Skip remote rewrite, fake-remote push, and chown — all three
-          # would corrupt a GitHub-backed or Obsidian vault.
+          # Require an existing git origin so that writer-service healthcheck
+          # (git remote get-url origin) passes. Fail loudly — a silent missing
+          # origin would let the init succeed but break the healthcheck later.
+          if ! git -C /vault remote get-url origin >/dev/null 2>&1; then
+            echo "ERROR: LOCAL_VAULT_PATH bind mode requires a git repo with an 'origin' remote." >&2
+            echo "  Set one up on the host before starting the stack:" >&2
+            echo "    git -C '${LOCAL_VAULT_PATH}' init -b main" >&2
+            echo "    git -C '${LOCAL_VAULT_PATH}' remote add origin <url-or-path>" >&2
+            exit 1
+          fi
+          # Skip remote rewrite, fake-remote push, and chown — all three would
+          # corrupt a GitHub-backed vault or change host file ownership.
           git -C /vault add .gitignore 99_log/.gitkeep 2>/dev/null || true
           if ! git -C /vault diff --cached --quiet 2>/dev/null; then
             git -C /vault commit -m "chore: initialize local vault"
