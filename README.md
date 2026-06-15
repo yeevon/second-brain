@@ -92,7 +92,8 @@ writer-service/
     integration/                     # filing, idempotent replay, inbox routing, Git sync, Git failures
 
 writer-service/
-  Dockerfile                         # Python 3.13-slim, UID 10003, port 8001
+  Dockerfile                         # Python 3.13-slim, gosu, port 8001 (runtime UID from LOCAL_UID)
+  docker-entrypoint.sh               # creates runtime user, copies SSH secrets, execs gosu
   src/writerservice/
     main.py                          # FastAPI app, auth middleware, /health and /internal/notes/file
     config.py                        # GIT_SYNC_ENABLED, VAULT_PATH, WRITER_SERVICE_TOKEN
@@ -101,7 +102,7 @@ writer-service/
     vault.py                         # folder enum → physical directory mapping, path validation
     audit.py                         # append-only 99_log/events.ndjson writes
     flock.py                         # WriterLock — kernel-managed OS advisory flock (fcntl.LOCK_EX)
-    git_ops.py                       # GitVaultOps — fetch, merge, write, add, commit, push sequence
+    git_ops.py                       # fetch, merge, write, add, commit, push sequence
     git_errors.py                    # typed Git-layer error classes
   tests/
     unit/                            # auth, validation, Markdown generation, idempotency, flock, git_ops
