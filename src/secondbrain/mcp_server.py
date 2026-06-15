@@ -4,7 +4,8 @@ Exposes vault and ledger data as MCP tools with path-root enforcement,
 result limits, no mutation tools, and a sync preflight before queries.
 
 Run via: brain-mcp (configured in pyproject.toml)
-Required env vars: LEDGER_PATH, VAULT_PATH (for vault tools)
+Required env vars: VAULT_PATH (for vault tools)
+Optional env vars: LEDGER_PATH (only used by get_sync_status)
 """
 from __future__ import annotations
 
@@ -34,11 +35,9 @@ server = Server("second-brain-vault")
 # ---------------------------------------------------------------------------
 
 
-def _ledger_path() -> Path:
+def _ledger_path() -> Path | None:
     raw = os.getenv("LEDGER_PATH", "").strip()
-    if not raw:
-        raise RuntimeError("LEDGER_PATH is required")
-    return Path(raw)
+    return Path(raw) if raw else None
 
 
 def _vault_path() -> Path | None:
@@ -86,7 +85,7 @@ def _vault_preflight(vault_path: Path | None) -> str | None:
         return f"vault path does not exist: {vault_path}"
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "status", "--porcelain", "--untracked-files=no"],
             cwd=vault_path,
             capture_output=True,
             text=True,
@@ -242,15 +241,15 @@ def _do_list_open_tasks(
     return scan_open_task_list(vault_path, project=project, limit=limit)
 
 
-def _do_get_sync_status(ledger_path: Path, vault_path: Path | None) -> dict:
+def _do_get_sync_status(ledger_path: Path | None, vault_path: Path | None) -> dict:
     result: dict[str, Any] = {
-        "ledger_path": str(ledger_path),
+        "ledger_path": str(ledger_path) if ledger_path else None,
         "vault_path": str(vault_path) if vault_path else None,
-        "ledger_exists": ledger_path.exists(),
+        "ledger_exists": ledger_path.exists() if ledger_path else False,
     }
 
     # Read last sync timestamps from ledger
-    if ledger_path.exists():
+    if ledger_path and ledger_path.exists():
         try:
             conn = _open_ledger(ledger_path)
             result["last_successful_reconciliation_at"] = _ledger_system_state(
@@ -270,7 +269,7 @@ def _do_get_sync_status(ledger_path: Path, vault_path: Path | None) -> dict:
     if vault_path is not None and vault_path.exists():
         try:
             git_status = subprocess.run(
-                ["git", "status", "--porcelain"],
+                ["git", "status", "--porcelain", "--untracked-files=no"],
                 cwd=vault_path,
                 capture_output=True,
                 text=True,
@@ -361,10 +360,9 @@ async def list_tools() -> list[Tool]:
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     vault = _vault_path()
-    ledger = _ledger_path()
 
     if name == "get_sync_status":
-        data = _do_get_sync_status(ledger, vault)
+        data = _do_get_sync_status(_ledger_path(), vault)
         return [TextContent(type="text", text=json.dumps(data, indent=2, default=str))]
 
     # Sync preflight for all vault tools
