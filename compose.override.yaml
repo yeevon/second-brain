@@ -191,11 +191,9 @@ services:
     depends_on:
       local-vault-init:
         condition: service_completed_successfully
-    # Run as host UID/GID when LOCAL_VAULT_PATH is a bind mount so the
-    # container can write to a host-owned vault without permission errors.
-    # Falls back to the image's default UID 10003 for named-volume mode.
-    user: "${LOCAL_UID:-10003}:${LOCAL_GID:-10003}"
     environment:
+      LOCAL_UID: ${LOCAL_UID:-10003}
+      LOCAL_GID: ${LOCAL_GID:-10003}
       WRITER_SERVICE_TOKEN: ${WRITER_SERVICE_TOKEN:-dev-writer-service-token-change-me}
       VAULT_PATH: /opt/vault
       AUDIT_LOG_PATH: /opt/vault/99_log/events.ndjson
@@ -203,10 +201,18 @@ services:
     volumes:
       - ${LOCAL_VAULT_PATH:-second-brain-local-vault}:/opt/vault
       - second-brain-local-vault-remote:/remote
+    secrets:
+      - vault_deploy_key
+      - github_known_hosts
     networks:
       - backend
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN        # entrypoint: chown home dir and SSH keys
+      - DAC_OVERRIDE # entrypoint: groupadd/useradd write to /etc/shadow
+      - SETUID       # gosu: drop from root to runtime UID
+      - SETGID       # gosu: drop from root to runtime GID
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -223,6 +229,10 @@ services:
 secrets:
   n8n_encryption_key:
     file: ${N8N_ENCRYPTION_KEY_FILE:-n8n-encryption-key.local}
+  vault_deploy_key:
+    file: ${VAULT_DEPLOY_KEY_FILE:?VAULT_DEPLOY_KEY_FILE is required when GIT_SYNC_ENABLED=true}
+  github_known_hosts:
+    file: ${GITHUB_KNOWN_HOSTS_FILE:-deploy/github_known_hosts}
 
 volumes:
   second-brain-local-data:

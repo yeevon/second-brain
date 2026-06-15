@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,8 @@ from writerservice.config import get_settings
 from writerservice.git_errors import CaptureDuplicateError, WriterError
 from writerservice.vault import check_vault_writable
 from writerservice.writer import DuplicateCaptureError, VaultWriter
+
+logger = logging.getLogger(__name__)
 
 # Matches both unquoted (`status: open`) and quoted (`status: "open"`) action status lines.
 _OPEN_STATUS_LINE_RE = re.compile(r'^    status: "?open"?\s*$', re.MULTILINE)
@@ -51,6 +54,13 @@ def _build_app() -> FastAPI:
 
     @app.exception_handler(WriterError)
     async def writer_error_handler(request: Request, exc: WriterError) -> JSONResponse:
+        logger.error(
+            "WriterError %s (http=%s retryable=%s): %s",
+            exc.error_type,
+            exc.http_status,
+            exc.retryable,
+            exc,
+        )
         return JSONResponse(
             status_code=exc.http_status,
             content={
