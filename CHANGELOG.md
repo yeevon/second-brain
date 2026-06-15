@@ -4,6 +4,102 @@ All notable changes to this project are documented here.
 
 ---
 
+## v1.0.8 — MCP gap: host vault access and writer-service hardening
+
+**Branch:** `mcp_gap`
+
+Fixed the architectural gap where `brain-mcp` could not access the vault because it lived in a Docker named volume invisible to host AI clients. Added a bind-mount mode so the host vault is directly visible to Obsidian and `brain-mcp` without any Docker volume copy. Hardened writer-service runtime identity, SSH key handling, and error visibility.
+
+### Host vault bind-mount mode (`LOCAL_VAULT_PATH`)
+
+When `LOCAL_VAULT_PATH` is set, writer-service and vault-init bind-mount the host directory instead of using the Docker named volume. Files created in the vault are owned by the host user (`LOCAL_UID`/`LOCAL_GID`), making the vault directly usable by Obsidian and `brain-mcp` on the host without extra copy steps.
+
+- **`compose.override.yaml` — `local-vault-init`** — branched init script: bind-mount mode skips remote rewrite, fake-remote push, and chown; requires a pre-configured `origin` remote and fails loudly if missing. Named-volume mode is unchanged. Added `HOME: /tmp` to environment to prevent `git config --global` from failing with a permission error when running as a UID that has no home directory entry.
+- **`.env.example`** — `LOCAL_VAULT_PATH`, `LOCAL_UID`, `LOCAL_GID`, `GIT_SYNC_ENABLED`, `VAULT_DEPLOY_KEY_FILE`, and `GITHUB_KNOWN_HOSTS_FILE` all documented with explanation comments.
+- **`deploy/github_known_hosts`** — pinned GitHub SSH host keys (via `ssh-keyscan github.com`); default value of `GITHUB_KNOWN_HOSTS_FILE`.
+- **`compose.mcp-local.yaml`** — dev-only optional `mcp-service` profile for keeping a container alive for `docker exec` MCP testing.
+
+### MCP server hardening
+
+- **`src/secondbrain/mcp_server.py`** — `LEDGER_PATH` is now optional. `_ledger_path()` returns `Path | None`; `call_tool()` no longer eagerly validates it. Vault tools (`search_notes`, `read_note`, `list_recent_notes`, `list_open_tasks`) work with only `VAULT_PATH` set. `get_sync_status` reports `ledger_exists: false` when the ledger path is unset. Vault preflight switches to `git status --porcelain --untracked-files=no` so Obsidian's `.obsidian/` directory no longer triggers a stale-data warning.
+- **`src/secondbrain/mcp_server.py` — `read_note`** — rejects non-markdown paths and hidden files (paths starting with `.`) with a clear error.
+- **`tests/unit/test_mcp_server.py`** — `TestLedgerPath` (3 tests), `TestGetSyncStatus` (4 tests), and `test_untracked_obsidian_files_do_not_trigger_warning` added. 50 tests total.
+
+### Writer-service: dynamic runtime identity via gosu
+
+Replaced the static `USER 10003` Dockerfile directive with a gosu-based entrypoint. The runtime user is created at container start from `LOCAL_UID`/`LOCAL_GID`, so vault files are owned by the correct host user in bind-mount mode.
+
+- **`writer-service/Dockerfile`** — removed static `groupadd`/`useradd`/`chown`/`USER 10003`. Added `gosu` to the apt install list. Entrypoint changed to `writer-entrypoint`.
+- **`writer-service/docker-entrypoint.sh`** (new) — creates group and user at runtime UID/GID; copies `vault_deploy_key` and `github_known_hosts` Docker secrets to `~/.ssh/` with correct permissions; exports `HOME` and `GIT_SSH_COMMAND`; runs `git config --global safe.directory /opt/vault` as the runtime user; then drops privileges via `exec gosu "${RUNTIME_UID}:${RUNTIME_GID}"`. Fails fast with a clear error message if the SSH key or known_hosts file is missing when `GIT_SYNC_ENABLED=true`.
+- **`compose.override.yaml` — `writer-service`** — removed `user:` field; added `LOCAL_UID`/`LOCAL_GID` environment variables, `vault_deploy_key` and `github_known_hosts` secrets, and `cap_add: [CHOWN, DAC_OVERRIDE, SETUID, SETGID]` alongside existing `cap_drop: ALL`.
+- **`compose.override.yaml` — healthcheck** — Git commands now run as `gosu "$${LOCAL_UID:-10003}:$${LOCAL_GID:-10003}"` so Git sees the vault as owned by its runner, not root.
+
+### Writer-service: git_ops and error visibility
+
+- **`writer-service/src/writerservice/git_ops.py`** — `git fetch` and `git push` error messages now include stderr so the failure reason is visible in logs. `check_working_tree_clean` uses `git status --porcelain --untracked-files=no` to prevent `99_log/events.ndjson` and Obsidian-managed files from triggering a false dirty-state 503.
+- **`writer-service/src/writerservice/main.py`** — `writer_error_handler` now logs every `WriterError` via `logger.error` before returning the JSON response. Previously all 503/409 errors were silently swallowed with no server-side log line.
+
+### CaptureService digest snapshot facade
+
+- **`src/secondbrain/capture_service.py`** — added `digest_daily_snapshot()` and `digest_weekly_snapshot()` public facade methods delegating to the ledger through the job-queue path used by all other write-safe reads.
+
+---
+
+## v1.0.7 — Milestone 6: Digests, vault-pull, and MCP server
+
+**Branch:** `milestone_6`
+
+Added four new capabilities: a daily Discord digest of capture activity, a weekly AI-assisted review, a pull-only vault sync wrapper, and a read-only MCP server for querying the vault and ledger from an AI assistant.
+
+### SB-120 — Daily digest
+
+Adds a scheduled n8n workflow that fires at 07:00 UTC and posts a Discord message summarising the last 24 hours of capture activity.
+
+- **`GET /internal/digest/daily`** — new internal endpoint (requires `X-Second-Brain-Internal-Token`). Returns new captures, filed notes, inbox backlog, captures awaiting clarification, open task count, terminal failures, retry events, sensitive rejections, and attachment warnings. Open task count is sourced from writer-service (`GET /internal/vault/stats/open-tasks`) if available, then from a direct vault scan, then `null`.
+- **`src/secondbrain/digest.py`** — `scan_open_tasks()` and `scan_open_task_list()` vault scanners. Handle both quoted (`status: "open"`) and unquoted (`status: open`) action status values; writer-service renders the quoted form via `yaml_scalar = json.dumps`.
+- **`src/secondbrain/ledger.py`** — `daily_digest_snapshot()` read method.
+- **`n8n/workflows/second-brain-daily-digest.json`** — 4-node workflow: Schedule Trigger → Get Daily Digest → Format Digest Message (Code) → Send to Discord. Discord URL sourced from n8n workflow variable `DISCORD_DIGEST_WEBHOOK_URL`. All credential IDs are `PLACEHOLDER_*`; inactive by default.
+
+### SB-121 — Weekly review
+
+Adds a scheduled n8n workflow that fires at 08:00 UTC every Monday and posts a Discord review including Gemini-generated priorities.
+
+- **`GET /internal/digest/weekly`** — new internal endpoint. Returns 7-day window counts for new captures, filed notes, tasks created, actions completed, decisions, inbox backlog, corrections, failures, retries, and sensitive rejections. Outstanding task count sourced the same way as daily. Task/decision counts are populated when n8n sends `classification` in the `acknowledge-filed` / `acknowledge-inbox` callback (see below).
+- **`src/secondbrain/ledger.py`** — `weekly_digest_snapshot()` read method.
+- **`n8n/workflows/second-brain-weekly-review.json`** — 6-node workflow: Schedule Trigger → Get Weekly Digest → Prepare AI Priorities Input (Code) → Generate AI Priorities (Gemini HTTPS) → Format Review Message (Code) → Send to Discord. AI prompt is grounded in numbers only; output labelled `AI-GENERATED PRIORITIES`.
+- **`src/secondbrain/api_models.py`** — `DailyDigestResponse` and `WeeklyDigestResponse` Pydantic models.
+
+### SB-121 fix — Classification stored on acknowledge-filed / acknowledge-inbox
+
+The n8n intake workflow sends the Gemini classification JSON in `acknowledge-filed` and `acknowledge-inbox` callbacks so that `classification_json` is reliably stored in the ledger. Previously `classification_json` was never set in n8n mode, making task/decision counts always zero.
+
+- **`src/secondbrain/api_models.py`** — `AcknowledgeFiledRequest` and `AcknowledgeInboxRequest` gain an optional `classification: dict | None` field.
+- **`src/secondbrain/ledger.py`** — `mark_filed()` and `mark_inbox()` accept `classification_json`; `_mark_delivery_terminal()` writes it to the database when provided.
+- **`src/secondbrain/capture_service.py`** — `acknowledge_delivery_filed()` and `acknowledge_delivery_inbox()` thread `classification_json` through.
+- **`n8n/workflows/second-brain-intake.json`** — `Acknowledge Filed` and `Acknowledge Inbox` nodes switched to JSON body mode and include `classification: $('Parse Gemini Response').first().json.classification`.
+
+### SB-122 — Vault-pull CLI
+
+Adds a `vault-pull` script that performs a pull-only git sync of the Obsidian vault.
+
+- **`src/secondbrain/vault_pull.py`** — `pull_vault(vault_path)`: checks vault path exists → verifies clean worktree (exits 2 on dirty) → `git fetch origin` → `git merge --ff-only origin/main`. Fails visibly on every error; never force-merges or auto-resolves conflicts.
+- **`pyproject.toml`** — `vault-pull` script entry point.
+
+### SB-123 — Read-only MCP server
+
+Adds a `brain-mcp` stdio server exposing five read-only vault and ledger tools.
+
+- **`src/secondbrain/mcp_server.py`** — Tools: `search_notes`, `read_note`, `list_recent_notes`, `list_open_tasks`, `get_sync_status`. Path-root enforcement via `_enforce_path()` blocks traversal. Result limit clamped to [1, 100]. `_vault_preflight()` checks: VAULT_PATH configured → path exists → git worktree clean (dirty vault triggers a stale-data warning).
+- **`writer-service/src/writerservice/main.py`** — `GET /internal/vault/stats/open-tasks` endpoint returns open action count; used by capture-service digest endpoints so vault access stays within writer-service.
+- **`pyproject.toml`** — `brain-mcp` script entry point; `mcp>=1.0.0` dependency.
+
+### Bootstrap updates
+
+- **`deploy/bootstrap-n8n.sh`** — imports Daily Digest and Weekly Review on EC2; Steps 3 & 4 added to manual instructions.
+- **`deploy/local-n8n-init.py`** — imports Daily Digest and Weekly Review into local dev n8n (inactive; no activation since they are schedule-triggered).
+
+---
+
 ## v1.0.5 — Milestone 5: End-to-end note lifecycle
 
 **Branch:** `milestone_5`

@@ -16,27 +16,21 @@
       "name": "Schedule Trigger",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [
-        260,
-        300
-      ]
+      "position": [260, 300]
     },
     {
       "parameters": {
         "method": "GET",
-        "url": "http://capture-service:8000/internal/brief/weekly",
+        "url": "http://capture-service:8000/internal/digest/weekly",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {}
       },
       "id": "wr000002-0002-0002-0002-000200020002",
-      "name": "Get Weekly Brief",
+      "name": "Get Weekly Digest",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [
-        480,
-        300
-      ],
+      "position": [480, 300],
       "credentials": {
         "httpHeaderAuth": {
           "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
@@ -46,16 +40,13 @@
     },
     {
       "parameters": {
-        "jsCode": "const d = $input.first().json;\nconst openCount = (d.still_open ?? []).length;\nconst accomplishedCount = (d.accomplished ?? []).length;\n\nlet weekSummary = `Week: ${d.week_start} → ${d.week_end}\\n`;\nweekSummary += `Accomplished: ${accomplishedCount} item(s)\\n`;\n\nif (accomplishedCount > 0) {\n  weekSummary += (d.accomplished ?? []).slice(0, 10).map(a => {\n    const proj = a.project ? ` [${a.project}]` : '';\n    return `  - ${a.title}${proj}`;\n  }).join('\\n') + '\\n';\n}\n\nif ((d.decisions ?? []).length > 0) {\n  weekSummary += `Decisions made: ${d.decisions.length}\\n`;\n  weekSummary += d.decisions.slice(0, 5).map(dc => `  - ${dc.title}`).join('\\n') + '\\n';\n}\n\nweekSummary += `Still open: ${openCount} task(s)\\n`;\nif (openCount > 0) {\n  const highPri = (d.still_open ?? []).filter(t => t.priority === 'high');\n  const shown = highPri.length > 0 ? highPri : (d.still_open ?? []);\n  weekSummary += shown.slice(0, 10).map(t => {\n    const proj = t.project ? ` [${t.project}]` : '';\n    const pri = t.priority === 'high' ? ' [HIGH]' : '';\n    return `  - ${t.title}${proj}${pri}`;\n  }).join('\\n') + '\\n';\n}\n\nreturn [{\n  json: {\n    weekSummary,\n    prompt: `You are a personal productivity advisor for a software engineering student.\\n\\nBased on this week's Second Brain activity, suggest 3-5 specific focus priorities for next week.\\nBe grounded in the explicit state of open tasks and accomplishments. Do not infer completion from prose.\\n\\n${weekSummary}\\n\\nReturn numbered priorities only. No preamble.`\n  }\n}];"
+        "jsCode": "// Prepare a structured summary for Gemini AI priorities analysis.\n// Only pass explicit state-change counts — never raw capture text.\nconst d = $input.first().json;\n\nlet weekSummary = [\n  `Weekly capture data (last ${d.window_days} days):`,\n  `- New captures: ${d.new_captures_count}`,\n  `- Filed notes: ${d.filed_notes_count}`,\n  `- Tasks created: ${d.created_tasks_count}`,\n  `- Actions completed (done/fix): ${d.completed_actions_count}`,\n  `- Decisions recorded: ${d.decisions_count}`,\n  `- Inbox backlog: ${d.inbox_backlog_count}`,\n  `- Corrections applied: ${d.corrections_count}`,\n  `- Terminal failures: ${d.failures_count}`,\n  `- Retries scheduled: ${d.retries_count}`,\n  `- Sensitive rejections: ${d.sensitive_rejections_count}`,\n].join('\\n');\n\nif (d.outstanding_tasks_count !== null && d.outstanding_tasks_count !== undefined) {\n  weekSummary += `\\n- Outstanding open tasks: ${d.outstanding_tasks_count}`;\n}\n\nconst prompt = [\n  'You are a weekly review assistant for a personal knowledge management system.',\n  'Based only on the following objective statistics (no raw content), generate a concise',\n  'priorities section of 3-5 bullet points. Each bullet must be grounded in the numbers.',\n  'Do not infer intent or completion from vague prose. Focus on what the numbers suggest.',\n  'Label your output clearly as AI-GENERATED PRIORITIES.',\n  '',\n  weekSummary,\n].join('\\n');\n\nreturn [{ json: { prompt, week_data: d } }];"
       },
       "id": "wr000003-0003-0003-0003-000300030003",
-      "name": "Prepare AI Input",
+      "name": "Prepare AI Priorities Input",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        700,
-        300
-      ]
+      "position": [700, 300]
     },
     {
       "parameters": {
@@ -72,11 +63,7 @@
       "name": "Generate AI Priorities",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "onError": "continueRegularOutput",
-      "position": [
-        920,
-        300
-      ],
+      "position": [920, 300],
       "credentials": {
         "httpHeaderAuth": {
           "id": "PLACEHOLDER_GEMINI_API_KEY",
@@ -86,21 +73,18 @@
     },
     {
       "parameters": {
-        "jsCode": "const d = $('Get Weekly Brief').first().json;\nconst priorities = $input.first()?.json?.candidates?.[0]?.content?.parts?.[0]?.text\n  ?? '(priorities unavailable)';\n\nconst lines = [`**Second Brain – Weekly Review** | ${d.week_start} → ${d.week_end}`, ''];\n\nif ((d.accomplished ?? []).length > 0) {\n  lines.push('**Accomplished This Week**');\n  (d.accomplished ?? []).forEach(a => {\n    const proj = a.project ? ` \\`[${a.project}]\\`` : '';\n    lines.push(`- ${a.title}${proj}`);\n  });\n  lines.push('');\n}\n\nif ((d.completed_tasks ?? []).length > 0) {\n  lines.push('**Completed Tasks**');\n  (d.completed_tasks ?? []).forEach(t => {\n    const proj = t.project ? `[${t.project}] ` : '';\n    lines.push(`- ✅ ${proj}${t.title}`);\n  });\n  lines.push('');\n}\n\nif ((d.decisions ?? []).length > 0) {\n  lines.push('**Decisions Made**');\n  (d.decisions ?? []).forEach(dc => {\n    const proj = dc.project ? ` \\`[${dc.project}]\\`` : '';\n    lines.push(`- ${dc.title}${proj}`);\n  });\n  lines.push('');\n}\n\nconst open = d.still_open ?? [];\nif (open.length > 0) {\n  const shown = open.slice(0, 10);\n  const extra = open.length - shown.length;\n  lines.push(`**Still Open** (${open.length})`);\n  shown.forEach(t => {\n    const proj = t.project ? `[${t.project}] ` : '';\n    const pri = t.priority === 'high' ? ' 🔴' : '';\n    lines.push(`- ${proj}${t.title}${pri}`);\n  });\n  if (extra > 0) lines.push(`- _…and ${extra} more_`);\n  lines.push('');\n}\n\nif ((d.study_progress ?? []).length > 0) {\n  lines.push('**Study Progress**');\n  (d.study_progress ?? []).forEach(s => lines.push(`- ${s.track}: ${s.status}`));\n  lines.push('');\n}\n\nif (priorities && priorities !== '(priorities unavailable)') {\n  lines.push('**🤖 AI-GENERATED PRIORITIES**');\n  lines.push(priorities.trim());\n  lines.push('');\n} else {\n  lines.push('_AI priorities unavailable this week._');\n}\n\nconst total = (d.accomplished ?? []).length + (d.still_open ?? []).length;\nif (total === 0) {\n  lines.push('_Quiet week — nothing captured or opened. 🌱_');\n}\n\nreturn [{ json: { content: lines.join('\\n').trim() } }];"
+        "jsCode": "// Combine weekly stats with AI priorities into a Discord message.\nconst geminiResponse = $input.first().json;\nconst weekData = $('Prepare AI Priorities Input').first().json.week_data;\n\nconst aiText = geminiResponse?.candidates?.[0]?.content?.parts?.[0]?.text ?? '(priorities unavailable)';\n\nconst ts = new Date(weekData.generated_at).toLocaleString('en-US', {\n  timeZone: 'UTC', month: 'short', day: 'numeric',\n  hour: '2-digit', minute: '2-digit', hour12: false,\n});\n\nconst lines = [\n  `**Second Brain – Weekly Review** (${ts} UTC)`,\n  '',\n  '**Captures (last 7 days)**',\n  `  New captures: ${weekData.new_captures_count}`,\n  `  Filed notes: ${weekData.filed_notes_count}`,\n  `  Sensitive rejections: ${weekData.sensitive_rejections_count}`,\n  '',\n  '**Explicit State Changes**',\n  `  Tasks created: ${weekData.created_tasks_count}`,\n  `  Actions completed (done/fix): ${weekData.completed_actions_count}`,\n  `  Decisions recorded: ${weekData.decisions_count}`,\n  `  Corrections applied: ${weekData.corrections_count}`,\n  '',\n  '**Backlog**',\n  `  Inbox: ${weekData.inbox_backlog_count}`,\n];\n\nif (weekData.outstanding_tasks_count !== null && weekData.outstanding_tasks_count !== undefined) {\n  lines.push(`  Outstanding open tasks: ${weekData.outstanding_tasks_count}`);\n}\n\nlines.push(\n  '',\n  '**Failures & Retries**',\n  `  Terminal failures: ${weekData.failures_count}`,\n  `  Retries scheduled: ${weekData.retries_count}`,\n  '',\n  '---',\n  '**⚠️ AI-GENERATED PRIORITIES** *(review before acting)*',\n  '',\n  aiText.trim(),\n);\n\nreturn [{ json: { content: lines.join('\\n') } }];"
       },
       "id": "wr000005-0005-0005-0005-000500050005",
       "name": "Format Review Message",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        1140,
-        300
-      ]
+      "position": [1140, 300]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.DISCORD_DIGEST_WEBHOOK_URL }}",
+        "url": "={{ $vars.DISCORD_DIGEST_WEBHOOK_URL }}",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ content: $json.content }) }}",
@@ -110,24 +94,7 @@
       "name": "Send to Discord",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "onError": "continueErrorOutput",
-      "position": [
-        1360,
-        300
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "// Weekly review delivery to Discord failed. Log safe metadata only — no capture content.\nconsole.log(JSON.stringify({\n  event: 'weekly_review_delivery_failed',\n  workflow: 'second_brain_weekly_review',\n  error_description: $input.first().json?.error?.description ?? 'unknown',\n  error_status: $input.first().json?.error?.httpCode ?? null,\n  timestamp: new Date().toISOString(),\n}));\nreturn [{ json: { recorded: true, delivery_failed: true } }];"
-      },
-      "id": "wr000007-0007-0007-0007-000700070007",
-      "name": "Log Delivery Failure",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1580,
-        440
-      ]
+      "position": [1360, 300]
     }
   ],
   "connections": {
@@ -135,7 +102,29 @@
       "main": [
         [
           {
-            "node": "Get Weekly Brief",
+            "node": "Get Weekly Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Weekly Digest": {
+      "main": [
+        [
+          {
+            "node": "Prepare AI Priorities Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare AI Priorities Input": {
+      "main": [
+        [
+          {
+            "node": "Generate AI Priorities",
             "type": "main",
             "index": 0
           }
@@ -158,40 +147,6 @@
         [
           {
             "node": "Send to Discord",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Send to Discord": {
-      "main": [
-        [],
-        [
-          {
-            "node": "Log Delivery Failure",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Get Weekly Brief": {
-      "main": [
-        [
-          {
-            "node": "Prepare AI Input",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Prepare AI Input": {
-      "main": [
-        [
-          {
-            "node": "Generate AI Priorities",
             "type": "main",
             "index": 0
           }

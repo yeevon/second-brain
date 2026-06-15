@@ -50,6 +50,10 @@ with open("/workflows/second-brain-error-handler.json") as f:
     ERROR_HANDLER_WF = json.load(f)
 with open("/workflows/second-brain-intake.json") as f:
     INTAKE_WF = json.load(f)
+with open("/workflows/second-brain-daily-digest.json") as f:
+    DAILY_DIGEST_WF = json.load(f)
+with open("/workflows/second-brain-weekly-review.json") as f:
+    WEEKLY_REVIEW_WF = json.load(f)
 
 
 # ── HTTP helpers (cookie-aware) ───────────────────────────────────────────────
@@ -288,10 +292,20 @@ def main():
     print("Verifying webhook registration…")
     verify_webhook()
 
+    print("Importing Daily Digest workflow…")
+    daily_digest_json = patch_json(DAILY_DIGEST_WF, cred_patches)
+    daily_digest_id   = import_workflow(daily_digest_json)
+
+    print("Importing Weekly Review workflow…")
+    weekly_review_json = patch_json(WEEKLY_REVIEW_WF, cred_patches)
+    weekly_review_id   = import_workflow(weekly_review_json)
+
     print("=== local-n8n-init complete ===")
     print(f"  Error Handler  id={eh_id} (active)")
     print(f"  Intake         id={intake_wf_id} (active)")
     print(f"  Webhook        POST {N8N_URL}/webhook/second-brain-intake")
+    print(f"  Daily Digest   id={daily_digest_id} (inactive — activate manually after setting DISCORD_DIGEST_WEBHOOK_URL)")
+    print(f"  Weekly Review  id={weekly_review_id} (inactive — activate manually after setting DISCORD_DIGEST_WEBHOOK_URL)")
 
 
 if __name__ == "__main__":

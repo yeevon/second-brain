@@ -16,27 +16,21 @@
       "name": "Schedule Trigger",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [
-        260,
-        300
-      ]
+      "position": [260, 300]
     },
     {
       "parameters": {
         "method": "GET",
-        "url": "http://capture-service:8000/internal/brief/daily",
+        "url": "http://capture-service:8000/internal/digest/daily",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {}
       },
       "id": "dd000002-0002-0002-0002-000200020002",
-      "name": "Get Daily Brief",
+      "name": "Get Daily Digest",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [
-        480,
-        300
-      ],
+      "position": [480, 300],
       "credentials": {
         "httpHeaderAuth": {
           "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
@@ -46,65 +40,18 @@
     },
     {
       "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict"
-          },
-          "conditions": [
-            {
-              "id": "brief-today-check",
-              "leftValue": "={{ $json.today }}",
-              "rightValue": "",
-              "operator": {
-                "type": "string",
-                "operation": "notEmpty",
-                "singleValue": true
-              }
-            }
-          ],
-          "combinator": "and"
-        },
-        "options": {}
-      },
-      "id": "dd000005-0005-0005-0005-000500050005",
-      "name": "Has Brief Data?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2,
-      "position": [
-        700,
-        300
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "const d = $input.first().json;\n\nfunction priorityEmoji(p) {\n  if (p === 'high') return ' 🔴';\n  if (p === 'medium') return ' 🟡';\n  return '';\n}\n\nfunction fmtActionItem(item, index) {\n  let line = `${index}. **${item.title}**`;\n  if (item.project) line += ` \\`[${item.project}]\\``;\n  line += priorityEmoji(item.priority);\n  if (item.due) line += `\\n   Due: ${item.due}`;\n  return line;\n}\n\nconst lines = [`**Second Brain – Daily Brief** | ${d.today}`, ''];\n\n// Focus items: due today + high-priority open\nconst focusItems = [...(d.due_today ?? []), ...(d.focus_items ?? [])];\nif (focusItems.length > 0) {\n  lines.push(\"**Today's Focus**\");\n  focusItems.slice(0, 7).forEach((item, i) => lines.push(fmtActionItem(item, i + 1)));\n  lines.push('');\n}\n\n// Coming up (next 7 days — tasks with due dates + events)\nif ((d.coming_up ?? []).length > 0) {\n  lines.push('**Coming Up**');\n  d.coming_up.forEach(item => {\n    const label = item.title ?? item.name ?? '';\n    lines.push(`- ${item.date}: ${label}`);\n  });\n  lines.push('');\n}\n\n// Birthdays (next 14 days)\nif ((d.birthdays ?? []).length > 0) {\n  lines.push('**Upcoming Birthdays**');\n  d.birthdays.forEach(b => lines.push(`- 🎂 ${b.name} – ${b.date}`));\n  lines.push('');\n}\n\n// Pending tasks (capped at 10)\nconst pending = d.pending_tasks ?? [];\nif (pending.length > 0) {\n  const shown = pending.slice(0, 10);\n  const extra = pending.length - shown.length;\n  lines.push(`**Pending Tasks** (${pending.length})`);\n  shown.forEach(item => {\n    const proj = item.project ? `[${item.project}] ` : '';\n    lines.push(`- ${proj}${item.title}`);\n  });\n  if (extra > 0) lines.push(`- _…and ${extra} more_`);\n  lines.push('');\n}\n\n// Stale / neglected (no update in 7+ days)\nif ((d.stale_tasks ?? []).length > 0) {\n  lines.push('**Stale / Neglected**');\n  (d.stale_tasks ?? []).slice(0, 5).forEach(item => {\n    const proj = item.project ? `[${item.project}] ` : '';\n    lines.push(`- ${proj}${item.title}`);\n  });\n  lines.push('');\n}\n\nconst total = focusItems.length + (d.coming_up ?? []).length + (d.birthdays ?? []).length\n  + pending.length + (d.stale_tasks ?? []).length;\nif (total === 0) {\n  lines.push('_Nothing on the radar today. ✨_');\n}\n\nreturn [{ json: { content: lines.join('\\n').trim() } }];"
+        "jsCode": "// Build a structured daily digest message for Discord.\n// All counts come from the capture service — no data is stored here.\nconst d = $input.first().json;\n\nconst ts = new Date(d.generated_at).toLocaleString('en-US', {\n  timeZone: 'UTC', month: 'short', day: 'numeric',\n  hour: '2-digit', minute: '2-digit', hour12: false,\n});\n\nconst lines = [\n  `**Second Brain – Daily Digest** (${ts} UTC)`,\n  '',\n  '**Intake (last 24 h)**',\n  `  New captures: ${d.new_captures_count}`,\n  `  Filed notes: ${d.filed_notes_count}`,\n  `  Sensitive rejections: ${d.sensitive_rejections_count}`,\n];\n\nif (d.attachment_warnings_count > 0) {\n  lines.push(`  ⚠️ Pending captures with attachments: ${d.attachment_warnings_count}`);\n}\n\nlines.push(\n  '',\n  '**Backlog**',\n  `  Inbox: ${d.inbox_backlog_count}`,\n  `  Awaiting clarification: ${d.awaiting_clarification_count}`,\n);\n\nif (d.open_tasks_count !== null && d.open_tasks_count !== undefined) {\n  lines.push(`  Open tasks: ${d.open_tasks_count}`);\n}\n\nlines.push(\n  '',\n  '**Failures & Retries (last 24 h)**',\n  `  Terminal failures: ${d.failed_captures_count}`,\n  `  Retry events: ${d.retry_events_count}`,\n);\n\nreturn [{ json: { content: lines.join('\\n') } }];"
       },
       "id": "dd000003-0003-0003-0003-000300030003",
-      "name": "Format Brief Message",
+      "name": "Format Digest Message",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        920,
-        180
-      ]
-    },
-    {
-      "parameters": {},
-      "id": "dd000006-0006-0006-0006-000600060006",
-      "name": "No Activity - Skip",
-      "type": "n8n-nodes-base.noOp",
-      "typeVersion": 1,
-      "position": [
-        920,
-        440
-      ]
+      "position": [700, 300]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.DISCORD_DIGEST_WEBHOOK_URL }}",
+        "url": "={{ $vars.DISCORD_DIGEST_WEBHOOK_URL }}",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ content: $json.content }) }}",
@@ -114,24 +61,7 @@
       "name": "Send to Discord",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "onError": "continueErrorOutput",
-      "position": [
-        1140,
-        180
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "// Digest delivery to Discord failed. Log safe metadata only — no capture content.\nconsole.log(JSON.stringify({\n  event: 'digest_delivery_failed',\n  workflow: 'second_brain_daily_digest',\n  error_description: $input.first().json?.error?.description ?? 'unknown',\n  error_status: $input.first().json?.error?.httpCode ?? null,\n  timestamp: new Date().toISOString(),\n}));\nreturn [{ json: { recorded: true, delivery_failed: true } }];"
-      },
-      "id": "dd000007-0007-0007-0007-000700070007",
-      "name": "Log Delivery Failure",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1360,
-        300
-      ]
+      "position": [920, 300]
     }
   ],
   "connections": {
@@ -139,59 +69,29 @@
       "main": [
         [
           {
-            "node": "Get Daily Brief",
+            "node": "Get Daily Digest",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Send to Discord": {
+    "Get Daily Digest": {
       "main": [
-        [],
         [
           {
-            "node": "Log Delivery Failure",
+            "node": "Format Digest Message",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Format Brief Message": {
+    "Format Digest Message": {
       "main": [
         [
           {
             "node": "Send to Discord",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Get Daily Brief": {
-      "main": [
-        [
-          {
-            "node": "Has Brief Data?",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Has Brief Data?": {
-      "main": [
-        [
-          {
-            "node": "Format Brief Message",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "No Activity - Skip",
             "type": "main",
             "index": 0
           }

@@ -543,23 +543,9 @@
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
-        "bodyParameters": {
-          "parameters": [
-            {
-              "name": "delivery_attempt",
-              "value": "={{ $('Intake Webhook').first().json.body.delivery_attempt }}"
-            },
-            {
-              "name": "note_path",
-              "value": "={{ $json.note_path }}"
-            },
-            {
-              "name": "git_commit_hash",
-              "value": "={{ $json.git_commit_hash }}"
-            }
-          ]
-        },
-        "options": {}
+        "options": {},
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, note_path: $json.note_path, git_commit_hash: $json.git_commit_hash ?? null, classification: $(\"Parse Gemini Response\").first().json.classification }) }}"
       },
       "id": "a1b2c3d4-eeee-eeee-eeee-eeeeeeeeeeee",
       "name": "Acknowledge Filed",
@@ -583,27 +569,9 @@
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
-        "bodyParameters": {
-          "parameters": [
-            {
-              "name": "delivery_attempt",
-              "value": "={{ $('Intake Webhook').first().json.body.delivery_attempt }}"
-            },
-            {
-              "name": "note_path",
-              "value": "={{ $json.note_path }}"
-            },
-            {
-              "name": "git_commit_hash",
-              "value": "={{ $json.git_commit_hash }}"
-            },
-            {
-              "name": "reason_type",
-              "value": "={{ $('Validate Classification').first().json.inbox_reason }}"
-            }
-          ]
-        },
-        "options": {}
+        "options": {},
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, note_path: $json.note_path, git_commit_hash: $json.git_commit_hash ?? null, reason_type: $(\"Validate Classification\").first().json.inbox_reason ?? '', classification: $(\"Parse Gemini Response\").first().json.classification }) }}"
       },
       "id": "a1b2c3d4-ffff-ffff-ffff-ffffffffffff",
       "name": "Acknowledge Inbox",

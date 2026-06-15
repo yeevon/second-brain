@@ -18,6 +18,7 @@ from secondbrain.api_models import (
     ClassificationValidationResponse,
     CorrectionRequest,
     CorrectionResponse,
+    DailyDigestResponse,
     DeliveryTransitionResponse,
     DownstreamCaptureResponse,
     EditReceiptRequest,
@@ -28,6 +29,7 @@ from secondbrain.api_models import (
     ScheduleRetryRequest,
     SecurityScreenRequest,
     SecurityScreenResponse,
+    WeeklyDigestResponse,
     WorkflowErrorResponse,
 )
 from secondbrain.capture_service import (
@@ -39,6 +41,42 @@ from secondbrain.capture_models import CaptureRecord, DeliveryMutationResult
 
 
 INTERNAL_TOKEN_HEADER = "X-Second-Brain-Internal-Token"
+
+
+def _fetch_open_task_count(capture_service: CaptureService) -> int | None:
+    """Return open task count from writer-service or direct vault scan.
+
+    Priority order:
+    1. Call writer-service GET /internal/vault/stats/open-tasks if writer_service_url is set.
+    2. Fall back to direct vault scan if vault_path is set (local-full mode).
+    3. Return None if neither is available (capture-only mode with no vault access).
+    """
+    import urllib.error
+    import urllib.request
+    from secondbrain.digest import scan_open_tasks
+
+    writer_url = getattr(capture_service.settings, "writer_service_url", None)
+    writer_token = getattr(capture_service.settings, "writer_service_token", None)
+    if writer_url and writer_token:
+        try:
+            req = urllib.request.Request(
+                f"{writer_url}/internal/vault/stats/open-tasks",
+                headers={"X-Second-Brain-Writer-Token": writer_token},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                import json
+                data = json.loads(resp.read())
+                return data.get("open_tasks_count")
+        except Exception:
+            pass  # fall through to direct scan
+
+    vault_path = getattr(capture_service.settings, "vault_path", None)
+    if vault_path is not None:
+        try:
+            return scan_open_tasks(vault_path)
+        except Exception:
+            pass
+    return None
 
 
 def build_require_internal_token(expected_token: str):
@@ -225,6 +263,7 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             delivery_attempt=request.delivery_attempt,
             derived_note_path=request.note_path,
             git_commit_hash=request.git_commit_hash,
+            classification_json=request.classification,
         )
         return _delivery_mutation_response(capture_service, capture_id, result)
 
@@ -241,6 +280,7 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             derived_note_path=request.note_path,
             git_commit_hash=request.git_commit_hash,
             reason_type=request.reason_type,
+            classification_json=request.classification,
         )
         return _delivery_mutation_response(capture_service, capture_id, result)
 
@@ -386,6 +426,49 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             old_note_path=result["old_note_path"],
             new_note_path=result["new_note_path"],
             git_commit_hash=result.get("git_commit_hash"),
+        )
+
+    # ------------------------------------------------------------------
+    # SB-120 / SB-121: Digest endpoints
+    # ------------------------------------------------------------------
+
+    @app.get(
+        "/internal/digest/daily",
+        response_model=DailyDigestResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def get_daily_digest():
+        from datetime import UTC, datetime, timedelta
+
+        now = datetime.now(UTC)
+        since = now - timedelta(hours=24)
+        snapshot = capture_service.daily_digest_snapshot(since=since, now=now)
+
+        return DailyDigestResponse(
+            generated_at=now,
+            window_hours=24,
+            open_tasks_count=_fetch_open_task_count(capture_service),
+            **snapshot,
+        )
+
+    @app.get(
+        "/internal/digest/weekly",
+        response_model=WeeklyDigestResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def get_weekly_digest():
+        from datetime import UTC, datetime, timedelta
+
+        now = datetime.now(UTC)
+        since = now - timedelta(days=7)
+        snapshot = capture_service.weekly_digest_snapshot(since=since, now=now)
+
+        return WeeklyDigestResponse(
+            generated_at=now,
+            since=since,
+            window_days=7,
+            outstanding_tasks_count=_fetch_open_task_count(capture_service),
+            **snapshot,
         )
 
     return app

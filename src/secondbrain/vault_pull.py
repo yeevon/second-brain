@@ -36,10 +36,10 @@ def pull_vault(vault_path: Path) -> None:
             exit_code=1,
         )
 
-    _run_git(["git", "status", "--porcelain", "--untracked-files=no"], vault_path, step="check worktree")
+    _run_git(["git", "status", "--porcelain"], vault_path, step="check worktree")
     # _run_git already raises on non-zero; check output for dirty state
     status_result = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=no"],
+        ["git", "status", "--porcelain"],
         cwd=vault_path,
         capture_output=True,
         text=True,

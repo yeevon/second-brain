@@ -7,8 +7,12 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 CONTAINER="${CONTAINER:-second-brain-n8n}"
 ERROR_HANDLER_NAME="Second Brain - Error Handler"
 INTAKE_NAME="Second Brain - Intake"
+DAILY_DIGEST_NAME="Second Brain - Daily Digest"
+WEEKLY_REVIEW_NAME="Second Brain - Weekly Review"
 ERROR_HANDLER_FIXTURE="n8n/workflows/second-brain-error-handler.json"
 INTAKE_FIXTURE="n8n/workflows/second-brain-intake.json"
+DAILY_DIGEST_FIXTURE="n8n/workflows/second-brain-daily-digest.json"
+WEEKLY_REVIEW_FIXTURE="n8n/workflows/second-brain-weekly-review.json"
 
 # Resolve script root so this can be run from any working directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,6 +27,14 @@ if [[ ! -f "$ERROR_HANDLER_FIXTURE" ]]; then
 fi
 if [[ ! -f "$INTAKE_FIXTURE" ]]; then
   echo "workflow fixture not found: $INTAKE_FIXTURE" >&2
+  exit 1
+fi
+if [[ ! -f "$DAILY_DIGEST_FIXTURE" ]]; then
+  echo "workflow fixture not found: $DAILY_DIGEST_FIXTURE" >&2
+  exit 1
+fi
+if [[ ! -f "$WEEKLY_REVIEW_FIXTURE" ]]; then
+  echo "workflow fixture not found: $WEEKLY_REVIEW_FIXTURE" >&2
   exit 1
 fi
 
@@ -128,6 +140,48 @@ else
     rm -f /tmp/bootstrap-intake.json
 fi
 
+# ── Daily Digest ─────────────────────────────────────────────────────────────
+
+if echo "$existing_names" | grep -qxF "$DAILY_DIGEST_NAME"; then
+  echo "  Second Brain - Daily Digest: skipped (already exists)"
+else
+  jq --arg id "$(python3 -c 'import uuid; print(str(uuid.uuid4()))')" \
+    'del(.id, .versionId) | .id = $id' \
+    "$DAILY_DIGEST_FIXTURE" \
+    > "$TMP_DIR/bootstrap-daily-digest.json"
+
+  docker cp \
+    "$TMP_DIR/bootstrap-daily-digest.json" \
+    "$CONTAINER:/tmp/bootstrap-daily-digest.json"
+
+  docker exec "$CONTAINER" \
+    n8n import:workflow --input=/tmp/bootstrap-daily-digest.json
+
+  docker exec --user root "$CONTAINER" \
+    rm -f /tmp/bootstrap-daily-digest.json
+fi
+
+# ── Weekly Review ─────────────────────────────────────────────────────────────
+
+if echo "$existing_names" | grep -qxF "$WEEKLY_REVIEW_NAME"; then
+  echo "  Second Brain - Weekly Review: skipped (already exists)"
+else
+  jq --arg id "$(python3 -c 'import uuid; print(str(uuid.uuid4()))')" \
+    'del(.id, .versionId) | .id = $id' \
+    "$WEEKLY_REVIEW_FIXTURE" \
+    > "$TMP_DIR/bootstrap-weekly-review.json"
+
+  docker cp \
+    "$TMP_DIR/bootstrap-weekly-review.json" \
+    "$CONTAINER:/tmp/bootstrap-weekly-review.json"
+
+  docker exec "$CONTAINER" \
+    n8n import:workflow --input=/tmp/bootstrap-weekly-review.json
+
+  docker exec --user root "$CONTAINER" \
+    rm -f /tmp/bootstrap-weekly-review.json
+fi
+
 # Clean up existing-workflows temp file in container
 docker exec --user root "$CONTAINER" \
   rm -f /tmp/existing-workflows.json
@@ -146,7 +200,7 @@ docker exec --user root "$CONTAINER" \
   rm -f /tmp/verify-workflows.json
 
 echo ""
-for wf_name in "$ERROR_HANDLER_NAME" "$INTAKE_NAME"; do
+for wf_name in "$ERROR_HANDLER_NAME" "$INTAKE_NAME" "$DAILY_DIGEST_NAME" "$WEEKLY_REVIEW_NAME"; do
   found="$(
     jq -r '.[].name' "$TMP_DIR/verify-workflows.json" \
       | grep -xF "$wf_name" || true
@@ -179,3 +233,19 @@ echo "  c. Under 'Error Workflow', select 'Second Brain - Error Handler'."
 echo "     NOTE: the fixture contains a placeholder — this must be set manually in the UI."
 echo "  d. Save the workflow."
 echo "  e. Activate the workflow."
+echo ""
+echo "Step 3 — Second Brain - Daily Digest"
+echo "  a. Create an n8n workflow variable: DISCORD_DIGEST_WEBHOOK_URL"
+echo "     Set it to your Discord channel webhook URL (Settings → Variables)."
+echo "  b. Bind credential: Capture Service Token"
+echo "     Type: HTTP Header Auth | Header: X-Second-Brain-Internal-Token"
+echo "  c. Save and activate the workflow."
+echo "     It will trigger daily at 07:00 UTC."
+echo ""
+echo "Step 4 — Second Brain - Weekly Review"
+echo "  a. Ensure workflow variable DISCORD_DIGEST_WEBHOOK_URL is set (see Step 3a)."
+echo "  b. Bind credentials:"
+echo "     - Capture Service Token  (HTTP Header Auth: X-Second-Brain-Internal-Token)"
+echo "     - Gemini API Key         (HTTP Header Auth: X-Goog-Api-Key)"
+echo "  c. Save and activate the workflow."
+echo "     It will trigger every Monday at 08:00 UTC."

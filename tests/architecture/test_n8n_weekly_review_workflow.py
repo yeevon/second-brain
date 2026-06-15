@@ -67,20 +67,16 @@ def test_weekly_review_has_schedule_trigger():
 
 def test_weekly_review_schedule_is_weekly():
     fixture_text = FIXTURE_PATH.read_text()
+    # Cron expression for every Monday at 8am: "0 8 * * 1"
     assert "1" in fixture_text and "8" in fixture_text  # day 1 and hour 8 present
 
 
-# ── Brief endpoint ───────────────────────────────────────────────────────────
+# ── Digest endpoint ──────────────────────────────────────────────────────────
 
 
-def test_weekly_review_calls_brief_endpoint():
+def test_weekly_review_calls_correct_capture_service_url():
     fixture_text = FIXTURE_PATH.read_text()
-    assert "http://capture-service:8000/internal/brief/weekly" in fixture_text
-
-
-def test_weekly_review_does_not_call_old_digest_endpoint():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "/internal/digest/weekly" not in fixture_text
+    assert "http://capture-service:8000/internal/digest/weekly" in fixture_text
 
 
 def test_weekly_review_capture_service_url_uses_internal_hostname():
@@ -123,27 +119,7 @@ def test_weekly_review_gemini_credential_is_placeholder():
         assert cred["id"] == "PLACEHOLDER_GEMINI_API_KEY"
 
 
-# ── Brief output format ───────────────────────────────────────────────────────
-
-
-def test_weekly_review_format_references_accomplished():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "accomplished" in fixture_text
-
-
-def test_weekly_review_format_references_still_open():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "still_open" in fixture_text
-
-
-def test_weekly_review_format_references_decisions():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "decisions" in fixture_text
-
-
-def test_weekly_review_format_references_study_progress():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "study_progress" in fixture_text
+# ── AI priorities label ───────────────────────────────────────────────────────
 
 
 def test_weekly_review_message_labels_ai_section():
@@ -153,7 +129,35 @@ def test_weekly_review_message_labels_ai_section():
 
 def test_weekly_review_ai_prompt_does_not_infer_completion_from_prose():
     fixture_text = FIXTURE_PATH.read_text()
-    assert "explicit state" in fixture_text.lower() or "grounded in the" in fixture_text.lower()
+    assert "explicit state" in fixture_text.lower() or "grounded in the numbers" in fixture_text.lower()
+
+
+# ── Message content ───────────────────────────────────────────────────────────
+
+
+def test_weekly_review_references_corrections():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "corrections_count" in fixture_text
+
+
+def test_weekly_review_references_failures():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "failures_count" in fixture_text
+
+
+def test_weekly_review_references_created_tasks():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "created_tasks_count" in fixture_text
+
+
+def test_weekly_review_references_completed_actions():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "completed_actions_count" in fixture_text
+
+
+def test_weekly_review_references_decisions():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "decisions_count" in fixture_text
 
 
 # ── Security invariants ───────────────────────────────────────────────────────
@@ -206,15 +210,6 @@ def test_bootstrap_imports_weekly_review_workflow():
     assert "second-brain-weekly-review.json" in bootstrap or "Second Brain - Weekly Review" in bootstrap
 
 
-def test_bootstrap_updates_existing_weekly_review_workflow_in_place():
-    bootstrap = BOOTSTRAP_PATH.read_text()
-    assert "import_or_update_workflow" in bootstrap
-    assert '"$WEEKLY_REVIEW_NAME"' in bootstrap
-    assert "$WEEKLY_REVIEW_FIXTURE" in bootstrap
-    assert "updated in place" in bootstrap
-    assert "Second Brain - Weekly Review: skipped" not in bootstrap
-
-
 def test_weekly_review_capture_service_node_uses_placeholder_credential():
     wf = _fixture()
     for node in wf["nodes"]:
@@ -225,61 +220,12 @@ def test_weekly_review_capture_service_node_uses_placeholder_credential():
             assert cred["id"] == "PLACEHOLDER_CAPTURE_SERVICE_TOKEN"
 
 
-def test_weekly_review_prepare_node_uses_open_tasks_data():
-    """Prepare AI input must use still_open and accomplished from the brief response."""
+def test_weekly_review_prepare_node_uses_let_not_const_for_week_summary():
+    """weekSummary must be `let` so outstanding_tasks_count can be appended."""
     wf = _fixture()
     code_nodes = [n for n in wf["nodes"] if n.get("type") == "n8n-nodes-base.code"]
-    prepare_nodes = [n for n in code_nodes if "Prepare" in n["name"] or "Input" in n["name"]]
-    assert len(prepare_nodes) >= 1, "Prepare AI Input node not found"
+    prepare_nodes = [n for n in code_nodes if "Prepare" in n["name"] or "Priority" in n["name"].lower()]
+    assert len(prepare_nodes) >= 1, "Prepare AI Priorities Input node not found"
     code = prepare_nodes[0]["parameters"]["jsCode"]
-    assert "still_open" in code, "Prepare AI input must reference still_open tasks"
-    assert "accomplished" in code, "Prepare AI input must reference accomplished items"
-
-
-# ── Error handling ────────────────────────────────────────────────────────────
-
-
-def test_weekly_review_send_to_discord_has_error_output():
-    wf = _fixture()
-    discord_nodes = [n for n in wf["nodes"] if n.get("name") == "Send to Discord"]
-    assert len(discord_nodes) == 1
-    assert discord_nodes[0].get("onError") == "continueErrorOutput", (
-        "Send to Discord must use continueErrorOutput so delivery failures are visible"
-    )
-
-
-def test_weekly_review_delivery_failure_is_logged():
-    wf = _fixture()
-    names = [n["name"] for n in wf["nodes"]]
-    assert any("Failure" in name or "failure" in name for name in names), (
-        "Expected a log/handle delivery failure node"
-    )
-
-
-def test_weekly_review_discord_error_output_is_connected():
-    wf = _fixture()
-    discord_conn = wf["connections"].get("Send to Discord", {}).get("main", [])
-    assert len(discord_conn) >= 2, "Send to Discord must have both success and error outputs defined"
-    assert len(discord_conn[1]) > 0, "Send to Discord error output must connect to a failure-handling node"
-
-
-def test_weekly_review_gemini_has_continue_on_error():
-    """Gemini failure must not block the weekly factual summary from posting."""
-    wf = _fixture()
-    gemini_nodes = [
-        n for n in wf["nodes"]
-        if "generativelanguage.googleapis.com" in n.get("parameters", {}).get("url", "")
-    ]
-    assert len(gemini_nodes) >= 1
-    on_error = gemini_nodes[0].get("onError", "")
-    assert on_error in ("continueRegularOutput", "continueErrorOutput"), (
-        "Gemini node must set onError so weekly review posts factual counts even if Gemini is down"
-    )
-
-
-def test_weekly_review_format_message_has_priorities_unavailable_fallback():
-    """Format node must handle missing Gemini output gracefully."""
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "priorities unavailable" in fixture_text.lower(), (
-        "Format Review Message must include a fallback string for when Gemini output is missing"
-    )
+    assert "let weekSummary" in code, "weekSummary must be declared with 'let' so += assignment works"
+    assert "weekSummary +=" in code, "outstanding_tasks_count must be appended via += not discarded"

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from secrets import compare_digest
@@ -13,6 +15,29 @@ from writerservice.config import get_settings
 from writerservice.git_errors import CaptureDuplicateError, WriterError
 from writerservice.vault import check_vault_writable
 from writerservice.writer import DuplicateCaptureError, VaultWriter
+
+logger = logging.getLogger(__name__)
+
+# Matches both unquoted (`status: open`) and quoted (`status: "open"`) action status lines.
+_OPEN_STATUS_LINE_RE = re.compile(r'^    status: "?open"?\s*$', re.MULTILINE)
+
+
+def _count_open_tasks(vault_path: Path) -> int:
+    count = 0
+    for note_path in vault_path.rglob("*.md"):
+        if not note_path.is_file():
+            continue
+        try:
+            text = note_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not text.startswith("---"):
+            continue
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            continue
+        count += len(_OPEN_STATUS_LINE_RE.findall(parts[1]))
+    return count
 
 WRITER_TOKEN_HEADER = "X-Second-Brain-Writer-Token"
 
@@ -29,6 +54,13 @@ def _build_app() -> FastAPI:
 
     @app.exception_handler(WriterError)
     async def writer_error_handler(request: Request, exc: WriterError) -> JSONResponse:
+        logger.error(
+            "WriterError %s (http=%s retryable=%s): %s",
+            exc.error_type,
+            exc.http_status,
+            exc.retryable,
+            exc,
+        )
         return JSONResponse(
             status_code=exc.http_status,
             content={
@@ -44,6 +76,19 @@ def _build_app() -> FastAPI:
         if not check_vault_writable(settings.vault_path):
             raise HTTPException(status_code=503, detail="vault path not writable")
         return HealthResponse(status="ok")
+
+    @app.get(
+        "/internal/vault/stats/open-tasks",
+        dependencies=[Depends(require_token)],
+    )
+    async def vault_open_task_stats() -> dict:
+        settings = get_settings()
+        vault_path = Path(settings.vault_path)
+        try:
+            count = _count_open_tasks(vault_path)
+        except Exception:
+            count = None
+        return {"open_tasks_count": count}
 
     @app.post(
         "/internal/notes/file",

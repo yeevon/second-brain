@@ -310,6 +310,12 @@ class CaptureService:
         except KeyError as exc:
             raise CaptureNotFoundError("capture not found") from exc
 
+    def daily_digest_snapshot(self, *, since, now) -> dict:
+        return self._ledger.daily_digest_snapshot(since=since, now=now)
+
+    def weekly_digest_snapshot(self, *, since, now) -> dict:
+        return self._ledger.weekly_digest_snapshot(since=since, now=now)
+
     def assert_healthy(self) -> None:
         self._ledger.ping()
 
@@ -497,6 +503,7 @@ class CaptureService:
         delivery_attempt: int,
         derived_note_path: str,
         git_commit_hash: str | None = None,
+        classification_json: dict | None = None,
     ) -> DeliveryMutationResult:
         capture = self.get_capture(capture_id)
         result = self._ledger.mark_filed(
@@ -504,6 +511,7 @@ class CaptureService:
             delivery_attempt=delivery_attempt,
             derived_note_path=derived_note_path,
             git_commit_hash=git_commit_hash,
+            classification_json=classification_json,
         )
         if result.outcome in {"changed", "idempotent_replay"}:
             try:
@@ -530,6 +538,7 @@ class CaptureService:
         derived_note_path: str,
         git_commit_hash: str | None = None,
         reason_type: str = "",
+        classification_json: dict | None = None,
     ) -> DeliveryMutationResult:
         capture = self.get_capture(capture_id)
         result = self._ledger.mark_inbox(
@@ -538,6 +547,7 @@ class CaptureService:
             derived_note_path=derived_note_path,
             git_commit_hash=git_commit_hash,
             reason_type=reason_type,
+            classification_json=classification_json,
         )
         if result.outcome in {"changed", "idempotent_replay"}:
             try:
