@@ -310,6 +310,12 @@ class CaptureService:
         except KeyError as exc:
             raise CaptureNotFoundError("capture not found") from exc
 
+    def daily_digest_snapshot(self, *, since, now) -> dict:
+        return self._ledger.daily_digest_snapshot(since=since, now=now)
+
+    def weekly_digest_snapshot(self, *, since, now) -> dict:
+        return self._ledger.weekly_digest_snapshot(since=since, now=now)
+
     def assert_healthy(self) -> None:
         self._ledger.ping()
 

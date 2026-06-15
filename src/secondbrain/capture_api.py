@@ -442,7 +442,7 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
 
         now = datetime.now(UTC)
         since = now - timedelta(hours=24)
-        snapshot = capture_service.ledger.daily_digest_snapshot(since=since, now=now)
+        snapshot = capture_service.daily_digest_snapshot(since=since, now=now)
 
         return DailyDigestResponse(
             generated_at=now,
@@ -461,7 +461,7 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
 
         now = datetime.now(UTC)
         since = now - timedelta(days=7)
-        snapshot = capture_service.ledger.weekly_digest_snapshot(since=since, now=now)
+        snapshot = capture_service.weekly_digest_snapshot(since=since, now=now)
 
         return WeeklyDigestResponse(
             generated_at=now,
