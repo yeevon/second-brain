@@ -75,7 +75,7 @@ services:
     restart: "no"
     user: "0:0"
     volumes:
-      - second-brain-local-vault:/vault
+      - ${LOCAL_VAULT_PATH:-second-brain-local-vault}:/vault
       - second-brain-local-vault-remote:/remote
     entrypoint:
       - /bin/sh
@@ -169,7 +169,7 @@ services:
       AUDIT_LOG_PATH: /opt/vault/99_log/events.ndjson
       GIT_SYNC_ENABLED: ${GIT_SYNC_ENABLED:-true}
     volumes:
-      - second-brain-local-vault:/opt/vault
+      - ${LOCAL_VAULT_PATH:-second-brain-local-vault}:/opt/vault
       - second-brain-local-vault-remote:/remote
     networks:
       - backend

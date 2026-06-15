@@ -10,11 +10,13 @@ import pytest
 
 from secondbrain.mcp_server import (
     _clamp_limit,
+    _do_get_sync_status,
     _do_list_open_tasks,
     _do_list_recent_notes,
     _do_read_note,
     _do_search_notes,
     _enforce_path,
+    _ledger_path,
     _vault_preflight,
     _RESULT_LIMIT_MAX,
 )
@@ -325,6 +327,62 @@ class TestListOpenTasks:
         results = _do_list_open_tasks(tmp_path, project=None, limit=10)
         assert len(results) == 1
         assert results[0]["open_actions"] == ["Unquoted task"]
+
+
+# ---------------------------------------------------------------------------
+# ledger_path optional
+# ---------------------------------------------------------------------------
+
+
+class TestLedgerPath:
+    def test_returns_none_when_unset(self, monkeypatch):
+        monkeypatch.delenv("LEDGER_PATH", raising=False)
+        assert _ledger_path() is None
+
+    def test_returns_path_when_set(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("LEDGER_PATH", str(tmp_path / "ledger.sqlite3"))
+        assert _ledger_path() == tmp_path / "ledger.sqlite3"
+
+    def test_empty_string_returns_none(self, monkeypatch):
+        monkeypatch.setenv("LEDGER_PATH", "   ")
+        assert _ledger_path() is None
+
+
+# ---------------------------------------------------------------------------
+# get_sync_status
+# ---------------------------------------------------------------------------
+
+
+class TestGetSyncStatus:
+    def test_no_ledger_path_returns_partial_result(self, tmp_path):
+        result = _do_get_sync_status(None, tmp_path)
+        assert result["ledger_path"] is None
+        assert result["ledger_exists"] is False
+        assert result["vault_path"] == str(tmp_path)
+
+    def test_missing_ledger_file_returns_not_exists(self, tmp_path):
+        result = _do_get_sync_status(tmp_path / "no-ledger.sqlite3", None)
+        assert result["ledger_exists"] is False
+        assert result["vault_path"] is None
+
+    def test_vault_git_status_included_when_vault_is_clean_repo(self, tmp_path):
+        import subprocess
+        subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, capture_output=True)
+        (tmp_path / "note.md").write_text("content")
+        subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)
+        result = _do_get_sync_status(None, tmp_path)
+        assert "vault_dirty" in result
+        assert result["vault_dirty"] is False
+        assert result["vault_head_commit"] is not None
+
+    def test_both_none_returns_minimal_result(self):
+        result = _do_get_sync_status(None, None)
+        assert result["ledger_path"] is None
+        assert result["vault_path"] is None
+        assert result["ledger_exists"] is False
 
 
 # ---------------------------------------------------------------------------
