@@ -113,6 +113,31 @@ _MIGRATIONS: list[Migration] = [
             "CREATE INDEX IF NOT EXISTS idx_captures_retry_due ON captures(delivery_status, next_attempt_at)",
         ),
     ),
+    Migration(
+        version=5,
+        name="clarifications_and_corrections",
+        statements=(
+            # SB-117: clarification sub-state on captures
+            "ALTER TABLE captures ADD COLUMN clarification_status TEXT",
+            "ALTER TABLE captures ADD COLUMN clarification_question TEXT",
+            # SB-118: append-only correction history
+            """
+            CREATE TABLE IF NOT EXISTS corrections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                correction_id TEXT NOT NULL UNIQUE,
+                capture_id TEXT NOT NULL,
+                old_note_path TEXT NOT NULL,
+                new_note_path TEXT NOT NULL,
+                git_commit_hash TEXT,
+                correction_reason TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (capture_id) REFERENCES captures(capture_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_corrections_capture_id ON corrections(capture_id)",
+            "CREATE INDEX IF NOT EXISTS idx_captures_clarification ON captures(clarification_status)",
+        ),
+    ),
 ]
 
 

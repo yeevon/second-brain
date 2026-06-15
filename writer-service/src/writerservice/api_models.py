@@ -68,3 +68,26 @@ class FileNoteResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: Literal["ok"]
+
+
+class MoveNoteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    capture_id: str = Field(min_length=1, max_length=30)
+    new_folder: str = Field(min_length=1, max_length=50)
+    new_project: str | None = Field(default=None, max_length=100)
+    correction_reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("capture_id")
+    @classmethod
+    def validate_capture_id(cls, v: str) -> str:
+        if not _CAPTURE_ID_RE.match(v):
+            raise ValueError("capture_id must match ^SB-\\d{8}-\\d{4}$")
+        return v
+
+
+class MoveNoteResponse(BaseModel):
+    result: Literal["MOVED"]
+    old_note_path: str
+    new_note_path: str
+    git_commit_hash: str | None

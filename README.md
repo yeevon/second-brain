@@ -23,15 +23,19 @@ The mode must be set explicitly. Startup fails if it is missing or unsupported.
 1. **Captures** — Monitors a single Discord channel for messages from one allowed user.
 2. **Screens** — Rejects messages containing secrets (API keys, tokens, passwords) before any persistence.
 3. **Persists** — Writes the capture durably to SQLite before doing anything else.
-4. **Receipts** — Sends an immediate Discord confirmation. `local-full` says "Processing…"; `capture-only` says "Downstream filing is not enabled yet."
+4. **Receipts** — Sends an immediate Discord confirmation. Receipt text reflects actual delivery state: "Queued for downstream filing" when `DOWNSTREAM_DELIVERY_ENABLED=true`, or "Downstream filing is not enabled yet" when disabled.
 5. **Reconciles** — On startup, replays Discord history to recover any messages missed while the service was offline.
-6. **Internal API** — Exposes an authenticated HTTP API inside the process for state transitions and health checks.
+6. **Corrections** — In writer-service-backed modes, `fix: <reason>` as a reply to a receipt, or `fix SB-YYYYMMDD-NNNN: <reason>` as a standalone message, moves a filed note to a new folder. Bare `fix:` with no target is rejected. Correction history is append-only.
+7. **Internal API** — Exposes an authenticated HTTP API inside the process for state transitions and health checks.
 
-### `local-full` only
+### Downstream classification and filing
 
-1. **Classifies** — Sends the text to Gemini in a background worker. Gemini returns structured JSON (folder, title, tags, body, actions).
-2. **Files** — Writes a deterministic Markdown note into the Obsidian vault under the correct folder.
-3. **Final receipt** — Edits the original Discord message to show the filed location or inbox reason.
+Both `local-full` (in-process Gemini worker) and the local Docker full stack / EC2 (`capture-only` + n8n + writer-service) support the steps below. The difference is where the work runs: `local-full` runs classification inside the capture-service process; the `capture-only` modes hand off to n8n and writer-service via webhook.
+
+1. **Classifies** — Gemini returns structured JSON (folder, title, tags, body, actions).
+2. **Files** — Writes a deterministic Markdown note into the vault under the correct folder.
+3. **Clarifications** — When Gemini flags `needs_clarification: true`, the note is filed to `00_inbox/` and a follow-up question is sent via the Discord receipt. The capture remains `INBOX` with `clarification_status = NEEDS_CLARIFICATION` until a user reply resolves it. `secondbrain status` reports unresolved clarifications as a separate count.
+4. **Final receipt** — Edits the original Discord message to show the filed location, inbox reason, or clarification question.
 
 ## Project layout
 
@@ -90,6 +94,10 @@ deploy/
   test-writer-service.sh             # writer-service regression: health, filing, idempotency, audit
   test-writer-safe-failure.sh        # Git failure injection regression suite
   test-n8n-error-workflow.sh         # n8n error workflow regression suite
+  backup.sh                          # nightly encrypted snapshot (SQLite, vault, n8n data volume)
+  restore-validate.sh                # weekly restore validation into a temporary directory
+  backup.env.example                 # backup environment template
+  second-brain-backup.cron           # cron schedule for backup and restore-validate jobs
   capture-service.env.example
   writer-service.env.example
   README.md                          # EC2 provisioning and deployment guide
@@ -171,15 +179,15 @@ uv run python -m secondbrain status
 
 ## Setup — local Docker full stack
 
-`docker compose up -d` starts the complete local stack:
+`docker compose up -d` starts the complete local stack and enforces a safe boot order automatically:
 
-- `capture-service` — Discord intake and SQLite ledger
-- `n8n` — classification orchestration
-- `local-n8n-init` — one-shot Python service that seeds n8n state (owner account, credentials, workflows, webhook)
-- `writer-service` — Markdown generation and Git-backed vault writes
-- `local-vault-init` — one-shot alpine/git service that initializes the local vault and fake remote
+- `local-vault-init` — one-shot alpine/git service that initializes the vault working tree and a bare fake remote
+- `n8n` — classification orchestration; healthcheck probes `POST /rest/login` (HTTP 400 = REST ready), not just the static web server
+- `local-n8n-init` — one-shot Python service that seeds all n8n state (owner account, credentials, workflows, webhook); starts only after n8n REST is ready; `capture-service` does not start until this completes
+- `writer-service` — Markdown generation and Git-backed vault writes; `capture-service` waits for it to be healthy
+- `capture-service` — Discord intake and SQLite ledger; starts last, after the webhook is registered and writer-service is ready
 
-`compose.override.yaml` is auto-loaded and provides local-safe defaults. The EBS sentinel marker and vault Git repository are both created automatically on first start.
+`compose.override.yaml` is auto-loaded and provides local-safe defaults. The EBS sentinel marker and vault Git repository are both created automatically on first start. No manual bootstrap step or custom startup sequence is required.
 
 ### Required env files
 
@@ -278,6 +286,14 @@ n8n runs alongside capture-service in the `compose.n8n.yaml` overlay. Key facts:
 - Execution payloads not retained globally — raw capture text must never appear in n8n storage.
 - `Second Brain - Error Handler` and `Second Brain - Intake` workflows are bootstrapped once via `deploy/bootstrap-n8n.sh`.
 
+### Intake pipeline reliability
+
+The intake workflow includes explicit error handling at every external boundary:
+
+- **Gemini failures** — HTTP 429/403/5xx and timeouts route to `Schedule Retry (Gemini error)` with `error_type: gemini_http_error` instead of leaking a stale lease. `Classify with Gemini` uses `temperature: 0` and `maxOutputTokens: 2048` for deterministic, compact output.
+- **Invalid classification** — `Valid Classification?` IF node catches empty route or `valid: false` and routes to `Schedule Retry (classifier)` with `error_type: invalid_classifier_output`.
+- **Clarification branch** — `Needs Clarification?` IF node routes to `Record Clarification` after inbox filing, setting `clarification_status = NEEDS_CLARIFICATION` on the capture in capture-service.
+
 ### Writer-service (SB-114+)
 
 `writer-service` is a standalone FastAPI container (UID 10003, port 8001, never published to the host) that is the sole vault writer. n8n sends classified captures to `POST /internal/notes/file`; writer-service renders a deterministic Markdown note, writes it to the vault, appends an audit event to `99_log/events.ndjson`, and returns the real filesystem note path. capture-service then edits the Discord receipt to show the filed location.
@@ -315,6 +331,13 @@ return { note_path, git_commit_hash }
 Locally, `GIT_SYNC_ENABLED` defaults to `true` via `compose.override.yaml`. The `local-vault-init` one-shot service (alpine/git) initializes both the vault working tree and a bare fake remote before writer-service starts, so `docker compose up -d` works with no manual Git setup.
 
 Git failure handling (SB-116): every bad state returns a typed error and preserves the raw SQLite capture. `git_push_rejected` is retryable; `git_merge_conflict`, `git_index_locked`, and `capture_id_duplicate` are terminal and require operator inspection. `.git/index.lock` is never deleted automatically.
+
+### Encrypted off-host backups (SB-119+)
+
+Nightly encrypted snapshots cover all durable state: SQLite ledger (via `sqlite3 .backup`, never a raw file copy), the EC2 vault clone, and the n8n data volume. Secrets are excluded or redacted from configuration backups. A weekly restore validation runs into a temporary directory only — it never touches live volumes. `secondbrain status` reports the last successful backup and restore validation timestamps.
+
+- **`deploy/backup.sh`** — nightly snapshot script.
+- **`deploy/restore-validate.sh`** — restore validation against a temporary location.
 
 ### Error workflow (SB-113+)
 

@@ -623,3 +623,58 @@ def test_local_n8n_init_fails_on_webhook_auth_errors():
     assert "401" in script
     assert "403" in script
     assert "credential binding or Intake token configuration is broken" in script
+
+
+def test_n8n_healthcheck_probes_rest_login_not_root():
+    """Healthcheck must wait for REST readiness, not just the web server.
+
+    A 400 from POST /rest/login (missing body fields) proves the REST API is
+    up. A 200 from / only proves the static-file server is answering.
+    """
+    svc = _override_compose()["services"]["n8n"]
+    healthcheck_cmd = " ".join(str(p) for p in svc["healthcheck"]["test"])
+    assert "/rest/login" in healthcheck_cmd, (
+        "n8n healthcheck must probe /rest/login, not /"
+    )
+    assert "status === 400" in healthcheck_cmd or "status==400" in healthcheck_cmd, (
+        "n8n healthcheck must accept HTTP 400 (REST ready) as the passing signal"
+    )
+
+
+def test_override_capture_service_waits_for_n8n_init():
+    """capture-service must not start until local-n8n-init completes.
+
+    Prevents Discord messages being captured before the intake webhook exists.
+    """
+    svc = _override_compose()["services"]["capture-service"]
+    depends = svc.get("depends_on", {})
+    assert "local-n8n-init" in depends, (
+        "capture-service must depend on local-n8n-init"
+    )
+    assert depends["local-n8n-init"].get("condition") == "service_completed_successfully", (
+        "capture-service must wait for local-n8n-init to complete successfully"
+    )
+
+
+def test_override_capture_service_waits_for_writer_service():
+    """capture-service must not start until writer-service is healthy."""
+    svc = _override_compose()["services"]["capture-service"]
+    depends = svc.get("depends_on", {})
+    assert "writer-service" in depends, (
+        "capture-service must depend on writer-service"
+    )
+    assert depends["writer-service"].get("condition") == "service_healthy", (
+        "capture-service must wait for writer-service to be healthy"
+    )
+
+
+def test_local_n8n_init_setup_owner_rejects_404():
+    """setup_owner must treat 404 as 'REST not ready', not 'already configured'."""
+    script = _n8n_init_script()
+    assert "404" in script
+    assert "REST API not ready" in script or "not ready" in script.lower(), (
+        "setup_owner must raise on 404, not silently treat it as already-configured"
+    )
+    assert "assuming already configured" not in script, (
+        "loose 'assuming already configured' fallback must be removed from setup_owner"
+    )

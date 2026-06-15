@@ -4,6 +4,62 @@ All notable changes to this project are documented here.
 
 ---
 
+## v1.0.5 — Milestone 5: End-to-end note lifecycle
+
+**Branch:** `milestone_5`
+
+Completed the full note lifecycle: ambiguous captures are filed to inbox, ask a clarification question, and remain pending until a reply resolves them; filed notes can be corrected by replying to the receipt or supplying an explicit capture ID; the entire corpus — SQLite ledger, vault, and n8n data volume — is backed up nightly to an encrypted off-host snapshot with a weekly restore validation. Several pipeline reliability bugs were also fixed during milestone delivery.
+
+### SB-117 — Clarification handling
+
+When Gemini returns `needs_clarification: true`, the note is filed into `00_inbox/` and a follow-up question is sent to the Discord receipt via the receipt/edit API. The capture remains `INBOX`, with `clarification_status = NEEDS_CLARIFICATION`, until a user reply resolves it.
+
+- **`POST /internal/clarifications/:capture_id`** — records the clarification question and sets `clarification_status = NEEDS_CLARIFICATION` on the capture. Idempotent: a duplicate request for the same capture returns the existing record.
+- **`src/secondbrain/ledger.py`** — `record_clarification()` write job. Stores the clarification question text, receipt message ID, and timestamp. Only `INBOX`-status captures can have a clarification recorded.
+- **`src/secondbrain/capture_service.py`** — `record_clarification()` facade. Correction commands (`fix:`, `fix SB-…:`) detected before persistence and skipped by `_capture_if_allowed` so they are never saved as notes.
+- **`n8n/workflows/second-brain-intake.json`** — `Needs Clarification?` IF node branches after inbox acknowledgement. True branch calls `POST /internal/clarifications/:capture_id` via `Record Clarification` HTTP node.
+- **`secondbrain status`** — unresolved clarifications appear as a separate count alongside the inbox count.
+- Timeout does not delete or reclassify the note. It remains in `00_inbox/` until a reply resolves it.
+
+### SB-118 — Corrections
+
+Supports targeted note corrections via Discord reply or explicit capture ID. Bare unthreaded `fix:` messages are rejected — the system never guesses the most-recent capture.
+
+- **Reply-to-receipt form** — replying to a filing receipt with `fix: <new folder or reason>` moves the note and updates the receipt.
+- **Explicit form** — `fix SB-YYYYMMDD-NNNN: <reason>` works without an open thread.
+- **Bare-message rejection** — an unthreaded `fix:` with no capture ID in context is rejected with a clear error reply. Bare fix messages are detected in the gateway path before any persistence attempt.
+- **`writer-service`** — `POST /internal/notes/move` performs the `git mv`, commits, pushes, and returns `old_note_path`, `new_note_path`, and `git_commit_hash`.
+- **`capture-service`** — resolves the correction target from the reply thread or explicit ID. Records `old_note_path`, `new_note_path`, and `git_commit_hash` on the correction event. Correction history is append-only; no prior record is mutated.
+- A second correction after a previous move targets the current note path and never creates a duplicate.
+
+### SB-119 — Encrypted off-host backups and restore validation
+
+Added nightly encrypted snapshots of all durable state and a weekly restore validation that never touches live volumes.
+
+- **SQLite backup** — uses `sqlite3 .backup` (WAL-safe) rather than a raw `cp` of the live database file.
+- **Vault and n8n data** — EC2 vault clone and n8n data volume included in each snapshot.
+- **Encryption** — backup output encrypted before leaving the host. Secrets excluded or redacted from configuration backups.
+- **Restore validation** — validates a backup into a temporary directory only. Never mounts or touches live volumes.
+- **`deploy/backup.sh`** / **`deploy/restore-validate.sh`** — nightly and weekly scripts; both are idempotent and exit non-zero on failure.
+- **`secondbrain status`** — reports last successful backup timestamp and last successful restore validation timestamp.
+
+### Pipeline reliability fixes
+
+Several correctness and reliability issues identified during milestone testing were fixed before merge.
+
+- **Receipt condition** — `downstream_processing_enabled` in the Discord receipt now reads `settings.downstream_delivery_enabled` (the env var) instead of `_notify_capture is not None`. In `capture-only` + n8n mode the receipt correctly says "Queued for downstream filing" rather than "Downstream filing is not enabled yet." The `capture_deferred` log only fires when delivery is genuinely disabled.
+- **Correction commands excluded from capture** — `fix:` and `fix SB-…:` messages are detected in `_capture_if_allowed` before secret screening and persistence, preventing them from being saved as notes while downstream routing handles them.
+- **Classifier retry credentials** — `Schedule Retry (classifier)` node was missing the `PLACEHOLDER_CAPTURE_SERVICE_TOKEN` credential block; added.
+- **Credential consistency test hardened** — `test_every_capture_service_node_uses_same_credential` now hard-fails on any capture-service HTTP node that lacks a credential, rather than silently skipping it.
+- **Gemini parse robustness** — `Parse Gemini Response` now joins all `parts[].text` entries before parsing, handling split-output responses. Surfaces `parse_error`, `finish_reason`, and `raw_preview` for debugging.
+- **Gemini error branch** — `Classify with Gemini` is wrapped in a `Gemini OK?` IF node. HTTP 429/403/5xx and timeouts route to `Schedule Retry (Gemini error)` with `error_type: gemini_http_error` instead of leaking a stale lease.
+- **Invalid classification routing** — `Valid Classification?` IF node inserted between `Validate Classification` and `File or Inbox?`. Empty route or `valid: false` routes to `Schedule Retry (classifier)` with `error_type: invalid_classifier_output` rather than silently dropping the execution.
+- **Gemini classifier config** — `temperature: 0` (fully deterministic), `maxOutputTokens: 2048`. Prompt hardened: "Return compact JSON only. No explanation. No markdown. Body under 80 words. At most one action."
+- **Startup order enforced** — `compose.override.yaml` (local dev only) n8n healthcheck now probes `POST /rest/login` (HTTP 400 = REST route exists) instead of `GET /` (only proves static server is up). `capture-service` depends on `local-n8n-init: service_completed_successfully` and `writer-service: service_healthy` so `docker compose up -d` cannot start Discord intake before the n8n webhook is registered. `setup_owner()` in `local-n8n-init.py` now hard-fails on HTTP 404 ("REST not ready") and only accepts 200 (created) or 400 (already configured).
+- **Test environment leakage** — `DOWNSTREAM_DELIVERY_ENABLED=false` added to `BASE_ENV` in capture-only unit tests; `GIT_SYNC_ENABLED=false` added to the autouse fixture in writer-service tests. Both prevent leaked environment variables from producing false failures.
+
+---
+
 ## v1.0.4 — Milestone 4: Git-backed writer service
 
 **Branch:** `milestone_4`
