@@ -38,6 +38,8 @@ chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${RUNTIME_HOME}"
 export HOME="${RUNTIME_HOME}"
 export GIT_SSH_COMMAND="ssh -i ${RUNTIME_HOME}/.ssh/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=${RUNTIME_HOME}/.ssh/known_hosts -o StrictHostKeyChecking=yes"
 
+gosu "${RUNTIME_UID}:${RUNTIME_GID}" git config --global --add safe.directory /opt/vault || true
+
 if [ "${GIT_SYNC_ENABLED:-true}" = "true" ]; then
   if [ ! -f "${RUNTIME_HOME}/.ssh/id_ed25519" ]; then
     echo "ERROR: GIT_SYNC_ENABLED=true but deploy key is missing at ${RUNTIME_HOME}/.ssh/id_ed25519" >&2
