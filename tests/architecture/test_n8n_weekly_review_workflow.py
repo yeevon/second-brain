@@ -218,3 +218,14 @@ def test_weekly_review_capture_service_node_uses_placeholder_credential():
             cred = node.get("credentials", {}).get("httpHeaderAuth")
             assert cred is not None, f"Node '{node['name']}' calls capture-service but has no httpHeaderAuth credential"
             assert cred["id"] == "PLACEHOLDER_CAPTURE_SERVICE_TOKEN"
+
+
+def test_weekly_review_prepare_node_uses_let_not_const_for_week_summary():
+    """weekSummary must be `let` so outstanding_tasks_count can be appended."""
+    wf = _fixture()
+    code_nodes = [n for n in wf["nodes"] if n.get("type") == "n8n-nodes-base.code"]
+    prepare_nodes = [n for n in code_nodes if "Prepare" in n["name"] or "Priority" in n["name"].lower()]
+    assert len(prepare_nodes) >= 1, "Prepare AI Priorities Input node not found"
+    code = prepare_nodes[0]["parameters"]["jsCode"]
+    assert "let weekSummary" in code, "weekSummary must be declared with 'let' so += assignment works"
+    assert "weekSummary +=" in code, "outstanding_tasks_count must be appended via += not discarded"

@@ -1,7 +1,13 @@
 """Vault scanning utilities shared by digest endpoints and MCP server."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
+# Matches both unquoted (`status: open`) and quoted (`status: "open"`) forms.
+# writer-service renders status via yaml_scalar = json.dumps, so real notes
+# contain the quoted form; unquoted is supported for hand-authored notes.
+_OPEN_STATUS_LINE_RE = re.compile(r'^    status: "?open"?\s*$', re.MULTILINE)
 
 
 def scan_open_tasks(vault_path: Path) -> int:
@@ -19,7 +25,7 @@ def scan_open_tasks(vault_path: Path) -> int:
         parts = text.split("---", 2)
         if len(parts) < 3:
             continue
-        count += parts[1].count("    status: open")
+        count += len(_OPEN_STATUS_LINE_RE.findall(parts[1]))
     return count
 
 
@@ -46,7 +52,7 @@ def scan_open_task_list(
         if len(parts) < 3:
             continue
         frontmatter = parts[1]
-        if "    status: open" not in frontmatter:
+        if not _OPEN_STATUS_LINE_RE.search(frontmatter):
             continue
         note_project = _extract_frontmatter_field(frontmatter, "project")
         if project is not None and note_project != project:
@@ -76,6 +82,10 @@ def _extract_frontmatter_field(frontmatter: str, field: str) -> str | None:
     return None
 
 
+def _action_status_is_open(stripped: str) -> bool:
+    return stripped in ("status: open", 'status: "open"')
+
+
 def _parse_open_actions(frontmatter: str) -> list[str]:
     """Extract action text strings with status: open from frontmatter."""
     lines = frontmatter.splitlines()
@@ -97,7 +107,7 @@ def _parse_open_actions(frontmatter: str) -> list[str]:
                 continue
         if stripped.startswith("- text:"):
             pending_text = stripped[7:].strip().strip('"')
-        elif stripped.startswith("status: open") and pending_text is not None:
+        elif _action_status_is_open(stripped) and pending_text is not None:
             open_actions.append(pending_text)
             pending_text = None
         elif stripped.startswith("status:") and pending_text is not None:

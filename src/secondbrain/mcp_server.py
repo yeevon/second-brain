@@ -74,11 +74,33 @@ def _enforce_path(vault_path: Path, note_path: str) -> Path:
 
 
 def _vault_preflight(vault_path: Path | None) -> str | None:
-    """Return a warning string if vault may be stale; None if ok."""
+    """Return a warning string if vault may be stale or dirty; None if ok.
+
+    Checks: path configured → path exists → git worktree clean.
+    A dirty worktree means vault-pull has not been run or local changes
+    were made outside the sync flow — results could be stale.
+    """
     if vault_path is None:
         return "VAULT_PATH not configured"
     if not vault_path.exists():
         return f"vault path does not exist: {vault_path}"
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=vault_path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return f"vault git status failed (exit {result.returncode}) — run vault-pull first"
+        if result.stdout.strip():
+            return (
+                "vault has uncommitted local changes — results may be stale; "
+                "run vault-pull to sync before querying"
+            )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return "vault git status timed out or git is unavailable"
     return None
 
 

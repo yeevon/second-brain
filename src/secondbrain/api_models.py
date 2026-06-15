@@ -103,6 +103,7 @@ class AcknowledgeFiledRequest(StrictInternalRequest):
     delivery_attempt: int = Field(ge=1)
     note_path: str = Field(min_length=1, max_length=1000)
     git_commit_hash: str | None = Field(default=None, max_length=100)
+    classification: dict | None = Field(default=None)
 
 
 class AcknowledgeInboxRequest(StrictInternalRequest):
@@ -110,6 +111,7 @@ class AcknowledgeInboxRequest(StrictInternalRequest):
     note_path: str = Field(min_length=1, max_length=1000)
     git_commit_hash: str | None = Field(default=None, max_length=100)
     reason_type: str = Field(default="", max_length=100)
+    classification: dict | None = Field(default=None)
 
     @field_validator("reason_type")
     @classmethod

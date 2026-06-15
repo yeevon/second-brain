@@ -15,6 +15,7 @@ from secondbrain.mcp_server import (
     _do_read_note,
     _do_search_notes,
     _enforce_path,
+    _vault_preflight,
     _RESULT_LIMIT_MAX,
 )
 
@@ -274,3 +275,72 @@ class TestListOpenTasks:
         _write_note(tmp_path / "no_actions.md", 'capture_id: "SB-x"\nactions:\n  []', "Body.")
         results = _do_list_open_tasks(tmp_path, project=None, limit=10)
         assert results == []
+
+    def test_quoted_status_open_is_recognised(self, tmp_path):
+        """writer-service renders status: "open" (json.dumps); must be counted."""
+        fm = (
+            'capture_id: "SB-20250101-0001"\n'
+            'actions:\n'
+            '  - text: "Quoted task"\n'
+            '    status: "open"\n'
+        )
+        _write_note(tmp_path / "quoted.md", fm)
+        results = _do_list_open_tasks(tmp_path, project=None, limit=10)
+        assert len(results) == 1
+        assert results[0]["open_actions"] == ["Quoted task"]
+
+    def test_unquoted_status_open_is_recognised(self, tmp_path):
+        """Hand-authored notes with unquoted status: open must also be counted."""
+        fm = (
+            'capture_id: "SB-20250101-0002"\n'
+            'actions:\n'
+            '  - text: "Unquoted task"\n'
+            '    status: open\n'
+        )
+        _write_note(tmp_path / "unquoted.md", fm)
+        results = _do_list_open_tasks(tmp_path, project=None, limit=10)
+        assert len(results) == 1
+        assert results[0]["open_actions"] == ["Unquoted task"]
+
+
+# ---------------------------------------------------------------------------
+# vault_preflight
+# ---------------------------------------------------------------------------
+
+
+class TestVaultPreflight:
+    def test_none_vault_path_returns_error(self):
+        err = _vault_preflight(None)
+        assert err is not None
+        assert "not configured" in err
+
+    def test_nonexistent_path_returns_error(self, tmp_path):
+        missing = tmp_path / "does_not_exist"
+        err = _vault_preflight(missing)
+        assert err is not None
+        assert "does not exist" in err
+
+    def test_clean_git_repo_returns_none(self, tmp_path):
+        import subprocess
+        subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, capture_output=True)
+        (tmp_path / "note.md").write_text("content")
+        subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)
+        err = _vault_preflight(tmp_path)
+        assert err is None
+
+    def test_dirty_git_repo_returns_warning(self, tmp_path):
+        import subprocess
+        subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, capture_output=True)
+        (tmp_path / "note.md").write_text("initial")
+        subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)
+        # Make it dirty
+        (tmp_path / "note.md").write_text("modified")
+        err = _vault_preflight(tmp_path)
+        assert err is not None
+        assert "stale" in err or "uncommitted" in err

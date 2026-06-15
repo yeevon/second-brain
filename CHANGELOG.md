@@ -4,6 +4,61 @@ All notable changes to this project are documented here.
 
 ---
 
+## v1.0.7 — Milestone 6: Digests, vault-pull, and MCP server
+
+**Branch:** `milestone_6`
+
+Added four new capabilities: a daily Discord digest of capture activity, a weekly AI-assisted review, a pull-only vault sync wrapper, and a read-only MCP server for querying the vault and ledger from an AI assistant.
+
+### SB-120 — Daily digest
+
+Adds a scheduled n8n workflow that fires at 07:00 UTC and posts a Discord message summarising the last 24 hours of capture activity.
+
+- **`GET /internal/digest/daily`** — new internal endpoint (requires `X-Second-Brain-Internal-Token`). Returns new captures, filed notes, inbox backlog, captures awaiting clarification, open task count, terminal failures, retry events, sensitive rejections, and attachment warnings. Open task count is sourced from writer-service (`GET /internal/vault/stats/open-tasks`) if available, then from a direct vault scan, then `null`.
+- **`src/secondbrain/digest.py`** — `scan_open_tasks()` and `scan_open_task_list()` vault scanners. Handle both quoted (`status: "open"`) and unquoted (`status: open`) action status values; writer-service renders the quoted form via `yaml_scalar = json.dumps`.
+- **`src/secondbrain/ledger.py`** — `daily_digest_snapshot()` read method.
+- **`n8n/workflows/second-brain-daily-digest.json`** — 4-node workflow: Schedule Trigger → Get Daily Digest → Format Digest Message (Code) → Send to Discord. Discord URL sourced from n8n workflow variable `DISCORD_DIGEST_WEBHOOK_URL`. All credential IDs are `PLACEHOLDER_*`; inactive by default.
+
+### SB-121 — Weekly review
+
+Adds a scheduled n8n workflow that fires at 08:00 UTC every Monday and posts a Discord review including Gemini-generated priorities.
+
+- **`GET /internal/digest/weekly`** — new internal endpoint. Returns 7-day window counts for new captures, filed notes, tasks created, actions completed, decisions, inbox backlog, corrections, failures, retries, and sensitive rejections. Outstanding task count sourced the same way as daily. Task/decision counts are populated when n8n sends `classification` in the `acknowledge-filed` / `acknowledge-inbox` callback (see below).
+- **`src/secondbrain/ledger.py`** — `weekly_digest_snapshot()` read method.
+- **`n8n/workflows/second-brain-weekly-review.json`** — 6-node workflow: Schedule Trigger → Get Weekly Digest → Prepare AI Priorities Input (Code) → Generate AI Priorities (Gemini HTTPS) → Format Review Message (Code) → Send to Discord. AI prompt is grounded in numbers only; output labelled `AI-GENERATED PRIORITIES`.
+- **`src/secondbrain/api_models.py`** — `DailyDigestResponse` and `WeeklyDigestResponse` Pydantic models.
+
+### SB-121 fix — Classification stored on acknowledge-filed / acknowledge-inbox
+
+The n8n intake workflow sends the Gemini classification JSON in `acknowledge-filed` and `acknowledge-inbox` callbacks so that `classification_json` is reliably stored in the ledger. Previously `classification_json` was never set in n8n mode, making task/decision counts always zero.
+
+- **`src/secondbrain/api_models.py`** — `AcknowledgeFiledRequest` and `AcknowledgeInboxRequest` gain an optional `classification: dict | None` field.
+- **`src/secondbrain/ledger.py`** — `mark_filed()` and `mark_inbox()` accept `classification_json`; `_mark_delivery_terminal()` writes it to the database when provided.
+- **`src/secondbrain/capture_service.py`** — `acknowledge_delivery_filed()` and `acknowledge_delivery_inbox()` thread `classification_json` through.
+- **`n8n/workflows/second-brain-intake.json`** — `Acknowledge Filed` and `Acknowledge Inbox` nodes switched to JSON body mode and include `classification: $('Parse Gemini Response').first().json.classification`.
+
+### SB-122 — Vault-pull CLI
+
+Adds a `vault-pull` script that performs a pull-only git sync of the Obsidian vault.
+
+- **`src/secondbrain/vault_pull.py`** — `pull_vault(vault_path)`: checks vault path exists → verifies clean worktree (exits 2 on dirty) → `git fetch origin` → `git merge --ff-only origin/main`. Fails visibly on every error; never force-merges or auto-resolves conflicts.
+- **`pyproject.toml`** — `vault-pull` script entry point.
+
+### SB-123 — Read-only MCP server
+
+Adds a `brain-mcp` stdio server exposing five read-only vault and ledger tools.
+
+- **`src/secondbrain/mcp_server.py`** — Tools: `search_notes`, `read_note`, `list_recent_notes`, `list_open_tasks`, `get_sync_status`. Path-root enforcement via `_enforce_path()` blocks traversal. Result limit clamped to [1, 100]. `_vault_preflight()` checks: VAULT_PATH configured → path exists → git worktree clean (dirty vault triggers a stale-data warning).
+- **`writer-service/src/writerservice/main.py`** — `GET /internal/vault/stats/open-tasks` endpoint returns open action count; used by capture-service digest endpoints so vault access stays within writer-service.
+- **`pyproject.toml`** — `brain-mcp` script entry point; `mcp>=1.0.0` dependency.
+
+### Bootstrap updates
+
+- **`deploy/bootstrap-n8n.sh`** — imports Daily Digest and Weekly Review on EC2; Steps 3 & 4 added to manual instructions.
+- **`deploy/local-n8n-init.py`** — imports Daily Digest and Weekly Review into local dev n8n (inactive; no activation since they are schedule-triggered).
+
+---
+
 ## v1.0.5 — Milestone 5: End-to-end note lifecycle
 
 **Branch:** `milestone_5`

@@ -283,6 +283,7 @@ class Ledger:
         delivery_attempt: int,
         derived_note_path: str,
         git_commit_hash: str | None = None,
+        classification_json: dict | None = None,
     ) -> DeliveryMutationResult:
         return self._write(
             "mark_filed",
@@ -294,6 +295,7 @@ class Ledger:
                 derived_note_path=derived_note_path,
                 git_commit_hash=git_commit_hash,
                 event_type="CAPTURE_FILED",
+                classification_json=classification_json,
             ),
         )
 
@@ -305,6 +307,7 @@ class Ledger:
         derived_note_path: str,
         git_commit_hash: str | None = None,
         reason_type: str = "",
+        classification_json: dict | None = None,
     ) -> DeliveryMutationResult:
         if reason_type:
             _validate_safe_slug(reason_type)
@@ -319,6 +322,7 @@ class Ledger:
                 git_commit_hash=git_commit_hash,
                 event_type="CAPTURE_INBOX",
                 extra_payload={"reason_type": reason_type} if reason_type else None,
+                classification_json=classification_json,
             ),
         )
 
@@ -1097,6 +1101,7 @@ class Ledger:
         git_commit_hash: str | None,
         event_type: str,
         extra_payload: dict[str, Any] | None = None,
+        classification_json: dict | None = None,
     ) -> DeliveryMutationResult:
         row = self._get_by_capture_id(conn, capture_id)
         current_ds = row["delivery_status"]
@@ -1133,17 +1138,32 @@ class Ledger:
 
         now = _iso(_now())
         reason_type = (extra_payload or {}).get("reason_type", None)
-        conn.execute(
-            """
-            UPDATE captures
-            SET status = ?, delivery_status = ?, derived_note_path = ?,
-                delivery_commit_hash = ?, delivery_reason_type = ?,
-                processing_lease_until = NULL, next_attempt_at = NULL, last_error = NULL,
-                updated_at = ?
-            WHERE capture_id = ?
-            """,
-            (note_status, COMPLETE, derived_note_path, git_commit_hash, reason_type, now, capture_id),
-        )
+        if classification_json is not None:
+            conn.execute(
+                """
+                UPDATE captures
+                SET status = ?, delivery_status = ?, derived_note_path = ?,
+                    delivery_commit_hash = ?, delivery_reason_type = ?,
+                    processing_lease_until = NULL, next_attempt_at = NULL, last_error = NULL,
+                    classification_json = ?,
+                    updated_at = ?
+                WHERE capture_id = ?
+                """,
+                (note_status, COMPLETE, derived_note_path, git_commit_hash, reason_type,
+                 _json_dumps(classification_json), now, capture_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE captures
+                SET status = ?, delivery_status = ?, derived_note_path = ?,
+                    delivery_commit_hash = ?, delivery_reason_type = ?,
+                    processing_lease_until = NULL, next_attempt_at = NULL, last_error = NULL,
+                    updated_at = ?
+                WHERE capture_id = ?
+                """,
+                (note_status, COMPLETE, derived_note_path, git_commit_hash, reason_type, now, capture_id),
+            )
         payload: dict[str, Any] = {
             "delivery_attempt": delivery_attempt,
             "derived_note_path": derived_note_path,
