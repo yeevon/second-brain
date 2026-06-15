@@ -261,3 +261,34 @@ class CorrectionResponse(BaseModel):
     old_note_path: str
     new_note_path: str
     git_commit_hash: str | None
+
+
+class DailyDigestResponse(BaseModel):
+    generated_at: datetime
+    window_hours: int
+    new_captures_count: int
+    filed_notes_count: int
+    inbox_backlog_count: int
+    awaiting_clarification_count: int
+    open_tasks_count: int | None
+    failed_captures_count: int
+    retry_events_count: int
+    sensitive_rejections_count: int
+    attachment_warnings_count: int
+
+
+class WeeklyDigestResponse(BaseModel):
+    generated_at: datetime
+    since: datetime
+    window_days: int
+    new_captures_count: int
+    filed_notes_count: int
+    created_tasks_count: int
+    completed_actions_count: int
+    decisions_count: int
+    outstanding_tasks_count: int | None
+    inbox_backlog_count: int
+    corrections_count: int
+    failures_count: int
+    retries_count: int
+    sensitive_rejections_count: int

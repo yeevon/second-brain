@@ -18,6 +18,7 @@ from secondbrain.api_models import (
     ClassificationValidationResponse,
     CorrectionRequest,
     CorrectionResponse,
+    DailyDigestResponse,
     DeliveryTransitionResponse,
     DownstreamCaptureResponse,
     EditReceiptRequest,
@@ -28,6 +29,7 @@ from secondbrain.api_models import (
     ScheduleRetryRequest,
     SecurityScreenRequest,
     SecurityScreenResponse,
+    WeeklyDigestResponse,
     WorkflowErrorResponse,
 )
 from secondbrain.capture_service import (
@@ -386,6 +388,67 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             old_note_path=result["old_note_path"],
             new_note_path=result["new_note_path"],
             git_commit_hash=result.get("git_commit_hash"),
+        )
+
+    # ------------------------------------------------------------------
+    # SB-120 / SB-121: Digest endpoints
+    # ------------------------------------------------------------------
+
+    @app.get(
+        "/internal/digest/daily",
+        response_model=DailyDigestResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def get_daily_digest():
+        from datetime import UTC, datetime, timedelta
+        from secondbrain.digest import scan_open_tasks
+
+        now = datetime.now(UTC)
+        since = now - timedelta(hours=24)
+        snapshot = capture_service.ledger.daily_digest_snapshot(since=since, now=now)
+
+        open_tasks: int | None = None
+        vault_path = getattr(capture_service.settings, "vault_path", None)
+        if vault_path is not None:
+            try:
+                open_tasks = scan_open_tasks(vault_path)
+            except Exception:
+                open_tasks = None
+
+        return DailyDigestResponse(
+            generated_at=now,
+            window_hours=24,
+            open_tasks_count=open_tasks,
+            **snapshot,
+        )
+
+    @app.get(
+        "/internal/digest/weekly",
+        response_model=WeeklyDigestResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def get_weekly_digest():
+        from datetime import UTC, datetime, timedelta
+        from secondbrain.digest import scan_open_tasks
+
+        now = datetime.now(UTC)
+        since = now - timedelta(days=7)
+        snapshot = capture_service.ledger.weekly_digest_snapshot(since=since, now=now)
+
+        outstanding_tasks: int | None = None
+        vault_path = getattr(capture_service.settings, "vault_path", None)
+        if vault_path is not None:
+            try:
+                outstanding_tasks = scan_open_tasks(vault_path)
+            except Exception:
+                outstanding_tasks = None
+
+        return WeeklyDigestResponse(
+            generated_at=now,
+            since=since,
+            window_days=7,
+            outstanding_tasks_count=outstanding_tasks,
+            **snapshot,
         )
 
     return app

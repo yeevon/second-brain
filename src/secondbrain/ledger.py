@@ -655,6 +655,18 @@ class Ledger:
     def get_system_state(self, key: str) -> str | None:
         return self._read("get_system_state", lambda conn: self._get_system_state(conn, key))
 
+    def daily_digest_snapshot(self, *, since: datetime, now: datetime) -> dict:
+        return self._read(
+            "daily_digest_snapshot",
+            lambda conn: self._daily_digest_snapshot(conn, since=since, now=now),
+        )
+
+    def weekly_digest_snapshot(self, *, since: datetime, now: datetime) -> dict:
+        return self._read(
+            "weekly_digest_snapshot",
+            lambda conn: self._weekly_digest_snapshot(conn, since=since, now=now),
+        )
+
     # ------------------------------------------------------------------
     # Private write implementations (run inside worker-owned connection)
     # ------------------------------------------------------------------
@@ -2214,6 +2226,168 @@ class Ledger:
             (capture_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+    def _daily_digest_snapshot(
+        self, conn: sqlite3.Connection, *, since: datetime, now: datetime
+    ) -> dict:
+        since_iso = _iso(since)
+        now_iso = _iso(now)
+
+        new_captures = conn.execute(
+            "SELECT COUNT(*) AS c FROM captures WHERE received_at >= ? AND received_at < ?",
+            (since_iso, now_iso),
+        ).fetchone()["c"]
+
+        filed_notes = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM capture_events
+            WHERE event_type = 'CAPTURE_FILED' AND created_at >= ? AND created_at < ?
+            """,
+            (since_iso, now_iso),
+        ).fetchone()["c"]
+
+        inbox_backlog = conn.execute(
+            "SELECT COUNT(*) AS c FROM captures WHERE status = 'INBOX'"
+        ).fetchone()["c"]
+
+        awaiting_clarification = conn.execute(
+            "SELECT COUNT(*) AS c FROM captures WHERE clarification_status = 'NEEDS_CLARIFICATION'"
+        ).fetchone()["c"]
+
+        failed_captures = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM capture_events
+            WHERE event_type IN ('RETRY_LIMIT_EXCEEDED', 'DELIVERY_FAILED_TERMINALLY')
+              AND created_at >= ? AND created_at < ?
+            """,
+            (since_iso, now_iso),
+        ).fetchone()["c"]
+
+        retry_events = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM capture_events
+            WHERE event_type = 'DELIVERY_RETRY_SCHEDULED'
+              AND created_at >= ? AND created_at < ?
+            """,
+            (since_iso, now_iso),
+        ).fetchone()["c"]
+
+        sensitive_rejections = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM captures
+            WHERE is_sensitive = 1 AND received_at >= ? AND received_at < ?
+            """,
+            (since_iso, now_iso),
+        ).fetchone()["c"]
+
+        attachment_warnings = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM captures
+            WHERE has_attachments = 1
+              AND status NOT IN ('FILED', 'INBOX', 'REJECTED_SENSITIVE', 'FAILED')
+            """
+        ).fetchone()["c"]
+
+        return {
+            "new_captures_count": int(new_captures),
+            "filed_notes_count": int(filed_notes),
+            "inbox_backlog_count": int(inbox_backlog),
+            "awaiting_clarification_count": int(awaiting_clarification),
+            "failed_captures_count": int(failed_captures),
+            "retry_events_count": int(retry_events),
+            "sensitive_rejections_count": int(sensitive_rejections),
+            "attachment_warnings_count": int(attachment_warnings),
+        }
+
+    def _weekly_digest_snapshot(
+        self, conn: sqlite3.Connection, *, since: datetime, now: datetime
+    ) -> dict:
+        since_iso = _iso(since)
+        now_iso = _iso(now)
+
+        new_captures = conn.execute(
+            "SELECT COUNT(*) AS c FROM captures WHERE received_at >= ? AND received_at < ?",
+            (since_iso, now_iso),
+        ).fetchone()["c"]
+
+        filed_notes = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM capture_events
+            WHERE event_type IN ('CAPTURE_FILED', 'CAPTURE_INBOX')
+              AND created_at >= ? AND created_at < ?
+            """,
+            (since_iso, now_iso),
+        ).fetchone()["c"]
+
+        # Count note types for filed captures in the window
+        note_type_rows = conn.execute(
+            """
+            SELECT json_extract(c.classification_json, '$.note_type') AS note_type,
+                   COUNT(*) AS cnt
+            FROM captures c
+            JOIN capture_events e ON e.capture_id = c.capture_id
+            WHERE e.event_type IN ('CAPTURE_FILED', 'CAPTURE_INBOX')
+              AND e.created_at >= ? AND e.created_at < ?
+              AND c.classification_json IS NOT NULL
+              AND c.is_sensitive = 0
+            GROUP BY note_type
+            """,
+            (since_iso, now_iso),
+        ).fetchall()
+        note_type_counts: dict[str, int] = {
+            row["note_type"]: int(row["cnt"])
+            for row in note_type_rows
+            if row["note_type"] is not None
+        }
+
+        inbox_backlog = conn.execute(
+            "SELECT COUNT(*) AS c FROM captures WHERE status = 'INBOX'"
+        ).fetchone()["c"]
+
+        corrections = conn.execute(
+            "SELECT COUNT(*) AS c FROM corrections WHERE created_at >= ? AND created_at < ?",
+            (since_iso, now_iso),
+        ).fetchone()["c"]
+
+        failures = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM capture_events
+            WHERE event_type IN ('RETRY_LIMIT_EXCEEDED', 'DELIVERY_FAILED_TERMINALLY')
+              AND created_at >= ? AND created_at < ?
+            """,
+            (since_iso, now_iso),
+        ).fetchone()["c"]
+
+        retries = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM capture_events
+            WHERE event_type = 'DELIVERY_RETRY_SCHEDULED'
+              AND created_at >= ? AND created_at < ?
+            """,
+            (since_iso, now_iso),
+        ).fetchone()["c"]
+
+        sensitive_rejections = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM captures
+            WHERE is_sensitive = 1 AND received_at >= ? AND received_at < ?
+            """,
+            (since_iso, now_iso),
+        ).fetchone()["c"]
+
+        return {
+            "new_captures_count": int(new_captures),
+            "filed_notes_count": int(filed_notes),
+            "created_tasks_count": note_type_counts.get("task", 0),
+            "completed_actions_count": note_type_counts.get("done", 0) + note_type_counts.get("fix", 0),
+            "decisions_count": note_type_counts.get("decision", 0),
+            "inbox_backlog_count": int(inbox_backlog),
+            "corrections_count": int(corrections),
+            "failures_count": int(failures),
+            "retries_count": int(retries),
+            "sensitive_rejections_count": int(sensitive_rejections),
+        }
 
 
 def _record_from_row(row: sqlite3.Row) -> CaptureRecord:

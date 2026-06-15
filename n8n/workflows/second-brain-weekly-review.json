@@ -1,0 +1,165 @@
+{
+  "name": "Second Brain - Weekly Review",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "wr000001-0001-0001-0001-000100010001",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [260, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://capture-service:8000/internal/digest/weekly",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "wr000002-0002-0002-0002-000200020002",
+      "name": "Get Weekly Digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare a structured summary for Gemini AI priorities analysis.\n// Only pass explicit state-change counts — never raw capture text.\nconst d = $input.first().json;\n\nconst weekSummary = [\n  `Weekly capture data (last ${d.window_days} days):`,\n  `- New captures: ${d.new_captures_count}`,\n  `- Filed notes: ${d.filed_notes_count}`,\n  `- Tasks created: ${d.created_tasks_count}`,\n  `- Actions completed (done/fix): ${d.completed_actions_count}`,\n  `- Decisions recorded: ${d.decisions_count}`,\n  `- Inbox backlog: ${d.inbox_backlog_count}`,\n  `- Corrections applied: ${d.corrections_count}`,\n  `- Terminal failures: ${d.failures_count}`,\n  `- Retries scheduled: ${d.retries_count}`,\n  `- Sensitive rejections: ${d.sensitive_rejections_count}`,\n].join('\\n');\n\nif (d.outstanding_tasks_count !== null && d.outstanding_tasks_count !== undefined) {\n  weekSummary + `\\n- Outstanding open tasks: ${d.outstanding_tasks_count}`;\n}\n\nconst prompt = [\n  'You are a weekly review assistant for a personal knowledge management system.',\n  'Based only on the following objective statistics (no raw content), generate a concise',\n  'priorities section of 3-5 bullet points. Each bullet must be grounded in the numbers.',\n  'Do not infer intent or completion from vague prose. Focus on what the numbers suggest.',\n  'Label your output clearly as AI-GENERATED PRIORITIES.',\n  '',\n  weekSummary,\n].join('\\n');\n\nreturn [{ json: { prompt, week_data: d } }];"
+      },
+      "id": "wr000003-0003-0003-0003-000300030003",
+      "name": "Prepare AI Priorities Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [{ parts: [{ text: $json.prompt }] }], generationConfig: { maxOutputTokens: 512, temperature: 0.3 } }) }}",
+        "options": {}
+      },
+      "id": "wr000004-0004-0004-0004-000400040004",
+      "name": "Generate AI Priorities",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [920, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_GEMINI_API_KEY",
+          "name": "Gemini API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combine weekly stats with AI priorities into a Discord message.\nconst geminiResponse = $input.first().json;\nconst weekData = $('Prepare AI Priorities Input').first().json.week_data;\n\nconst aiText = geminiResponse?.candidates?.[0]?.content?.parts?.[0]?.text ?? '(priorities unavailable)';\n\nconst ts = new Date(weekData.generated_at).toLocaleString('en-US', {\n  timeZone: 'UTC', month: 'short', day: 'numeric',\n  hour: '2-digit', minute: '2-digit', hour12: false,\n});\n\nconst lines = [\n  `**Second Brain – Weekly Review** (${ts} UTC)`,\n  '',\n  '**Captures (last 7 days)**',\n  `  New captures: ${weekData.new_captures_count}`,\n  `  Filed notes: ${weekData.filed_notes_count}`,\n  `  Sensitive rejections: ${weekData.sensitive_rejections_count}`,\n  '',\n  '**Explicit State Changes**',\n  `  Tasks created: ${weekData.created_tasks_count}`,\n  `  Actions completed (done/fix): ${weekData.completed_actions_count}`,\n  `  Decisions recorded: ${weekData.decisions_count}`,\n  `  Corrections applied: ${weekData.corrections_count}`,\n  '',\n  '**Backlog**',\n  `  Inbox: ${weekData.inbox_backlog_count}`,\n];\n\nif (weekData.outstanding_tasks_count !== null && weekData.outstanding_tasks_count !== undefined) {\n  lines.push(`  Outstanding open tasks: ${weekData.outstanding_tasks_count}`);\n}\n\nlines.push(\n  '',\n  '**Failures & Retries**',\n  `  Terminal failures: ${weekData.failures_count}`,\n  `  Retries scheduled: ${weekData.retries_count}`,\n  '',\n  '---',\n  '**⚠️ AI-GENERATED PRIORITIES** *(review before acting)*',\n  '',\n  aiText.trim(),\n);\n\nreturn [{ json: { content: lines.join('\\n') } }];"
+      },
+      "id": "wr000005-0005-0005-0005-000500050005",
+      "name": "Format Review Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1140, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.DISCORD_DIGEST_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: $json.content }) }}",
+        "options": {}
+      },
+      "id": "wr000006-0006-0006-0006-000600060006",
+      "name": "Send to Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1360, 300]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Weekly Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Weekly Digest": {
+      "main": [
+        [
+          {
+            "node": "Prepare AI Priorities Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare AI Priorities Input": {
+      "main": [
+        [
+          {
+            "node": "Generate AI Priorities",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate AI Priorities": {
+      "main": [
+        [
+          {
+            "node": "Format Review Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Review Message": {
+      "main": [
+        [
+          {
+            "node": "Send to Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
+  },
+  "tags": []
+}
