@@ -66,9 +66,13 @@ src/secondbrain/
   models.py           # Pydantic models
   observability.py    # structured JSON logging to stdout
   audit.py            # append-only audit log
+  mcp_server.py       # brain-mcp stdio server — five read-only vault and ledger tools
+  vault_pull.py       # vault-pull CLI — pull-only git sync of the Obsidian vault
+  digest.py           # open-task vault scanner used by daily/weekly digest endpoints
 
 writer-service/
-  Dockerfile                         # Python 3.13-slim, UID 10003, port 8001
+  Dockerfile                         # Python 3.13-slim, gosu, port 8001 (runtime UID from LOCAL_UID)
+  docker-entrypoint.sh               # creates runtime user, copies SSH secrets, execs gosu
   src/writerservice/
     main.py                          # FastAPI app, auth middleware, /health and /internal/notes/file
     config.py                        # GIT_SYNC_ENABLED, VAULT_PATH, WRITER_SERVICE_TOKEN
@@ -77,7 +81,7 @@ writer-service/
     vault.py                         # folder enum → physical directory mapping, path validation
     audit.py                         # append-only 99_log/events.ndjson writes
     flock.py                         # WriterLock — kernel-managed OS advisory flock (fcntl.LOCK_EX)
-    git_ops.py                       # GitVaultOps — fetch, merge, write, add, commit, push sequence
+    git_ops.py                       # fetch, merge, write, add, commit, push sequence
     git_errors.py                    # typed Git-layer error classes
   tests/
     unit/                            # auth, validation, Markdown generation, idempotency, flock, git_ops
@@ -206,6 +210,29 @@ N8N_INTAKE_WEBHOOK_TOKEN=<at least 32 random characters>
 GEMINI_API_KEY=<your Gemini API key>    # required — local-n8n-init fails without it
 ```
 
+### Optional: bind-mount a host vault (`LOCAL_VAULT_PATH`)
+
+By default, the stack uses a Docker named volume for the vault. To make the vault visible to Obsidian and `brain-mcp` on the host without any Docker volume copy, point `LOCAL_VAULT_PATH` at a local git repository instead:
+
+```env
+LOCAL_VAULT_PATH=/home/your-name/prj/my-vault   # must be a git repo with origin configured
+LOCAL_UID=1000                                   # your host uid (run: id -u)
+LOCAL_GID=1000                                   # your host gid (run: id -g)
+
+GIT_SYNC_ENABLED=true
+VAULT_DEPLOY_KEY_FILE=/home/your-name/.ssh/second-brain/my-vault-deploy-key
+GITHUB_KNOWN_HOSTS_FILE=deploy/github_known_hosts   # default; shipped in the repo
+```
+
+Prerequisites before setting `LOCAL_VAULT_PATH`:
+
+1. The directory must already be a git repository with an `origin` remote configured. The init container will fail loudly if `origin` is missing.
+2. Add a write-access deploy key to the GitHub repository and point `VAULT_DEPLOY_KEY_FILE` at the private key file on your host.
+
+`deploy/github_known_hosts` contains pinned SSH host keys for `github.com` and is the default value of `GITHUB_KNOWN_HOSTS_FILE`.
+
+The writer-service entrypoint creates the runtime user at `LOCAL_UID`/`LOCAL_GID` on each container start and copies the deploy key and known_hosts from Docker secrets to `~/.ssh/`. It fails fast on startup if `GIT_SYNC_ENABLED=true` and either file is missing.
+
 ### Start and stop
 
 ```bash
@@ -296,7 +323,7 @@ The intake workflow includes explicit error handling at every external boundary:
 
 ### Writer-service (SB-114+)
 
-`writer-service` is a standalone FastAPI container (UID 10003, port 8001, never published to the host) that is the sole vault writer. n8n sends classified captures to `POST /internal/notes/file`; writer-service renders a deterministic Markdown note, writes it to the vault, appends an audit event to `99_log/events.ndjson`, and returns the real filesystem note path. capture-service then edits the Discord receipt to show the filed location.
+`writer-service` is a standalone FastAPI container (port 8001, never published to the host) that is the sole vault writer. The container runs as the host user UID when `LOCAL_UID` is set, or as UID 10003 by default, via a gosu entrypoint that creates the runtime user dynamically at start. n8n sends classified captures to `POST /internal/notes/file`; writer-service renders a deterministic Markdown note, writes it to the vault, appends an audit event to `99_log/events.ndjson`, and returns the real filesystem note path. capture-service then edits the Discord receipt to show the filed location.
 
 Key filing behavior:
 
@@ -331,6 +358,24 @@ return { note_path, git_commit_hash }
 Locally, `GIT_SYNC_ENABLED` defaults to `true` via `compose.override.yaml`. The `local-vault-init` one-shot service (alpine/git) initializes both the vault working tree and a bare fake remote before writer-service starts, so `docker compose up -d` works with no manual Git setup.
 
 Git failure handling (SB-116): every bad state returns a typed error and preserves the raw SQLite capture. `git_push_rejected` is retryable; `git_merge_conflict`, `git_index_locked`, and `capture_id_duplicate` are terminal and require operator inspection. `.git/index.lock` is never deleted automatically.
+
+### Brain-MCP server (SB-123+)
+
+`brain-mcp` is a read-only MCP stdio server that exposes vault and ledger tools to AI clients (Claude Code, Claude Desktop, or any MCP-compatible client). Register it once at user scope:
+
+```bash
+claude mcp add \
+  -e VAULT_PATH=/home/your-name/prj/my-vault \
+  --scope user \
+  second-brain \
+  -- uv run --project /home/your-name/prj/second-brain brain-mcp
+```
+
+Available tools: `search_notes`, `read_note`, `list_recent_notes`, `list_open_tasks`, `get_sync_status`.
+
+`LEDGER_PATH` is optional. When unset, all vault tools work normally and `get_sync_status` reports `ledger_exists: false`. Only set `LEDGER_PATH` if you want `get_sync_status` to include ledger state. `read_note` rejects non-markdown paths and hidden files (paths starting with `.`).
+
+`_vault_preflight()` runs before every tool call: checks that `VAULT_PATH` is configured, exists, and has a clean git worktree. Untracked files (e.g. Obsidian's `.obsidian/` directory) do not trigger the stale-data warning — only modified or staged tracked files do.
 
 ### Encrypted off-host backups (SB-119+)
 

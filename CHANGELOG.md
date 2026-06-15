@@ -4,6 +4,47 @@ All notable changes to this project are documented here.
 
 ---
 
+## v1.0.8 — MCP gap: host vault access and writer-service hardening
+
+**Branch:** `mcp_gap`
+
+Fixed the architectural gap where `brain-mcp` could not access the vault because it lived in a Docker named volume invisible to host AI clients. Added a bind-mount mode so the host vault is directly visible to Obsidian and `brain-mcp` without any Docker volume copy. Hardened writer-service runtime identity, SSH key handling, and error visibility.
+
+### Host vault bind-mount mode (`LOCAL_VAULT_PATH`)
+
+When `LOCAL_VAULT_PATH` is set, writer-service and vault-init bind-mount the host directory instead of using the Docker named volume. Files created in the vault are owned by the host user (`LOCAL_UID`/`LOCAL_GID`), making the vault directly usable by Obsidian and `brain-mcp` on the host without extra copy steps.
+
+- **`compose.override.yaml` — `local-vault-init`** — branched init script: bind-mount mode skips remote rewrite, fake-remote push, and chown; requires a pre-configured `origin` remote and fails loudly if missing. Named-volume mode is unchanged. Added `HOME: /tmp` to environment to prevent `git config --global` from failing with a permission error when running as a UID that has no home directory entry.
+- **`.env.example`** — `LOCAL_VAULT_PATH`, `LOCAL_UID`, `LOCAL_GID`, `GIT_SYNC_ENABLED`, `VAULT_DEPLOY_KEY_FILE`, and `GITHUB_KNOWN_HOSTS_FILE` all documented with explanation comments.
+- **`deploy/github_known_hosts`** — pinned GitHub SSH host keys (via `ssh-keyscan github.com`); default value of `GITHUB_KNOWN_HOSTS_FILE`.
+- **`compose.mcp-local.yaml`** — dev-only optional `mcp-service` profile for keeping a container alive for `docker exec` MCP testing.
+
+### MCP server hardening
+
+- **`src/secondbrain/mcp_server.py`** — `LEDGER_PATH` is now optional. `_ledger_path()` returns `Path | None`; `call_tool()` no longer eagerly validates it. Vault tools (`search_notes`, `read_note`, `list_recent_notes`, `list_open_tasks`) work with only `VAULT_PATH` set. `get_sync_status` reports `ledger_exists: false` when the ledger path is unset. Vault preflight switches to `git status --porcelain --untracked-files=no` so Obsidian's `.obsidian/` directory no longer triggers a stale-data warning.
+- **`src/secondbrain/mcp_server.py` — `read_note`** — rejects non-markdown paths and hidden files (paths starting with `.`) with a clear error.
+- **`tests/unit/test_mcp_server.py`** — `TestLedgerPath` (3 tests), `TestGetSyncStatus` (4 tests), and `test_untracked_obsidian_files_do_not_trigger_warning` added. 50 tests total.
+
+### Writer-service: dynamic runtime identity via gosu
+
+Replaced the static `USER 10003` Dockerfile directive with a gosu-based entrypoint. The runtime user is created at container start from `LOCAL_UID`/`LOCAL_GID`, so vault files are owned by the correct host user in bind-mount mode.
+
+- **`writer-service/Dockerfile`** — removed static `groupadd`/`useradd`/`chown`/`USER 10003`. Added `gosu` to the apt install list. Entrypoint changed to `writer-entrypoint`.
+- **`writer-service/docker-entrypoint.sh`** (new) — creates group and user at runtime UID/GID; copies `vault_deploy_key` and `github_known_hosts` Docker secrets to `~/.ssh/` with correct permissions; exports `HOME` and `GIT_SSH_COMMAND`; runs `git config --global safe.directory /opt/vault` as the runtime user; then drops privileges via `exec gosu "${RUNTIME_UID}:${RUNTIME_GID}"`. Fails fast with a clear error message if the SSH key or known_hosts file is missing when `GIT_SYNC_ENABLED=true`.
+- **`compose.override.yaml` — `writer-service`** — removed `user:` field; added `LOCAL_UID`/`LOCAL_GID` environment variables, `vault_deploy_key` and `github_known_hosts` secrets, and `cap_add: [CHOWN, DAC_OVERRIDE, SETUID, SETGID]` alongside existing `cap_drop: ALL`.
+- **`compose.override.yaml` — healthcheck** — Git commands now run as `gosu "$${LOCAL_UID:-10003}:$${LOCAL_GID:-10003}"` so Git sees the vault as owned by its runner, not root.
+
+### Writer-service: git_ops and error visibility
+
+- **`writer-service/src/writerservice/git_ops.py`** — `git fetch` and `git push` error messages now include stderr so the failure reason is visible in logs. `check_working_tree_clean` uses `git status --porcelain --untracked-files=no` to prevent `99_log/events.ndjson` and Obsidian-managed files from triggering a false dirty-state 503.
+- **`writer-service/src/writerservice/main.py`** — `writer_error_handler` now logs every `WriterError` via `logger.error` before returning the JSON response. Previously all 503/409 errors were silently swallowed with no server-side log line.
+
+### CaptureService digest snapshot facade
+
+- **`src/secondbrain/capture_service.py`** — added `digest_daily_snapshot()` and `digest_weekly_snapshot()` public facade methods delegating to the ledger through the job-queue path used by all other write-safe reads.
+
+---
+
 ## v1.0.7 — Milestone 6: Digests, vault-pull, and MCP server
 
 **Branch:** `milestone_6`
