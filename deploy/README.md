@@ -329,10 +329,11 @@ WRITER_SERVICE_TOKEN=<at least 32 random characters>
 VAULT_PATH=/opt/vault
 AUDIT_LOG_PATH=/opt/vault/99_log/events.ndjson
 GIT_SYNC_ENABLED=true
-VAULT_REMOTE=git@github.com:<org>/<vault-repo>.git
 ```
 
 The `WRITER_SERVICE_TOKEN` is the shared secret between n8n and writer-service (the `Second Brain - Writer Service Header` credential above). Never print or commit it.
+
+`VAULT_PATH` must point to an existing Git working tree with `origin` configured. writer-service uses `git fetch origin`, `git merge --ff-only origin/main`, and `git push origin main`; it does not create or rewrite the remote.
 
 ### Enable downstream delivery in capture-service (SB-112+)
 
