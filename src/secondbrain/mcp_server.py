@@ -189,6 +189,11 @@ def _do_search_notes(
 
 def _do_read_note(vault_path: Path, note_path: str) -> str:
     resolved = _enforce_path(vault_path, note_path)
+    rel_parts = resolved.relative_to(vault_path.resolve()).parts
+    if any(part.startswith(".") for part in rel_parts):
+        raise ValueError(f"hidden paths are not readable: {note_path!r}")
+    if resolved.suffix != ".md":
+        raise ValueError(f"only markdown notes may be read: {note_path!r}")
     if not resolved.exists():
         raise FileNotFoundError(f"note not found: {note_path!r}")
     if not resolved.is_file():

@@ -163,6 +163,30 @@ class TestReadNote:
         result = _do_read_note(tmp_path, "note.md")
         assert result == content
 
+    def test_non_markdown_file_rejected(self, tmp_path):
+        (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+        with pytest.raises(ValueError, match="only markdown"):
+            _do_read_note(tmp_path, "config.json")
+
+    def test_git_config_rejected(self, tmp_path):
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").write_text("[core]", encoding="utf-8")
+        with pytest.raises(ValueError, match="hidden"):
+            _do_read_note(tmp_path, ".git/config")
+
+    def test_hidden_file_at_root_rejected(self, tmp_path):
+        (tmp_path / ".writer.lock").write_text("", encoding="utf-8")
+        with pytest.raises(ValueError, match="hidden"):
+            _do_read_note(tmp_path, ".writer.lock")
+
+    def test_hidden_directory_component_rejected(self, tmp_path):
+        hidden = tmp_path / ".hidden"
+        hidden.mkdir()
+        (hidden / "note.md").write_text("content", encoding="utf-8")
+        with pytest.raises(ValueError, match="hidden"):
+            _do_read_note(tmp_path, ".hidden/note.md")
+
 
 # ---------------------------------------------------------------------------
 # list_recent_notes
