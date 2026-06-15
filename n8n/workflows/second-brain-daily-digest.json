@@ -1,0 +1,110 @@
+{
+  "name": "Second Brain - Daily Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 * * *"
+            }
+          ]
+        }
+      },
+      "id": "dd000001-0001-0001-0001-000100010001",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [260, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://capture-service:8000/internal/digest/daily",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "dd000002-0002-0002-0002-000200020002",
+      "name": "Get Daily Digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build a structured daily digest message for Discord.\n// All counts come from the capture service — no data is stored here.\nconst d = $input.first().json;\n\nconst ts = new Date(d.generated_at).toLocaleString('en-US', {\n  timeZone: 'UTC', month: 'short', day: 'numeric',\n  hour: '2-digit', minute: '2-digit', hour12: false,\n});\n\nconst lines = [\n  `**Second Brain – Daily Digest** (${ts} UTC)`,\n  '',\n  '**Intake (last 24 h)**',\n  `  New captures: ${d.new_captures_count}`,\n  `  Filed notes: ${d.filed_notes_count}`,\n  `  Sensitive rejections: ${d.sensitive_rejections_count}`,\n];\n\nif (d.attachment_warnings_count > 0) {\n  lines.push(`  ⚠️ Pending captures with attachments: ${d.attachment_warnings_count}`);\n}\n\nlines.push(\n  '',\n  '**Backlog**',\n  `  Inbox: ${d.inbox_backlog_count}`,\n  `  Awaiting clarification: ${d.awaiting_clarification_count}`,\n);\n\nif (d.open_tasks_count !== null && d.open_tasks_count !== undefined) {\n  lines.push(`  Open tasks: ${d.open_tasks_count}`);\n}\n\nlines.push(\n  '',\n  '**Failures & Retries (last 24 h)**',\n  `  Terminal failures: ${d.failed_captures_count}`,\n  `  Retry events: ${d.retry_events_count}`,\n);\n\nreturn [{ json: { content: lines.join('\\n') } }];"
+      },
+      "id": "dd000003-0003-0003-0003-000300030003",
+      "name": "Format Digest Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.DISCORD_DIGEST_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: $json.content }) }}",
+        "options": {}
+      },
+      "id": "dd000004-0004-0004-0004-000400040004",
+      "name": "Send to Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [920, 300]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Daily Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Daily Digest": {
+      "main": [
+        [
+          {
+            "node": "Format Digest Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Digest Message": {
+      "main": [
+        [
+          {
+            "node": "Send to Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
+  },
+  "tags": []
+}

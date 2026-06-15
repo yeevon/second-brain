@@ -391,3 +391,27 @@ def test_every_capture_service_node_uses_same_credential():
     assert capture_cred_names == {"Capture Service Token"}, (
         f"Multiple credential names for capture-service nodes {nodes_checked}: {capture_cred_names}"
     )
+
+
+def test_acknowledge_filed_sends_classification():
+    """Acknowledge Filed must send classification JSON so the ledger stores note_type."""
+    wf = _fixture()
+    node = next((n for n in wf["nodes"] if n["name"] == "Acknowledge Filed"), None)
+    assert node is not None, "Acknowledge Filed node not found"
+    params = node.get("parameters", {})
+    body = params.get("jsonBody", "") or str(params.get("bodyParameters", ""))
+    assert "classification" in body, (
+        "Acknowledge Filed must include classification field so note_type is stored in ledger"
+    )
+
+
+def test_acknowledge_inbox_sends_classification():
+    """Acknowledge Inbox must send classification JSON so the ledger stores note_type."""
+    wf = _fixture()
+    node = next((n for n in wf["nodes"] if n["name"] == "Acknowledge Inbox"), None)
+    assert node is not None, "Acknowledge Inbox node not found"
+    params = node.get("parameters", {})
+    body = params.get("jsonBody", "") or str(params.get("bodyParameters", ""))
+    assert "classification" in body, (
+        "Acknowledge Inbox must include classification field so note_type is stored in ledger"
+    )
