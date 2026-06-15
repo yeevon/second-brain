@@ -8,7 +8,7 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from writerservice.api_models import FileNoteRequest, FileNoteResponse, HealthResponse
+from writerservice.api_models import FileNoteRequest, FileNoteResponse, HealthResponse, MoveNoteRequest, MoveNoteResponse
 from writerservice.config import get_settings
 from writerservice.git_errors import CaptureDuplicateError, WriterError
 from writerservice.vault import check_vault_writable
@@ -92,6 +92,39 @@ def _build_app() -> FastAPI:
             note_path=result.note_path,
             git_commit_hash=result.git_commit_hash,
             idempotent=not result.created,
+        )
+
+    @app.post(
+        "/internal/notes/move",
+        response_model=MoveNoteResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def move_note(request: MoveNoteRequest) -> MoveNoteResponse:
+        settings = get_settings()
+        vault_path = Path(settings.vault_path)
+
+        writer = VaultWriter(vault_path, audit_log_path=settings.audit_log_path)
+
+        try:
+            result = writer.move_note(
+                capture_id=request.capture_id,
+                new_folder=request.new_folder,
+                new_project=request.new_project,
+                correction_reason=request.correction_reason,
+                git_sync_enabled=settings.git_sync_enabled,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="note not found in vault") from exc
+        except CaptureDuplicateError as exc:
+            raise exc from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid request") from exc
+
+        return MoveNoteResponse(
+            result="MOVED",
+            old_note_path=result.old_note_path,
+            new_note_path=result.new_note_path,
+            git_commit_hash=result.git_commit_hash,
         )
 
     return app

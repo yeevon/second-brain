@@ -30,6 +30,10 @@ class Settings:
         # self.github_vault_repo  = os.getenv("GITHUB_VAULT_REPO")
         # self.github_vault_branch = os.getenv("GITHUB_VAULT_BRANCH")
 
+        # Writer service (for SB-118 correction moves)
+        self.writer_service_url = os.getenv("WRITER_SERVICE_URL", "").strip() or None
+        self.writer_service_token = os.getenv("WRITER_SERVICE_TOKEN", "").strip() or None
+
         # Downstream delivery (n8n)
         self.downstream_delivery_enabled = (
             os.getenv("DOWNSTREAM_DELIVERY_ENABLED", "false").strip().lower() == "true"

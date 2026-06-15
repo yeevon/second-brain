@@ -92,7 +92,7 @@ def _unwrap(body):
 # ── Owner setup ───────────────────────────────────────────────────────────────
 
 def setup_owner():
-    status, _body = _api("POST", "/rest/owner/setup", {
+    status, body = _api("POST", "/rest/owner/setup", {
         "firstName": LOCAL_FIRST,
         "lastName": LOCAL_LAST,
         "email": LOCAL_EMAIL,
@@ -100,8 +100,17 @@ def setup_owner():
     }, ok_statuses=None)
     if status == 200:
         print(f"  Owner created: {LOCAL_EMAIL}")
+    elif status == 400:
+        print(f"  Owner already configured — skipping setup")
+    elif status == 404:
+        raise RuntimeError(
+            "n8n REST API not ready: /rest/owner/setup returned 404. "
+            "The healthcheck should have prevented this — check n8n startup logs."
+        )
     else:
-        print(f"  Owner setup returned HTTP {status} — assuming already configured")
+        raise RuntimeError(
+            f"Unexpected status from /rest/owner/setup: HTTP {status} — {json.dumps(body)[:200]}"
+        )
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────

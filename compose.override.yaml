@@ -23,6 +23,14 @@ services:
       - |
         touch /var/lib/second-brain/.second-brain-ebs-volume 2>/dev/null || true
         exec /usr/local/bin/secondbrain-entrypoint /app/.venv/bin/python -m secondbrain run
+    depends_on:
+      local-n8n-init:
+        condition: service_completed_successfully
+      writer-service:
+        condition: service_healthy
+    environment:
+      WRITER_SERVICE_URL: http://writer-service:8001
+      WRITER_SERVICE_TOKEN: ${WRITER_SERVICE_TOKEN:-dev-writer-service-token-change-me}
     volumes:
       - second-brain-local-data:/var/lib/second-brain
 
@@ -54,12 +62,12 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:5678/').then(r => process.exit(r.status < 500 ? 0 : 1)).catch(() => process.exit(1))",
+          "fetch('http://127.0.0.1:5678/rest/login',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r => process.exit(r.status === 400 ? 0 : 1)).catch(() => process.exit(1))",
         ]
       interval: 30s
       timeout: 5s
-      retries: 5
-      start_period: 30s
+      retries: 10
+      start_period: 60s
 
   local-vault-init:
     image: alpine/git:latest

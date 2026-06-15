@@ -12,8 +12,12 @@ from secondbrain.api_models import (
     AcknowledgeForwardedRequest,
     AcknowledgeInboxRequest,
     CaptureResponse,
+    ClarificationRequest,
+    ClarificationResponse,
     ClassificationValidationRequest,
     ClassificationValidationResponse,
+    CorrectionRequest,
+    CorrectionResponse,
     DeliveryTransitionResponse,
     DownstreamCaptureResponse,
     EditReceiptRequest,
@@ -326,6 +330,62 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             delivered=delivery.delivered,
             replaced=delivery.replaced,
             receipt_message_id=delivery.receipt_message_id,
+        )
+
+    # ------------------------------------------------------------------
+    # SB-117: Clarification handling
+    # ------------------------------------------------------------------
+
+    @app.post(
+        "/internal/clarifications/{capture_id}",
+        response_model=ClarificationResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def record_clarification(capture_id: str, request: ClarificationRequest):
+        _get_capture(capture_service, capture_id)
+        recorded = await capture_service.record_clarification(
+            capture_id=capture_id,
+            question=request.question,
+        )
+        if not recorded:
+            raise HTTPException(
+                status_code=409,
+                detail="capture is not in INBOX status; clarification cannot be recorded",
+            )
+        capture = _get_capture(capture_service, capture_id)
+        return ClarificationResponse(
+            capture_id=capture_id,
+            clarification_status=capture.clarification_status or "NEEDS_CLARIFICATION",
+            question_sent=True,
+        )
+
+    # ------------------------------------------------------------------
+    # SB-118: Correction handling
+    # ------------------------------------------------------------------
+
+    @app.post(
+        "/internal/captures/{capture_id}/corrections",
+        response_model=CorrectionResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def apply_correction(capture_id: str, request: CorrectionRequest):
+        capture = _get_capture(capture_service, capture_id)
+        result = await capture_service.apply_correction(
+            capture_id=capture_id,
+            new_folder=request.new_folder,
+            correction_reason=request.correction_reason,
+        )
+        if result is None:
+            raise HTTPException(
+                status_code=409,
+                detail="correction could not be applied; capture may not have a filed note",
+            )
+        return CorrectionResponse(
+            capture_id=capture_id,
+            correction_id=result["correction_id"],
+            old_note_path=result["old_note_path"],
+            new_note_path=result["new_note_path"],
+            git_commit_hash=result.get("git_commit_hash"),
         )
 
     return app

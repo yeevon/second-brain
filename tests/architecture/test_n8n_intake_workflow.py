@@ -377,8 +377,9 @@ def test_every_capture_service_node_uses_same_credential():
         if "capture-service" not in url:
             continue
         cred = node.get("credentials", {}).get("httpHeaderAuth")
-        if not cred:
-            continue
+        assert cred is not None, (
+            f"Node '{node['name']}' calls capture-service but has no httpHeaderAuth credential"
+        )
         capture_cred_ids.add(cred["id"])
         capture_cred_names.add(cred["name"])
         nodes_checked.append(node["name"])
