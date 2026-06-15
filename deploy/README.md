@@ -1,6 +1,6 @@
 # Second Brain EC2 Capture Service
 
-This deployment runs only the durable Discord intake service on EC2. Classification, Markdown filing, n8n, Git sync, and vault writes remain disabled for SB-104.
+This deployment runs the durable Discord capture-service and, in later milestone overlays, n8n and writer-service for downstream classification, filing, and Git-backed vault sync. The base `compose.yaml` remains capture-service only; deployment overlays add n8n and writer-service where enabled.
 
 ## EC2 Shape
 
@@ -211,9 +211,19 @@ deploy/open-n8n-tunnel.sh <EC2_HOST>
 
 Then open `http://127.0.0.1:5678` in the browser. The tunnel must remain open while using the editor.
 
+### Local full stack vs EC2/staging overlay
+
+| Concern | Local full stack | EC2/staging |
+| --- | --- | --- |
+| Compose config | `compose.override.yaml` (auto-loaded; never set `COMPOSE_FILE`) | `compose.yaml:compose.n8n.yaml` (set via `deploy.sh`) |
+| n8n seeding | `local-n8n-init` one-shot service — automatic, no manual step | `deploy/bootstrap-n8n.sh` — run manually after first login |
+| Vault init | `local-vault-init` one-shot service — automatic | Manual clone + SSH key setup (see writer-service section) |
+| `compose.override.yaml` | Auto-loaded by Docker Compose | Never loaded — `COMPOSE_FILE` excludes it |
+| `deploy/bootstrap-n8n.sh` | Do not run unless testing the EC2 bootstrap path | Run once after provisioning |
+
 ### Local Docker lifecycle
 
-`compose.override.yaml` is auto-loaded by Docker Compose when no `COMPOSE_FILE` is set.
+`compose.override.yaml` is auto-loaded by Docker Compose when `COMPOSE_FILE` is not set.
 It provides local-safe defaults for all required variables and includes n8n and
 writer-service. After completing first-time setup, plain Docker commands work:
 
@@ -224,7 +234,7 @@ docker compose logs -f   # follow logs
 docker compose ps        # check status
 ```
 
-No shell exports required. Production `deploy.sh` sets `COMPOSE_FILE=compose.yaml:compose.n8n.yaml`
+No shell exports required. EC2/staging `deploy.sh` sets `COMPOSE_FILE=compose.yaml:compose.n8n.yaml`
 explicitly, which prevents `compose.override.yaml` from being loaded there.
 
 ### First-time local setup
@@ -236,12 +246,13 @@ deploy/local-stack-up.sh
 ```
 
 This validates that `.env`, `n8n.local.env`, and `n8n-encryption-key.local` exist,
-builds the images, and waits for all containers to become healthy. The EBS sentinel
-marker is created automatically by the container entrypoint on first start — no
-separate `docker run` step required.
+builds the images, and waits for all containers to become healthy.
 
-After healthy containers, follow the n8n bootstrap steps below, then run
-`deploy/bootstrap-n8n.sh`.
+The `local-vault-init` one-shot service seeds the vault working tree and fake bare remote
+automatically. The `local-n8n-init` one-shot service creates the n8n owner account,
+all four credentials, imports and activates both workflows, and verifies the intake
+webhook — all before `capture-service` starts. No manual `bootstrap-n8n.sh` step or
+n8n UI interaction is required for the local full stack.
 
 ### Local SB-113 error workflow validation
 
@@ -266,9 +277,11 @@ racing the dispatcher, fires the harness, and verifies RETRY_WAIT, idempotency,
 raw-text preservation, and orphan behavior. No CAPTURE_ID, DELIVERY_ATTEMPT, or
 token input required.
 
-### Bootstrap workflows after first login
+### Bootstrap workflows after first login (EC2/staging only)
 
-After creating the owner account in the UI, run on EC2:
+This step applies to EC2/staging deployments only. The local full stack runs `local-n8n-init` automatically — do not run `bootstrap-n8n.sh` for the local stack unless you are deliberately testing the EC2 bootstrap path.
+
+After creating the owner account in the n8n UI on EC2, run:
 
 ```bash
 deploy/bootstrap-n8n.sh

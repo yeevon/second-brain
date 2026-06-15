@@ -191,7 +191,7 @@ uv run python -m secondbrain status
 - `writer-service` — Markdown generation and Git-backed vault writes; `capture-service` waits for it to be healthy
 - `capture-service` — Discord intake and SQLite ledger; starts last, after the webhook is registered and writer-service is ready
 
-`compose.override.yaml` is auto-loaded and provides local-safe defaults. The EBS sentinel marker and vault Git repository are both created automatically on first start. No manual bootstrap step or custom startup sequence is required.
+`compose.override.yaml` is auto-loaded and provides local-safe defaults. In default named-volume mode, the EBS sentinel marker and local fake vault remote are created automatically on first start. When using `LOCAL_VAULT_PATH`, the host vault must already be a Git repository with `origin` configured — see the bind-mount section below.
 
 ### Required env files
 
