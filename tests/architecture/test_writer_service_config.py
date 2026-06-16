@@ -577,6 +577,23 @@ def test_override_local_n8n_init_mounts_init_script_readonly():
     assert any("local-n8n-init.py" in v and "ro" in v for v in vols)
 
 
+def test_local_n8n_init_mounts_workflows_to_expected_path():
+    svc = _override_compose()["services"]["local-n8n-init"]
+    volumes = [str(v) for v in svc["volumes"]]
+
+    assert "./n8n/workflows:/workflows:ro" in volumes
+    assert "./deploy/local-n8n-init.py:/init.py:ro" in volumes
+
+
+def test_local_n8n_init_reads_workflows_from_mounted_path():
+    init = _n8n_init_script()
+
+    assert '"/workflows/second-brain-error-handler.json"' in init
+    assert '"/workflows/second-brain-intake.json"' in init
+    assert '"/workflows/second-brain-daily-digest.json"' in init
+    assert '"/workflows/second-brain-weekly-review.json"' in init
+
+
 def test_local_n8n_init_creates_all_required_credentials():
     script = _n8n_init_script()
     assert "Capture Service Token" in script
