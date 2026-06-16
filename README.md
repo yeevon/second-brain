@@ -311,7 +311,7 @@ n8n runs alongside capture-service in the `compose.n8n.yaml` overlay. Key facts:
 - UI accessible only through an SSH tunnel (`deploy/open-n8n-tunnel.sh`). Port 5678 is never publicly exposed.
 - Credentials encrypted with an explicit external key; key stored outside the repository.
 - Execution payloads not retained globally — raw capture text must never appear in n8n storage.
-- `Second Brain - Error Handler` and `Second Brain - Intake` workflows are bootstrapped once via `deploy/bootstrap-n8n.sh`.
+- `Second Brain - Error Handler`, `Second Brain - Intake`, `Second Brain - Daily Digest`, and `Second Brain - Weekly Review` are bootstrapped via `deploy/bootstrap-n8n.sh`. Intake, Daily Digest, and Weekly Review update in place by existing ID on EC2/staging; local `local-n8n-init` updates all four workflows in place.
 
 ### Intake pipeline reliability
 
@@ -320,6 +320,16 @@ The intake workflow includes explicit error handling at every external boundary:
 - **Gemini failures** — HTTP 429/403/5xx and timeouts route to `Schedule Retry (Gemini error)` with `error_type: gemini_http_error` instead of leaking a stale lease. `Classify with Gemini` uses `temperature: 0` and `maxOutputTokens: 2048` for deterministic, compact output.
 - **Invalid classification** — `Valid Classification?` IF node catches empty route or `valid: false` and routes to `Schedule Retry (classifier)` with `error_type: invalid_classifier_output`.
 - **Clarification branch** — `Needs Clarification?` IF node routes to `Record Clarification` after inbox filing, setting `clarification_status = NEEDS_CLARIFICATION` on the capture in capture-service.
+
+### Daily and weekly briefs (SB-120/SB-121)
+
+Milestone 6 adds scheduled n8n review workflows that post Discord summaries from vault state, not raw capture-count rollups:
+
+- **Daily Brief** — `Second Brain - Daily Digest` calls `GET http://capture-service:8000/internal/brief/daily` and formats Today's Focus, Coming Up, Upcoming Birthdays, Pending Tasks, and Stale / Neglected.
+- **Weekly Review** — `Second Brain - Weekly Review` calls `GET http://capture-service:8000/internal/brief/weekly`, formats accomplished notes, completed tasks, decisions, still-open work, and study progress, then asks Gemini for a clearly labelled AI-generated priorities section.
+- **Data source** — capture-service first proxies to writer-service (`GET /internal/vault/brief/{daily,weekly}`) so the brief is grounded in the current vault. If writer-service is unavailable and `VAULT_PATH` is configured, capture-service falls back to a local vault scan.
+- **Activation** — both scheduled workflows are imported inactive. Bind the Capture Service Token credential and configure `DISCORD_DIGEST_WEBHOOK_URL` in n8n before activating them.
+- **No-wipe updates** — local `docker compose up -d --build` runs `local-n8n-init`, which updates all four local workflows in place by existing ID. EC2/staging bootstrap uses the same update-in-place behavior for Daily and Weekly through `deploy/bootstrap-n8n.sh`.
 
 ### Writer-service (SB-114+)
 
@@ -376,6 +386,19 @@ Available tools: `search_notes`, `read_note`, `list_recent_notes`, `list_open_ta
 `LEDGER_PATH` is optional. When unset, all vault tools work normally and `get_sync_status` reports `ledger_exists: false`. Only set `LEDGER_PATH` if you want `get_sync_status` to include ledger state. `read_note` rejects non-markdown paths and hidden files (paths starting with `.`).
 
 `_vault_preflight()` runs before every tool call: checks that `VAULT_PATH` is configured, exists, and has a clean git worktree. Untracked files (e.g. Obsidian's `.obsidian/` directory) do not trigger the stale-data warning — only modified or staged tracked files do.
+
+### gembrain CLI (SB-124)
+
+`gembrain` is the host-facing wrapper around vault sync, local vault queries, and Gemini CLI:
+
+```bash
+gembrain status
+gembrain recent --days 7 --limit 10
+gembrain tasks --project second-brain
+gembrain ask "What should I focus on next?"
+```
+
+`status` reports vault sync state without running a pull. `recent`, `tasks`, and `ask` run the `vault-pull` preflight first, so AI queries operate on a fresh, tracked-clean vault. `ask` delegates to the Gemini CLI and points it at `brain-mcp`; `gembrain` does not write to the vault.
 
 ### Encrypted off-host backups (SB-119+)
 
