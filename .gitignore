@@ -1,6 +1,17 @@
 .agents
 .codex
 .env
+capture-service.local.env
+second-brain-local-data/
+n8n.local.env
+n8n-encryption-key.local
+writer-stub.local.env
+writer-service.local.env
+vault-deploy-key
+vault-deploy-key.pub
+github_known_hosts.local
+.writer.lock
+n8n-test.local.env
 .runtime/
 __pycache__/
 *.pyc

@@ -1,85 +1,94 @@
 # Milestone 6: Add review and local-query features
 
-These are useful, but they should not distract from durable intake, retries, and backups.
+Implements Architecture Phase 5 (scheduled digests) and Phase 6 (local query access and Obsidian sync).
 
 ---
 
-## SB-119 — Add daily digest workflow
+## Status summary
 
-**Branch:** ```feature/daily-digest```
+- **SB-120** Add daily digest workflow — Done
+- **SB-121** Add weekly review workflow — Done
+- **SB-122** Add local pull-only Obsidian sync — Done
+- **SB-123** Add the local read-only MCP server — Done
+- **SB-124** Add gembrain CLI wrapper — Done
 
-### Include
-
-- New captures.
-- Filed notes.
-- Inbox backlog.
-- Awaiting clarification.
-- Open tasks.
-- Failed and retried captures.
-- Sensitive-rejection counts only.
-- Attachment warnings.
-
-Send to ```#brain-digest``` or DM.
+Milestone 6 is implemented and ready for V2 production release prep. The final shipped shape uses vault-backed brief endpoints for Daily and Weekly, a tracked-clean pull-only vault sync, a read-only MCP server, and the `gembrain` host CLI wrapper. Production deployment should preserve the V2 boundary: writer-service owns vault mutation, n8n updates workflows in place, local MCP stays read-only, and V3 writable MCP remains proposal-only.
 
 ---
 
-## SB-120 — Add weekly review workflow
+## SB-120 — Add daily digest workflow
 
-**Branch:** ```feature/weekly-review```
+See [SB-120.md](SB-120.md).
 
-### Include
+Implemented and tested. The current workflow calls `GET /internal/brief/daily`, which is backed by writer-service's vault scan (`GET /internal/vault/brief/daily`) with a local vault-scan fallback in capture-service.
 
-- Explicitly completed actions.
-- Explicitly created tasks.
-- Outstanding tasks.
-- Decisions.
-- Inbox backlog.
-- Corrections.
-- Failures and retries.
-- A clearly labeled AI-generated priorities section.
+The Discord message is grounded in:
 
-Do not infer completion from vague prose. Base progress claims on explicit ```task:```, ```done:```, ```decision:```, ```note:```, and ```fix:``` state changes.
+- Today's Focus
+- Coming Up
+- Upcoming Birthdays
+- Pending Tasks
+- Stale / Neglected
 
----
-
-## SB-121 — Add local pull-only Obsidian sync wrapper
-
-**Branch:** ```feature/local-vault-pull```
-
-### Implement
-
-```init
-git fetch origin
-git merge --ff-only origin/main
-verify clean worktree
-fail visibly on dirty tree or conflict
-```
-
-Keep Obsidian pull-only for version one. The architecture intentionally avoids two writers until you design a conflict policy.
+The n8n workflow includes a no-activity skip branch and delivery-failure logging. It is imported inactive and can be updated in place by existing workflow ID through both local and EC2 bootstrap paths.
 
 ---
 
-## SB-122 — Add the local read-only MCP server
+## SB-121 — Add weekly review workflow
 
-**Branch:** ```feature/read-only-mcp```
+See [SB-121.md](SB-121.md).
 
-Implement only after the rest of the pipeline is stable:
+Implemented and tested. The current workflow calls `GET /internal/brief/weekly`, which is backed by writer-service's vault scan (`GET /internal/vault/brief/weekly`) with a local vault-scan fallback in capture-service.
 
-```init
-search_notes(query, folder?, project?, tags?, limit?)
-read_note(note_path)
-list_recent_notes(days?, folder?, limit?)
-list_open_tasks(project?, limit?)
-get_sync_status()
-```
+Completion is grounded in explicit state only: `note_type: done` / `fix` notes and completed actions. Body text is not scanned for inferred completion. The AI priorities section is clearly labelled and never written back to the ledger. Gemini failure does not block the factual weekly summary from posting.
 
-Add path-root enforcement, result limits, no shell execution, no mutation tools, and a sync preflight before queries.
+---
+
+## SB-122 — Add local pull-only Obsidian sync wrapper
+
+See [SB-122.md](SB-122.md).
+
+Implemented and tested. `vault-pull` checks tracked-file cleanliness with `git status --porcelain --untracked-files=no`, so untracked Obsidian metadata does not block pulls. The CLI fails visibly on dirty tracked files, fetch failures, and non-fast-forward merge conflicts; it never force-merges or auto-resolves conflicts.
+
+---
+
+## SB-123 — Add the local read-only MCP server
+
+See [SB-123.md](SB-123.md).
+
+Implemented and tested. All five tools are read-only, enforce vault-root paths, clamp result limits, reject hidden/non-Markdown reads where appropriate, and preflight tracked-file cleanliness while ignoring untracked Obsidian metadata. `LEDGER_PATH` is optional, so vault tools work when only `VAULT_PATH` is configured.
+
+---
+
+## SB-124 — Add gembrain CLI wrapper and Gemini CLI integration
+
+See [SB-124.md](SB-124.md).
+
+Implemented and tested. `gembrain` provides:
+
+- `gembrain status` — reports vault sync state without running a pull.
+- `gembrain recent` — runs `vault-pull` preflight, then lists recent notes.
+- `gembrain tasks` — runs `vault-pull` preflight, then lists open tasks.
+- `gembrain ask` — runs `vault-pull` preflight, then invokes Gemini CLI with `brain-mcp` available as the MCP tool source.
+
+`gembrain` never writes to the vault.
+
+---
+
+## Bootstrap / E2E standard
+
+The local and EC2 n8n bootstrap paths now support no-wipe workflow refresh:
+
+- Local `local-n8n-init` updates Error Handler, Intake, Daily Digest, and Weekly Review in place by existing workflow ID.
+- EC2/staging `deploy/bootstrap-n8n.sh` updates Intake, Daily Digest, and Weekly Review in place by existing workflow ID. Error Handler is imported only when missing.
+- Daily and Weekly remain inactive unless intentionally activated.
+- Architecture tests lock exact local workflow mounts (`./n8n/workflows:/workflows:ro`, `./deploy/local-n8n-init.py:/init.py:ro`) and update-in-place behavior.
+
+Clean E2E bar: `docker compose up -d --build` updates existing workflow JSON automatically, manual Daily Digest execution uses latest brief formatting, and no UI delete/reimport is required.
 
 ---
 
 ## Do not implement these yet
-
-Leave these in the backlog until the simpler design proves insufficient:
 
 - S3-compatible attachment archive.
 - Two-way Obsidian sync.
@@ -89,24 +98,3 @@ Leave these in the backlog until the simpler design proves insufficient:
 - Separate Bouncer model call.
 - Automatic prompt tuning.
 - Multi-user capture.
-
-The canonical architecture deliberately defers each of these until there is evidence that the simpler implementation is inadequate.
-
-
-## What I would implement next
-
-Start with this exact sequence:
-
-```init
-SB-101  Regression suite
-SB-102  Internal capture-service boundary
-SB-103  capture-service HTTP API
-SB-104  EC2 deployment
-SB-105  SQLite service hardening
-SB-106  Periodic reconciliation
-SB-107  Delivery leases and retry state
-SB-108  Stale-lease reaper
-SB-109  Expanded status command
-```
-
-Do not start n8n until those are working. The next architectural risk is not classification quality. It is making sure the always-on intake service can survive downtime, dropped events, restarts, and stuck work without silently losing a thought.

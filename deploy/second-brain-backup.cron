@@ -1,0 +1,10 @@
+# SB-119: Cron schedule for nightly encrypted backups and weekly restore validation.
+# Install: cp second-brain-backup.cron /etc/cron.d/second-brain-backup && chmod 644 /etc/cron.d/second-brain-backup
+# This file uses /etc/cron.d format (user column present); do NOT paste into a user crontab.
+# Adjust paths to match your deployment.
+
+# Nightly encrypted snapshot at 02:00 UTC
+0 2 * * * root set -a && . /opt/second-brain/config/backup.env && set +a && /opt/second-brain/app/deploy/backup.sh >> /var/log/second-brain-backup.log 2>&1
+
+# Weekly restore validation on Sundays at 03:00 UTC
+0 3 * * 0 root set -a && . /opt/second-brain/config/backup.env && set +a && /opt/second-brain/app/deploy/restore-validate.sh >> /var/log/second-brain-restore-validate.log 2>&1

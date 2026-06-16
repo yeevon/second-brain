@@ -94,31 +94,30 @@ def test_extract_attachment_metadata_from_discord_message():
 
 
 @pytest.mark.asyncio
-async def test_client_hands_filtered_message_to_capture_handler():
-    settings = make_settings()
+async def test_client_hands_message_to_capture_handler():
     captured = []
 
     async def handle_capture(message):
         captured.append(message)
 
-    client = create_discord_client(settings, handle_capture)
+    client = create_discord_client(handle_capture)
     await client.on_message(make_message())
 
     assert len(captured) == 1
 
 
 @pytest.mark.asyncio
-async def test_client_does_not_hand_ignored_message_to_capture_handler():
-    settings = make_settings()
+async def test_client_forwards_filtering_to_capture_boundary():
     captured = []
 
     async def handle_capture(message):
         captured.append(message)
 
-    client = create_discord_client(settings, handle_capture)
-    await client.on_message(make_message(author_id=999))
+    message = make_message(author_id=999)
+    client = create_discord_client(handle_capture)
+    await client.on_message(message)
 
-    assert captured == []
+    assert captured == [message]
 
 
 def make_attachment(

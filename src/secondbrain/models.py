@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 AllowedFolder = Literal["people", "projects", "ideas", "learning", "admin", "inbox"]
 ActionStatus = Literal["open", "done"]
+ActionPriority = Literal["high", "medium", "low"]
 
 
 class ClassifiedAction(BaseModel):
@@ -12,6 +13,9 @@ class ClassifiedAction(BaseModel):
 
     text: str = Field(min_length=1)
     status: ActionStatus
+    due: str | None = None      # ISO date "YYYY-MM-DD"
+    priority: ActionPriority | None = None
+    project: str | None = None  # project slug, overrides note-level project
 
 
 class Classification(BaseModel):
@@ -20,6 +24,7 @@ class Classification(BaseModel):
     folder: AllowedFolder
     project: str | None
     note_type: str = Field(min_length=1)
+    note_date: str | None = None  # ISO date for birthday/event/reminder notes
     title: str = Field(min_length=1)
     tags: list[str]
     body: str = Field(min_length=1)

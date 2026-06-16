@@ -1,0 +1,59 @@
+services:
+  capture-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: second-brain-capture-service:local
+    container_name: second-brain-capture-service
+    env_file:
+      - ${CAPTURE_SERVICE_ENV_FILE:-.env}
+    environment:
+      CAPTURE_PROCESSING_MODE: capture-only
+      CAPTURE_API_HOST: 0.0.0.0
+      CAPTURE_API_PORT: "8000"
+      LEDGER_PATH: /var/lib/second-brain/ledger.sqlite3
+    restart: unless-stopped
+    init: true
+
+    volumes:
+      - ${CAPTURE_DATA_SOURCE:-./second-brain-local-data}:/var/lib/second-brain
+
+    expose:
+      - "8000"
+
+    networks:
+      - backend
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/app/.venv/bin/python",
+          "-c",
+          "from pathlib import Path; import urllib.request; assert Path('/var/lib/second-brain/.second-brain-ebs-volume').is_file(); urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    read_only: true
+
+    tmpfs:
+      - /tmp
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  backend:
+    driver: bridge
