@@ -95,7 +95,7 @@ actions:
 _NOTE_ACCOMPLISHED_THIS_WEEK = f"""\
 ---
 capture_id: "SB-005"
-note_type: "note"
+note_type: "done"
 title: "Shipped M6 digest redesign"
 project: "second-brain"
 created_at: "{_LAST_WEEK}T10:00:00+00:00"

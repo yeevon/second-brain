@@ -206,6 +206,15 @@ def test_bootstrap_imports_weekly_review_workflow():
     assert "second-brain-weekly-review.json" in bootstrap or "Second Brain - Weekly Review" in bootstrap
 
 
+def test_bootstrap_updates_existing_weekly_review_workflow_in_place():
+    bootstrap = BOOTSTRAP_PATH.read_text()
+    assert "import_or_update_workflow" in bootstrap
+    assert '"$WEEKLY_REVIEW_NAME"' in bootstrap
+    assert "$WEEKLY_REVIEW_FIXTURE" in bootstrap
+    assert "updated in place" in bootstrap
+    assert "Second Brain - Weekly Review: skipped" not in bootstrap
+
+
 def test_weekly_review_capture_service_node_uses_placeholder_credential():
     wf = _fixture()
     for node in wf["nodes"]:

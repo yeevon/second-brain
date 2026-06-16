@@ -185,6 +185,29 @@ def import_workflow(wf_json):
     return wf_id
 
 
+def import_or_update_workflow(wf_json):
+    name = wf_json["name"]
+    existing = _find_workflow(name)
+    if existing:
+        update_json = dict(wf_json)
+        update_json["id"] = existing
+        update_json.pop("versionId", None)
+        _api(
+            "PATCH",
+            f"/rest/workflows/{existing}?forceSave=true",
+            update_json,
+            ok_statuses=(200,),
+        )
+        print(f"  {name}: updated in place")
+        return existing
+
+    _, body = _api("POST", "/rest/workflows", wf_json)
+    data = _unwrap(body)
+    wf_id = str(data.get("id") if isinstance(data, dict) else body.get("id"))
+    print(f"  {name}: imported")
+    return wf_id
+
+
 def activate_workflow(wf_id):
     # n8n 2.x requires versionId in the activate body to prevent race conditions.
     _, body = _api("GET", f"/rest/workflows/{wf_id}")
@@ -294,11 +317,11 @@ def main():
 
     print("Importing Daily Digest workflow…")
     daily_digest_json = patch_json(DAILY_DIGEST_WF, cred_patches)
-    daily_digest_id   = import_workflow(daily_digest_json)
+    daily_digest_id   = import_or_update_workflow(daily_digest_json)
 
     print("Importing Weekly Review workflow…")
     weekly_review_json = patch_json(WEEKLY_REVIEW_WF, cred_patches)
-    weekly_review_id   = import_workflow(weekly_review_json)
+    weekly_review_id   = import_or_update_workflow(weekly_review_json)
 
     print("=== local-n8n-init complete ===")
     print(f"  Error Handler  id={eh_id} (active)")

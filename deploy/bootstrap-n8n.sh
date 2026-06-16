@@ -142,45 +142,63 @@ fi
 
 # ── Daily Digest ─────────────────────────────────────────────────────────────
 
-if echo "$existing_names" | grep -qxF "$DAILY_DIGEST_NAME"; then
-  echo "  Second Brain - Daily Digest: skipped (already exists)"
-else
-  jq --arg id "$(python3 -c 'import uuid; print(str(uuid.uuid4()))')" \
-    'del(.id, .versionId) | .id = $id' \
-    "$DAILY_DIGEST_FIXTURE" \
-    > "$TMP_DIR/bootstrap-daily-digest.json"
+import_or_update_workflow() {
+  local workflow_name="$1"
+  local fixture_path="$2"
+  local tmp_path="$3"
+  local tmp_basename
+  tmp_basename="$(basename "$tmp_path")"
 
-  docker cp \
-    "$TMP_DIR/bootstrap-daily-digest.json" \
-    "$CONTAINER:/tmp/bootstrap-daily-digest.json"
+  local existing_id
+  existing_id="$(
+    jq -r '.[] | select(.name == "'"$workflow_name"'") | .id' \
+      "$TMP_DIR/existing-workflows.json" 2>/dev/null || true
+  )"
 
-  docker exec "$CONTAINER" \
-    n8n import:workflow --input=/tmp/bootstrap-daily-digest.json
+  if [[ -n "$existing_id" && "$existing_id" != "null" ]]; then
+    jq --arg id "$existing_id" \
+      'del(.versionId) | .id = $id' \
+      "$fixture_path" \
+      > "$tmp_path"
 
-  docker exec --user root "$CONTAINER" \
-    rm -f /tmp/bootstrap-daily-digest.json
-fi
+    docker cp "$tmp_path" "$CONTAINER:/tmp/$tmp_basename"
+
+    docker exec "$CONTAINER" \
+      n8n import:workflow --input="/tmp/$tmp_basename"
+
+    docker exec --user root "$CONTAINER" \
+      rm -f "/tmp/$tmp_basename"
+
+    echo "  $workflow_name: updated in place"
+  else
+    jq --arg id "$(python3 -c 'import uuid; print(str(uuid.uuid4()))')" \
+      'del(.id, .versionId) | .id = $id' \
+      "$fixture_path" \
+      > "$tmp_path"
+
+    docker cp "$tmp_path" "$CONTAINER:/tmp/$tmp_basename"
+
+    docker exec "$CONTAINER" \
+      n8n import:workflow --input="/tmp/$tmp_basename"
+
+    docker exec --user root "$CONTAINER" \
+      rm -f "/tmp/$tmp_basename"
+
+    echo "  $workflow_name: imported"
+  fi
+}
+
+import_or_update_workflow \
+  "$DAILY_DIGEST_NAME" \
+  "$DAILY_DIGEST_FIXTURE" \
+  "$TMP_DIR/bootstrap-daily-digest.json"
 
 # ── Weekly Review ─────────────────────────────────────────────────────────────
 
-if echo "$existing_names" | grep -qxF "$WEEKLY_REVIEW_NAME"; then
-  echo "  Second Brain - Weekly Review: skipped (already exists)"
-else
-  jq --arg id "$(python3 -c 'import uuid; print(str(uuid.uuid4()))')" \
-    'del(.id, .versionId) | .id = $id' \
-    "$WEEKLY_REVIEW_FIXTURE" \
-    > "$TMP_DIR/bootstrap-weekly-review.json"
-
-  docker cp \
-    "$TMP_DIR/bootstrap-weekly-review.json" \
-    "$CONTAINER:/tmp/bootstrap-weekly-review.json"
-
-  docker exec "$CONTAINER" \
-    n8n import:workflow --input=/tmp/bootstrap-weekly-review.json
-
-  docker exec --user root "$CONTAINER" \
-    rm -f /tmp/bootstrap-weekly-review.json
-fi
+import_or_update_workflow \
+  "$WEEKLY_REVIEW_NAME" \
+  "$WEEKLY_REVIEW_FIXTURE" \
+  "$TMP_DIR/bootstrap-weekly-review.json"
 
 # Clean up existing-workflows temp file in container
 docker exec --user root "$CONTAINER" \

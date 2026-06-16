@@ -185,6 +185,15 @@ def test_bootstrap_imports_daily_digest_workflow():
     assert "second-brain-daily-digest.json" in bootstrap or "Second Brain - Daily Digest" in bootstrap
 
 
+def test_bootstrap_updates_existing_daily_digest_workflow_in_place():
+    bootstrap = BOOTSTRAP_PATH.read_text()
+    assert "import_or_update_workflow" in bootstrap
+    assert '"$DAILY_DIGEST_NAME"' in bootstrap
+    assert "$DAILY_DIGEST_FIXTURE" in bootstrap
+    assert "updated in place" in bootstrap
+    assert "Second Brain - Daily Digest: skipped" not in bootstrap
+
+
 def test_daily_digest_capture_service_node_uses_placeholder_credential():
     wf = _fixture()
     for node in wf["nodes"]:
