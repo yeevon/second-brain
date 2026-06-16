@@ -85,7 +85,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $vars.DISCORD_DIGEST_WEBHOOK_URL }}",
+        "url": "={{ $env.DISCORD_DIGEST_WEBHOOK_URL }}",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ content: $json.content }) }}",
