@@ -160,9 +160,12 @@ def render_markdown(
     lines.extend(
         [
             f"note_type: {yaml_scalar(classification.note_type)}",
-            "tags:",
+            f"title: {yaml_scalar(classification.title)}",
         ]
     )
+    if classification.note_date:
+        lines.append(f"note_date: {yaml_scalar(classification.note_date)}")
+    lines.append("tags:")
     if classification.tags:
         lines.extend(f"  - {yaml_scalar(tag)}" for tag in classification.tags)
     else:
@@ -173,6 +176,12 @@ def render_markdown(
         for action in classification.actions:
             lines.append(f"  - text: {yaml_scalar(action.text)}")
             lines.append(f"    status: {yaml_scalar(action.status)}")
+            if action.due:
+                lines.append(f"    due: {yaml_scalar(action.due)}")
+            if action.priority:
+                lines.append(f"    priority: {yaml_scalar(action.priority)}")
+            if action.project:
+                lines.append(f"    project: {yaml_scalar(action.project)}")
     else:
         lines.append("  []")
 

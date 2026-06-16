@@ -18,6 +18,7 @@ from secondbrain.api_models import (
     ClassificationValidationResponse,
     CorrectionRequest,
     CorrectionResponse,
+    DailyBriefResponse,
     DailyDigestResponse,
     DeliveryTransitionResponse,
     DownstreamCaptureResponse,
@@ -29,6 +30,7 @@ from secondbrain.api_models import (
     ScheduleRetryRequest,
     SecurityScreenRequest,
     SecurityScreenResponse,
+    WeeklyBriefResponse,
     WeeklyDigestResponse,
     WorkflowErrorResponse,
 )
@@ -51,7 +53,6 @@ def _fetch_open_task_count(capture_service: CaptureService) -> int | None:
     2. Fall back to direct vault scan if vault_path is set (local-full mode).
     3. Return None if neither is available (capture-only mode with no vault access).
     """
-    import urllib.error
     import urllib.request
     from secondbrain.digest import scan_open_tasks
 
@@ -74,6 +75,44 @@ def _fetch_open_task_count(capture_service: CaptureService) -> int | None:
     if vault_path is not None:
         try:
             return scan_open_tasks(vault_path)
+        except Exception:
+            pass
+    return None
+
+
+def _fetch_open_tasks_by_project(capture_service: CaptureService) -> dict[str, int] | None:
+    """Return open task counts grouped by project.
+
+    Priority order:
+    1. Call writer-service GET /internal/vault/stats/open-tasks (returns both count + by_project)
+       if writer_service_url and writer_service_token are configured.
+    2. Fall back to direct vault scan if vault_path is set (local-full mode).
+    3. Return None if neither is available (capture-only mode with no vault access).
+    """
+    import urllib.request
+    from secondbrain.digest import scan_open_tasks_by_project
+
+    writer_url = getattr(capture_service.settings, "writer_service_url", None)
+    writer_token = getattr(capture_service.settings, "writer_service_token", None)
+    if writer_url and writer_token:
+        try:
+            req = urllib.request.Request(
+                f"{writer_url}/internal/vault/stats/open-tasks",
+                headers={"X-Second-Brain-Writer-Token": writer_token},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                import json
+                data = json.loads(resp.read())
+                by_project = data.get("open_tasks_by_project")
+                if isinstance(by_project, dict):
+                    return by_project
+        except Exception:
+            pass  # fall through to direct scan
+
+    vault_path = getattr(capture_service.settings, "vault_path", None)
+    if vault_path is not None:
+        try:
+            return scan_open_tasks_by_project(vault_path)
         except Exception:
             pass
     return None
@@ -448,6 +487,7 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             generated_at=now,
             window_hours=24,
             open_tasks_count=_fetch_open_task_count(capture_service),
+            open_tasks_by_project=_fetch_open_tasks_by_project(capture_service),
             **snapshot,
         )
 
@@ -471,7 +511,106 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             **snapshot,
         )
 
+    # ------------------------------------------------------------------
+    # SB-120 / SB-121: Actionable brief endpoints
+    # Replace count-based digest with vault-scanned brief data.
+    # ------------------------------------------------------------------
+
+    @app.get(
+        "/internal/brief/daily",
+        response_model=DailyBriefResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def get_daily_brief():
+        from datetime import UTC, datetime
+
+        now = datetime.now(UTC)
+        data = _fetch_brief(capture_service, "daily")
+        return DailyBriefResponse(
+            generated_at=now,
+            today=data.get("today", now.date().isoformat()),
+            focus_items=data.get("focus_items", []),
+            due_today=data.get("due_today", []),
+            coming_up=data.get("coming_up", []),
+            birthdays=data.get("birthdays", []),
+            pending_tasks=data.get("pending_tasks", []),
+            stale_tasks=data.get("stale_tasks", []),
+        )
+
+    @app.get(
+        "/internal/brief/weekly",
+        response_model=WeeklyBriefResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def get_weekly_brief():
+        from datetime import UTC, datetime, timedelta
+
+        now = datetime.now(UTC)
+        today = now.date()
+        data = _fetch_brief(capture_service, "weekly")
+        return WeeklyBriefResponse(
+            generated_at=now,
+            week_start=data.get("week_start", (today - timedelta(days=7)).isoformat()),
+            week_end=data.get("week_end", today.isoformat()),
+            accomplished=data.get("accomplished", []),
+            completed_tasks=data.get("completed_tasks", []),
+            decisions=data.get("decisions", []),
+            still_open=data.get("still_open", []),
+            study_progress=data.get("study_progress", []),
+        )
+
     return app
+
+
+def _resolve_vault_path(capture_service: CaptureService):
+    """Return a Path to the vault, or None if not accessible from this service instance."""
+    from pathlib import Path
+    vault_path_setting = getattr(capture_service.settings, "vault_path", None)
+    if vault_path_setting is not None:
+        return Path(vault_path_setting)
+    return None
+
+
+def _fetch_brief(capture_service: CaptureService, period: str) -> dict:
+    """Return brief data for period ('daily' or 'weekly').
+
+    Priority order:
+    1. Call writer-service GET /internal/vault/brief/{period} if configured.
+    2. Fall back to direct vault scan if vault_path is set (local-full mode).
+    3. Return empty structure if neither is available (capture-only mode).
+    """
+    import json
+    import urllib.request
+    from secondbrain.digest import scan_daily_brief, scan_weekly_brief
+    from datetime import date, timedelta
+
+    writer_url = getattr(capture_service.settings, "writer_service_url", None)
+    writer_token = getattr(capture_service.settings, "writer_service_token", None)
+    if writer_url and writer_token:
+        try:
+            req = urllib.request.Request(
+                f"{writer_url}/internal/vault/brief/{period}",
+                headers={"X-Second-Brain-Writer-Token": writer_token},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read())
+        except Exception:
+            pass
+
+    vault_path = _resolve_vault_path(capture_service)
+    if vault_path is not None:
+        try:
+            if period == "daily":
+                return scan_daily_brief(vault_path)
+            today = date.today()
+            return scan_weekly_brief(vault_path, week_start=today - timedelta(days=7), week_end=today)
+        except Exception:
+            pass
+
+    today = date.today()
+    if period == "daily":
+        return {"today": today.isoformat(), "focus_items": [], "due_today": [], "coming_up": [], "birthdays": [], "pending_tasks": [], "stale_tasks": []}
+    return {"week_start": (today - timedelta(days=7)).isoformat(), "week_end": today.isoformat(), "accomplished": [], "completed_tasks": [], "decisions": [], "still_open": [], "study_progress": []}
 
 
 def _get_capture(capture_service: CaptureService, capture_id: str) -> CaptureRecord:

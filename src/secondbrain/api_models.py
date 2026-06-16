@@ -265,6 +265,86 @@ class CorrectionResponse(BaseModel):
     git_commit_hash: str | None
 
 
+# ── Brief response models (SB-120 / SB-121 redesign) ─────────────────────────
+
+
+class BriefActionItem(BaseModel):
+    title: str
+    project: str | None
+    source: str
+    due: str | None
+    priority: str | None
+    note_path: str
+
+
+class BriefDateItem(BaseModel):
+    title: str
+    date: str
+    source: str
+    note_path: str
+
+
+class BriefBirthdayItem(BaseModel):
+    name: str
+    date: str
+    note_path: str
+
+
+class DailyBriefResponse(BaseModel):
+    generated_at: datetime
+    today: str
+    focus_items: list[BriefActionItem]
+    due_today: list[BriefActionItem]
+    coming_up: list[BriefDateItem]
+    birthdays: list[BriefBirthdayItem]
+    pending_tasks: list[BriefActionItem]
+    stale_tasks: list[BriefActionItem]
+
+
+class WeeklyAccomplishedItem(BaseModel):
+    title: str
+    source: str
+    project: str | None
+    note_path: str
+
+
+class WeeklyCompletedTask(BaseModel):
+    title: str
+    project: str | None
+    note_path: str
+
+
+class WeeklyDecision(BaseModel):
+    title: str
+    project: str | None
+    note_path: str
+
+
+class WeeklyOpenItem(BaseModel):
+    title: str
+    project: str | None
+    due: str | None
+    priority: str | None
+    note_path: str
+
+
+class WeeklyStudyProgress(BaseModel):
+    track: str
+    status: str
+    note_path: str
+
+
+class WeeklyBriefResponse(BaseModel):
+    generated_at: datetime
+    week_start: str
+    week_end: str
+    accomplished: list[WeeklyAccomplishedItem]
+    completed_tasks: list[WeeklyCompletedTask]
+    decisions: list[WeeklyDecision]
+    still_open: list[WeeklyOpenItem]
+    study_progress: list[WeeklyStudyProgress]
+
+
 class DailyDigestResponse(BaseModel):
     generated_at: datetime
     window_hours: int
@@ -273,6 +353,7 @@ class DailyDigestResponse(BaseModel):
     inbox_backlog_count: int
     awaiting_clarification_count: int
     open_tasks_count: int | None
+    open_tasks_by_project: dict[str, int] | None
     failed_captures_count: int
     retry_events_count: int
     sensitive_rejections_count: int

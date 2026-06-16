@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from secondbrain.vault_pull import VaultPullError, pull_vault
+from secondbrain.vault_pull import VaultPullError, main, pull_vault
 
 
 def _make_completed(returncode: int = 0, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
@@ -165,3 +165,55 @@ class TestGitCommandOrder:
 
         assert len(merge_cmds) == 1
         assert "origin/main" in merge_cmds[0]
+
+    def test_untracked_files_excluded_from_dirty_check(self, tmp_path):
+        """Worktree check uses --untracked-files=no so Obsidian metadata does not block pull."""
+        status_cmds = []
+
+        def record_call(cmd, **kwargs):
+            if "status" in cmd:
+                status_cmds.append(cmd)
+            return _make_completed(returncode=0, stdout="")
+
+        with patch("subprocess.run", side_effect=record_call):
+            pull_vault(tmp_path)
+
+        assert status_cmds, "git status must be called"
+        for cmd in status_cmds:
+            assert "--untracked-files=no" in cmd, (
+                f"git status must use --untracked-files=no to ignore Obsidian metadata, got: {cmd}"
+            )
+
+
+class TestMain:
+    def test_main_no_vault_path_env_exits_1(self, capsys):
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("dotenv.load_dotenv"):
+                exit_code = main()
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "VAULT_PATH" in captured.err
+
+    def test_main_successful_pull_exits_0(self, tmp_path, capsys):
+        ok = _make_completed(returncode=0, stdout="")
+
+        with patch.dict("os.environ", {"VAULT_PATH": str(tmp_path)}):
+            with patch("dotenv.load_dotenv"):
+                with patch("subprocess.run", return_value=ok):
+                    exit_code = main()
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert str(tmp_path) in captured.out
+
+    def test_main_pull_failure_exits_with_vault_pull_error_exit_code(self, tmp_path, capsys):
+        dirty = _make_completed(returncode=0, stdout="M tracked_file.md\n")
+
+        with patch.dict("os.environ", {"VAULT_PATH": str(tmp_path)}):
+            with patch("dotenv.load_dotenv"):
+                with patch("subprocess.run", return_value=dirty):
+                    exit_code = main()
+
+        assert exit_code == 2
+        captured = capsys.readouterr()
+        assert "ERROR" in captured.err or "dirty" in captured.err

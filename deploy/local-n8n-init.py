@@ -172,16 +172,26 @@ def _find_workflow(name):
     return None
 
 
-def import_workflow(wf_json):
+def import_or_update_workflow(wf_json):
     name = wf_json["name"]
     existing = _find_workflow(name)
     if existing:
-        print(f"  Workflow exists:  {name!r} (id={existing})")
+        update_json = dict(wf_json)
+        update_json["id"] = existing
+        update_json.pop("versionId", None)
+        _api(
+            "PATCH",
+            f"/rest/workflows/{existing}?forceSave=true",
+            update_json,
+            ok_statuses=(200,),
+        )
+        print(f"  {name}: updated in place")
         return existing
+
     _, body = _api("POST", "/rest/workflows", wf_json)
     data = _unwrap(body)
     wf_id = str(data.get("id") if isinstance(data, dict) else body.get("id"))
-    print(f"  Workflow imported: {name!r} (id={wf_id})")
+    print(f"  {name}: imported")
     return wf_id
 
 
@@ -275,7 +285,7 @@ def main():
 
     print("Importing Error Handler workflow…")
     eh_json = patch_json(ERROR_HANDLER_WF, cred_patches)
-    eh_id   = import_workflow(eh_json)
+    eh_id   = import_or_update_workflow(eh_json)
 
     print("Activating Error Handler workflow…")
     activate_workflow(eh_id)
@@ -284,7 +294,7 @@ def main():
     intake_patches = dict(cred_patches)
     intake_patches["PLACEHOLDER_SECOND_BRAIN_ERROR_HANDLER"] = eh_id
     intake_json  = patch_json(INTAKE_WF, intake_patches)
-    intake_wf_id = import_workflow(intake_json)
+    intake_wf_id = import_or_update_workflow(intake_json)
 
     print("Activating Intake workflow…")
     activate_workflow(intake_wf_id)
@@ -294,11 +304,11 @@ def main():
 
     print("Importing Daily Digest workflow…")
     daily_digest_json = patch_json(DAILY_DIGEST_WF, cred_patches)
-    daily_digest_id   = import_workflow(daily_digest_json)
+    daily_digest_id   = import_or_update_workflow(daily_digest_json)
 
     print("Importing Weekly Review workflow…")
     weekly_review_json = patch_json(WEEKLY_REVIEW_WF, cred_patches)
-    weekly_review_id   = import_workflow(weekly_review_json)
+    weekly_review_id   = import_or_update_workflow(weekly_review_json)
 
     print("=== local-n8n-init complete ===")
     print(f"  Error Handler  id={eh_id} (active)")

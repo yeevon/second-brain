@@ -1,4 +1,4 @@
-"""Architecture tests for the Second Brain - Daily Digest workflow fixture."""
+"""Architecture tests for the Second Brain - Daily Brief workflow fixture."""
 from __future__ import annotations
 
 import json
@@ -67,17 +67,21 @@ def test_daily_digest_schedule_is_daily_7am():
     wf = _fixture()
     schedule_nodes = [n for n in wf["nodes"] if n["type"] == "n8n-nodes-base.scheduleTrigger"]
     assert len(schedule_nodes) == 1
-    # Accept either cron expression or structured form
     fixture_text = FIXTURE_PATH.read_text()
     assert "7" in fixture_text  # hour 7 present somewhere in schedule config
 
 
-# ── Digest endpoint ──────────────────────────────────────────────────────────
+# ── Brief endpoint ───────────────────────────────────────────────────────────
 
 
-def test_daily_digest_calls_correct_capture_service_url():
+def test_daily_digest_calls_brief_endpoint():
     fixture_text = FIXTURE_PATH.read_text()
-    assert "http://capture-service:8000/internal/digest/daily" in fixture_text
+    assert "http://capture-service:8000/internal/brief/daily" in fixture_text
+
+
+def test_daily_digest_does_not_call_old_digest_endpoint():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "/internal/digest/daily" not in fixture_text
 
 
 def test_daily_digest_capture_service_url_uses_internal_hostname():
@@ -89,6 +93,46 @@ def test_daily_digest_capture_service_url_uses_internal_hostname():
             assert clean.startswith("http://capture-service:8000"), (
                 f"capture-service URL must use internal hostname, got: {url!r}"
             )
+
+
+# ── Brief output format ───────────────────────────────────────────────────────
+
+
+def test_daily_brief_format_references_focus_items():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "focus_items" in fixture_text
+
+
+def test_daily_brief_format_references_due_today():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "due_today" in fixture_text
+
+
+def test_daily_brief_format_references_pending_tasks():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "pending_tasks" in fixture_text
+
+
+def test_daily_brief_format_references_stale_tasks():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "stale_tasks" in fixture_text
+
+
+def test_daily_brief_format_references_birthdays():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "birthdays" in fixture_text
+
+
+def test_daily_brief_format_references_coming_up():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "coming_up" in fixture_text
+
+
+def test_daily_brief_sends_to_discord():
+    wf = _fixture()
+    http_nodes = [n for n in wf["nodes"] if n["type"] == "n8n-nodes-base.httpRequest"]
+    methods = [n["parameters"].get("method", "GET") for n in http_nodes]
+    assert "POST" in methods, "Expected at least one POST node for Discord delivery"
 
 
 # ── Security invariants ───────────────────────────────────────────────────────
@@ -133,37 +177,21 @@ def test_daily_digest_save_progress_is_false():
     assert _fixture()["settings"]["saveExecutionProgress"] is False
 
 
-# ── Message formatting ────────────────────────────────────────────────────────
-
-
-def test_daily_digest_format_node_references_inbox_backlog():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "inbox_backlog_count" in fixture_text
-
-
-def test_daily_digest_format_node_references_sensitive_rejections():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "sensitive_rejections_count" in fixture_text
-
-
-def test_daily_digest_format_node_references_attachment_warnings():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "attachment_warnings_count" in fixture_text
-
-
-def test_daily_digest_sends_to_discord():
-    wf = _fixture()
-    http_nodes = [n for n in wf["nodes"] if n["type"] == "n8n-nodes-base.httpRequest"]
-    methods = [n["parameters"].get("method", "GET") for n in http_nodes]
-    assert "POST" in methods, "Expected at least one POST node for Discord delivery"
-
-
 # ── Bootstrap ────────────────────────────────────────────────────────────────
 
 
 def test_bootstrap_imports_daily_digest_workflow():
     bootstrap = BOOTSTRAP_PATH.read_text()
     assert "second-brain-daily-digest.json" in bootstrap or "Second Brain - Daily Digest" in bootstrap
+
+
+def test_bootstrap_updates_existing_daily_digest_workflow_in_place():
+    bootstrap = BOOTSTRAP_PATH.read_text()
+    assert "import_or_update_workflow" in bootstrap
+    assert '"$DAILY_DIGEST_NAME"' in bootstrap
+    assert "$DAILY_DIGEST_FIXTURE" in bootstrap
+    assert "updated in place" in bootstrap
+    assert "Second Brain - Daily Digest: skipped" not in bootstrap
 
 
 def test_daily_digest_capture_service_node_uses_placeholder_credential():
@@ -174,4 +202,30 @@ def test_daily_digest_capture_service_node_uses_placeholder_credential():
             cred = node.get("credentials", {}).get("httpHeaderAuth")
             assert cred is not None, f"Node '{node['name']}' calls capture-service but has no httpHeaderAuth credential"
             assert cred["id"] == "PLACEHOLDER_CAPTURE_SERVICE_TOKEN"
-            assert cred["name"] == "Capture Service Token"
+
+
+# ── Error handling ────────────────────────────────────────────────────────────
+
+
+def test_daily_digest_send_to_discord_has_error_output():
+    wf = _fixture()
+    discord_nodes = [n for n in wf["nodes"] if n.get("name") == "Send to Discord"]
+    assert len(discord_nodes) == 1
+    assert discord_nodes[0].get("onError") == "continueErrorOutput", (
+        "Send to Discord must use continueErrorOutput so delivery failures are visible"
+    )
+
+
+def test_daily_digest_delivery_failure_is_logged():
+    wf = _fixture()
+    names = [n["name"] for n in wf["nodes"]]
+    assert any("Failure" in name or "failure" in name for name in names), (
+        "Expected a log/handle delivery failure node"
+    )
+
+
+def test_daily_digest_discord_error_output_is_connected():
+    wf = _fixture()
+    discord_conn = wf["connections"].get("Send to Discord", {}).get("main", [])
+    assert len(discord_conn) >= 2, "Send to Discord must have both success and error outputs defined"
+    assert len(discord_conn[1]) > 0, "Send to Discord error output must connect to a failure-handling node"

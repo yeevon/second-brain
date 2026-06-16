@@ -49,25 +49,29 @@ Replaced the static `USER 10003` Dockerfile directive with a gosu-based entrypoi
 
 **Branch:** `milestone_6`
 
-Added four new capabilities: a daily Discord digest of capture activity, a weekly AI-assisted review, a pull-only vault sync wrapper, and a read-only MCP server for querying the vault and ledger from an AI assistant.
+Added five new capabilities: a daily Discord brief, a weekly AI-assisted review, a pull-only vault sync wrapper, a read-only MCP server for querying the vault and ledger from an AI assistant, and the `gembrain` host CLI wrapper.
 
 ### SB-120 — Daily digest
 
-Adds a scheduled n8n workflow that fires at 07:00 UTC and posts a Discord message summarising the last 24 hours of capture activity.
+Adds a scheduled n8n workflow that fires at 07:00 UTC and posts a Discord message summarising the current vault state for the day.
 
 - **`GET /internal/digest/daily`** — new internal endpoint (requires `X-Second-Brain-Internal-Token`). Returns new captures, filed notes, inbox backlog, captures awaiting clarification, open task count, terminal failures, retry events, sensitive rejections, and attachment warnings. Open task count is sourced from writer-service (`GET /internal/vault/stats/open-tasks`) if available, then from a direct vault scan, then `null`.
+- **`GET /internal/brief/daily`** — vault-backed brief endpoint used by the n8n workflow. Returns Today's Focus, due-today work, Coming Up, Upcoming Birthdays, Pending Tasks, and Stale / Neglected tasks. capture-service proxies to writer-service (`GET /internal/vault/brief/daily`) and falls back to local vault scanning when possible.
 - **`src/secondbrain/digest.py`** — `scan_open_tasks()` and `scan_open_task_list()` vault scanners. Handle both quoted (`status: "open"`) and unquoted (`status: open`) action status values; writer-service renders the quoted form via `yaml_scalar = json.dumps`.
 - **`src/secondbrain/ledger.py`** — `daily_digest_snapshot()` read method.
-- **`n8n/workflows/second-brain-daily-digest.json`** — 4-node workflow: Schedule Trigger → Get Daily Digest → Format Digest Message (Code) → Send to Discord. Discord URL sourced from n8n workflow variable `DISCORD_DIGEST_WEBHOOK_URL`. All credential IDs are `PLACEHOLDER_*`; inactive by default.
+- **`writer-service/src/writerservice/brief.py`** / **`GET /internal/vault/brief/daily`** — scans Markdown frontmatter for open actions, due dates, event/reminder notes, birthdays, priority, and stale tasks.
+- **`n8n/workflows/second-brain-daily-digest.json`** — workflow: Schedule Trigger → Get Daily Brief → Has Brief Data? → Format Brief Message (Code) → Send to Discord, with a no-activity skip branch and delivery-failure logging. Discord URL sourced from `DISCORD_DIGEST_WEBHOOK_URL`. All credential IDs are `PLACEHOLDER_*`; inactive by default.
 
 ### SB-121 — Weekly review
 
-Adds a scheduled n8n workflow that fires at 08:00 UTC every Monday and posts a Discord review including Gemini-generated priorities.
+Adds a scheduled n8n workflow that fires at 08:00 UTC every Monday and posts a Discord review including Gemini-generated priorities grounded in explicit vault state.
 
 - **`GET /internal/digest/weekly`** — new internal endpoint. Returns 7-day window counts for new captures, filed notes, tasks created, actions completed, decisions, inbox backlog, corrections, failures, retries, and sensitive rejections. Outstanding task count sourced the same way as daily. Task/decision counts are populated when n8n sends `classification` in the `acknowledge-filed` / `acknowledge-inbox` callback (see below).
+- **`GET /internal/brief/weekly`** — vault-backed brief endpoint used by the n8n workflow. Returns accomplished notes, completed tasks, decisions, still-open tasks, and study progress for the last 7 days. capture-service proxies to writer-service (`GET /internal/vault/brief/weekly`) and falls back to local vault scanning when possible.
 - **`src/secondbrain/ledger.py`** — `weekly_digest_snapshot()` read method.
-- **`n8n/workflows/second-brain-weekly-review.json`** — 6-node workflow: Schedule Trigger → Get Weekly Digest → Prepare AI Priorities Input (Code) → Generate AI Priorities (Gemini HTTPS) → Format Review Message (Code) → Send to Discord. AI prompt is grounded in numbers only; output labelled `AI-GENERATED PRIORITIES`.
-- **`src/secondbrain/api_models.py`** — `DailyDigestResponse` and `WeeklyDigestResponse` Pydantic models.
+- **`writer-service/src/writerservice/brief.py`** / **`GET /internal/vault/brief/weekly`** — scans Markdown frontmatter for explicit completion (`note_type: done` / `fix`, completed actions), decisions, study notes, and open tasks. Weekly progress remains grounded in explicit state, not inferred from prose.
+- **`n8n/workflows/second-brain-weekly-review.json`** — workflow: Schedule Trigger → Get Weekly Brief → Prepare AI Priorities Input (Code) → Generate AI Priorities (Gemini HTTPS) → Format Review Message (Code) → Send to Discord. Gemini failures do not block the factual weekly summary; output labelled `AI-GENERATED PRIORITIES`.
+- **`src/secondbrain/api_models.py`** — `DailyDigestResponse`, `WeeklyDigestResponse`, `DailyBriefResponse`, and `WeeklyBriefResponse` Pydantic models.
 
 ### SB-121 fix — Classification stored on acknowledge-filed / acknowledge-inbox
 
@@ -93,10 +97,21 @@ Adds a `brain-mcp` stdio server exposing five read-only vault and ledger tools.
 - **`writer-service/src/writerservice/main.py`** — `GET /internal/vault/stats/open-tasks` endpoint returns open action count; used by capture-service digest endpoints so vault access stays within writer-service.
 - **`pyproject.toml`** — `brain-mcp` script entry point; `mcp>=1.0.0` dependency.
 
+### SB-124 — gembrain CLI wrapper
+
+Adds a host command that wraps vault freshness, direct local queries, and Gemini CLI integration.
+
+- **`src/secondbrain/gembrain.py`** — commands: `status`, `recent`, `tasks`, and `ask`. `status` reports vault sync state without running a pull. `recent`, `tasks`, and `ask` run `vault-pull` preflight first.
+- **`gembrain ask`** — invokes the Gemini CLI with `brain-mcp` configured as the MCP tool source; `gembrain` itself never writes to the vault.
+- **`pyproject.toml`** — `gembrain = "secondbrain.gembrain:main"` script entry point.
+- **`tests/unit/test_gembrain.py`** — unit coverage for status, preflight behavior, recent notes, open tasks, Gemini command construction, missing Gemini CLI handling, and preflight aborts.
+
 ### Bootstrap updates
 
-- **`deploy/bootstrap-n8n.sh`** — imports Daily Digest and Weekly Review on EC2; Steps 3 & 4 added to manual instructions.
-- **`deploy/local-n8n-init.py`** — imports Daily Digest and Weekly Review into local dev n8n (inactive; no activation since they are schedule-triggered).
+- **`deploy/bootstrap-n8n.sh`** — imports or updates Intake, Daily Digest, and Weekly Review in place by existing workflow ID on EC2/staging. Error Handler is imported only when missing.
+- **`deploy/local-n8n-init.py`** — imports or updates Error Handler, Intake, Daily Digest, and Weekly Review in place by existing workflow ID for the local full stack. Error Handler and Intake are activated after update; Daily/Weekly remain inactive until intentionally activated.
+- **`compose.override.yaml`** — `local-n8n-init` mounts `./n8n/workflows:/workflows:ro` and `./deploy/local-n8n-init.py:/init.py:ro`, making `docker compose up -d --build` a no-wipe workflow refresh path.
+- **Architecture tests** — lock the update-in-place bootstrap behavior and the exact local workflow mount paths so local no-wipe E2E does not regress to stale workflow fixtures.
 
 ---
 

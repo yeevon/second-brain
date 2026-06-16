@@ -577,6 +577,23 @@ def test_override_local_n8n_init_mounts_init_script_readonly():
     assert any("local-n8n-init.py" in v and "ro" in v for v in vols)
 
 
+def test_local_n8n_init_mounts_workflows_to_expected_path():
+    svc = _override_compose()["services"]["local-n8n-init"]
+    volumes = [str(v) for v in svc["volumes"]]
+
+    assert "./n8n/workflows:/workflows:ro" in volumes
+    assert "./deploy/local-n8n-init.py:/init.py:ro" in volumes
+
+
+def test_local_n8n_init_reads_workflows_from_mounted_path():
+    init = _n8n_init_script()
+
+    assert '"/workflows/second-brain-error-handler.json"' in init
+    assert '"/workflows/second-brain-intake.json"' in init
+    assert '"/workflows/second-brain-daily-digest.json"' in init
+    assert '"/workflows/second-brain-weekly-review.json"' in init
+
+
 def test_local_n8n_init_creates_all_required_credentials():
     script = _n8n_init_script()
     assert "Capture Service Token" in script
@@ -592,6 +609,17 @@ def test_local_n8n_init_patches_all_placeholder_ids():
     assert "PLACEHOLDER_INTAKE_WEBHOOK_TOKEN" in script
     assert "PLACEHOLDER_GEMINI_API_KEY" in script
     assert "PLACEHOLDER_SECOND_BRAIN_ERROR_HANDLER" in script
+
+
+def test_local_n8n_init_updates_all_workflows_in_place():
+    script = _n8n_init_script()
+    assert "def import_workflow(" not in script
+    assert "def import_or_update_workflow(" in script
+    assert "eh_id   = import_or_update_workflow(eh_json)" in script
+    assert "intake_wf_id = import_or_update_workflow(intake_json)" in script
+    assert "daily_digest_id   = import_or_update_workflow(daily_digest_json)" in script
+    assert "weekly_review_id   = import_or_update_workflow(weekly_review_json)" in script
+    assert "updated in place" in script
 
 
 def test_local_n8n_init_activates_intake_workflow():
