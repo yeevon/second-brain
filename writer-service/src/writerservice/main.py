@@ -111,6 +111,55 @@ def _build_app() -> FastAPI:
         return HealthResponse(status="ok")
 
     @app.get(
+        "/internal/vault/brief/daily",
+        dependencies=[Depends(require_token)],
+    )
+    async def vault_daily_brief() -> dict:
+        from datetime import date
+        from writerservice.brief import scan_daily_brief
+
+        settings = get_settings()
+        vault_path = Path(settings.vault_path)
+        try:
+            return scan_daily_brief(vault_path, today=date.today())
+        except Exception:
+            today = date.today().isoformat()
+            return {
+                "today": today,
+                "focus_items": [],
+                "due_today": [],
+                "coming_up": [],
+                "birthdays": [],
+                "pending_tasks": [],
+                "stale_tasks": [],
+            }
+
+    @app.get(
+        "/internal/vault/brief/weekly",
+        dependencies=[Depends(require_token)],
+    )
+    async def vault_weekly_brief() -> dict:
+        from datetime import date, timedelta
+        from writerservice.brief import scan_weekly_brief
+
+        settings = get_settings()
+        vault_path = Path(settings.vault_path)
+        today = date.today()
+        week_start = today - timedelta(days=7)
+        try:
+            return scan_weekly_brief(vault_path, week_start=week_start, week_end=today)
+        except Exception:
+            return {
+                "week_start": week_start.isoformat(),
+                "week_end": today.isoformat(),
+                "accomplished": [],
+                "completed_tasks": [],
+                "decisions": [],
+                "still_open": [],
+                "study_progress": [],
+            }
+
+    @app.get(
         "/internal/vault/stats/open-tasks",
         dependencies=[Depends(require_token)],
     )

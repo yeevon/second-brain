@@ -139,7 +139,7 @@
       "main": [
         [
           {
-            "node": "Get Daily Digest",
+            "node": "Get Daily Brief",
             "type": "main",
             "index": 0
           }
@@ -173,7 +173,7 @@
       "main": [
         [
           {
-            "node": "Has Activity?",
+            "node": "Has Brief Data?",
             "type": "main",
             "index": 0
           }
@@ -184,7 +184,7 @@
       "main": [
         [
           {
-            "node": "Format Digest Message",
+            "node": "Format Brief Message",
             "type": "main",
             "index": 0
           }

@@ -135,7 +135,7 @@
       "main": [
         [
           {
-            "node": "Get Weekly Digest",
+            "node": "Get Weekly Brief",
             "type": "main",
             "index": 0
           }
@@ -180,7 +180,7 @@
       "main": [
         [
           {
-            "node": "Prepare AI Priorities Input",
+            "node": "Prepare AI Input",
             "type": "main",
             "index": 0
           }

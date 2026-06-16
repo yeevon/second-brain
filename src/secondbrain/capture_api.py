@@ -523,31 +523,18 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
     )
     async def get_daily_brief():
         from datetime import UTC, datetime
-        from secondbrain.digest import scan_daily_brief
 
         now = datetime.now(UTC)
-        vault_path = _resolve_vault_path(capture_service)
-        if vault_path is None:
-            return DailyBriefResponse(
-                generated_at=now,
-                today=now.date().isoformat(),
-                focus_items=[],
-                due_today=[],
-                coming_up=[],
-                birthdays=[],
-                pending_tasks=[],
-                stale_tasks=[],
-            )
-        data = scan_daily_brief(vault_path, today=now.date())
+        data = _fetch_brief(capture_service, "daily")
         return DailyBriefResponse(
             generated_at=now,
-            today=data["today"],
-            focus_items=data["focus_items"],
-            due_today=data["due_today"],
-            coming_up=data["coming_up"],
-            birthdays=data["birthdays"],
-            pending_tasks=data["pending_tasks"],
-            stale_tasks=data["stale_tasks"],
+            today=data.get("today", now.date().isoformat()),
+            focus_items=data.get("focus_items", []),
+            due_today=data.get("due_today", []),
+            coming_up=data.get("coming_up", []),
+            birthdays=data.get("birthdays", []),
+            pending_tasks=data.get("pending_tasks", []),
+            stale_tasks=data.get("stale_tasks", []),
         )
 
     @app.get(
@@ -557,33 +544,19 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
     )
     async def get_weekly_brief():
         from datetime import UTC, datetime, timedelta
-        from secondbrain.digest import scan_weekly_brief
 
         now = datetime.now(UTC)
         today = now.date()
-        week_start = today - timedelta(days=7)
-        vault_path = _resolve_vault_path(capture_service)
-        if vault_path is None:
-            return WeeklyBriefResponse(
-                generated_at=now,
-                week_start=week_start.isoformat(),
-                week_end=today.isoformat(),
-                accomplished=[],
-                completed_tasks=[],
-                decisions=[],
-                still_open=[],
-                study_progress=[],
-            )
-        data = scan_weekly_brief(vault_path, week_start=week_start, week_end=today)
+        data = _fetch_brief(capture_service, "weekly")
         return WeeklyBriefResponse(
             generated_at=now,
-            week_start=data["week_start"],
-            week_end=data["week_end"],
-            accomplished=data["accomplished"],
-            completed_tasks=data["completed_tasks"],
-            decisions=data["decisions"],
-            still_open=data["still_open"],
-            study_progress=data["study_progress"],
+            week_start=data.get("week_start", (today - timedelta(days=7)).isoformat()),
+            week_end=data.get("week_end", today.isoformat()),
+            accomplished=data.get("accomplished", []),
+            completed_tasks=data.get("completed_tasks", []),
+            decisions=data.get("decisions", []),
+            still_open=data.get("still_open", []),
+            study_progress=data.get("study_progress", []),
         )
 
     return app
@@ -596,6 +569,48 @@ def _resolve_vault_path(capture_service: CaptureService):
     if vault_path_setting is not None:
         return Path(vault_path_setting)
     return None
+
+
+def _fetch_brief(capture_service: CaptureService, period: str) -> dict:
+    """Return brief data for period ('daily' or 'weekly').
+
+    Priority order:
+    1. Call writer-service GET /internal/vault/brief/{period} if configured.
+    2. Fall back to direct vault scan if vault_path is set (local-full mode).
+    3. Return empty structure if neither is available (capture-only mode).
+    """
+    import json
+    import urllib.request
+    from secondbrain.digest import scan_daily_brief, scan_weekly_brief
+    from datetime import date, timedelta
+
+    writer_url = getattr(capture_service.settings, "writer_service_url", None)
+    writer_token = getattr(capture_service.settings, "writer_service_token", None)
+    if writer_url and writer_token:
+        try:
+            req = urllib.request.Request(
+                f"{writer_url}/internal/vault/brief/{period}",
+                headers={"X-Second-Brain-Writer-Token": writer_token},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read())
+        except Exception:
+            pass
+
+    vault_path = _resolve_vault_path(capture_service)
+    if vault_path is not None:
+        try:
+            if period == "daily":
+                return scan_daily_brief(vault_path)
+            today = date.today()
+            return scan_weekly_brief(vault_path, week_start=today - timedelta(days=7), week_end=today)
+        except Exception:
+            pass
+
+    today = date.today()
+    if period == "daily":
+        return {"today": today.isoformat(), "focus_items": [], "due_today": [], "coming_up": [], "birthdays": [], "pending_tasks": [], "stale_tasks": []}
+    return {"week_start": (today - timedelta(days=7)).isoformat(), "week_end": today.isoformat(), "accomplished": [], "completed_tasks": [], "decisions": [], "still_open": [], "study_progress": []}
 
 
 def _get_capture(capture_service: CaptureService, capture_id: str) -> CaptureRecord:
