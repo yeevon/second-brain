@@ -94,7 +94,18 @@
       "name": "Send to Discord",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
+      "onError": "continueErrorOutput",
       "position": [1360, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Weekly review delivery to Discord failed. Log safe metadata only — no capture content.\nconsole.log(JSON.stringify({\n  event: 'weekly_review_delivery_failed',\n  workflow: 'second_brain_weekly_review',\n  error_description: $input.first().json?.error?.description ?? 'unknown',\n  error_status: $input.first().json?.error?.httpCode ?? null,\n  timestamp: new Date().toISOString(),\n}));\nreturn [{ json: { recorded: true, delivery_failed: true } }];"
+      },
+      "id": "wr000007-0007-0007-0007-000700070007",
+      "name": "Log Delivery Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1580, 440]
     }
   ],
   "connections": {
@@ -147,6 +158,18 @@
         [
           {
             "node": "Send to Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Discord": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Log Delivery Failure",
             "type": "main",
             "index": 0
           }

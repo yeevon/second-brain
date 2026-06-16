@@ -175,3 +175,60 @@ def test_daily_digest_capture_service_node_uses_placeholder_credential():
             assert cred is not None, f"Node '{node['name']}' calls capture-service but has no httpHeaderAuth credential"
             assert cred["id"] == "PLACEHOLDER_CAPTURE_SERVICE_TOKEN"
             assert cred["name"] == "Capture Service Token"
+
+
+# ── Open tasks by project ─────────────────────────────────────────────────────
+
+
+def test_daily_digest_format_node_references_open_tasks_by_project():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "open_tasks_by_project" in fixture_text
+
+
+# ── No-activity branch ────────────────────────────────────────────────────────
+
+
+def test_daily_digest_has_activity_check_if_node():
+    wf = _fixture()
+    types = [n["type"] for n in wf["nodes"]]
+    assert "n8n-nodes-base.if" in types, "Expected an IF node for the activity check"
+
+
+def test_daily_digest_has_no_activity_skip_node():
+    wf = _fixture()
+    names = [n["name"] for n in wf["nodes"]]
+    assert any("No Activity" in name or "Skip" in name for name in names), (
+        "Expected a no-activity/skip node for the false branch"
+    )
+
+
+def test_daily_digest_has_activity_branch_covers_new_captures():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "new_captures_count" in fixture_text
+
+
+# ── Error handling ────────────────────────────────────────────────────────────
+
+
+def test_daily_digest_send_to_discord_has_error_output():
+    wf = _fixture()
+    discord_nodes = [n for n in wf["nodes"] if n.get("name") == "Send to Discord"]
+    assert len(discord_nodes) == 1
+    assert discord_nodes[0].get("onError") == "continueErrorOutput", (
+        "Send to Discord must use continueErrorOutput so delivery failures are visible"
+    )
+
+
+def test_daily_digest_delivery_failure_is_logged():
+    wf = _fixture()
+    names = [n["name"] for n in wf["nodes"]]
+    assert any("Failure" in name or "failure" in name for name in names), (
+        "Expected a log/handle delivery failure node"
+    )
+
+
+def test_daily_digest_discord_error_output_is_connected():
+    wf = _fixture()
+    discord_conn = wf["connections"].get("Send to Discord", {}).get("main", [])
+    assert len(discord_conn) >= 2, "Send to Discord must have both success and error outputs defined"
+    assert len(discord_conn[1]) > 0, "Send to Discord error output must connect to a failure-handling node"

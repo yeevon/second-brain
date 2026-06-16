@@ -229,3 +229,30 @@ def test_weekly_review_prepare_node_uses_let_not_const_for_week_summary():
     code = prepare_nodes[0]["parameters"]["jsCode"]
     assert "let weekSummary" in code, "weekSummary must be declared with 'let' so += assignment works"
     assert "weekSummary +=" in code, "outstanding_tasks_count must be appended via += not discarded"
+
+
+# ── Error handling ────────────────────────────────────────────────────────────
+
+
+def test_weekly_review_send_to_discord_has_error_output():
+    wf = _fixture()
+    discord_nodes = [n for n in wf["nodes"] if n.get("name") == "Send to Discord"]
+    assert len(discord_nodes) == 1
+    assert discord_nodes[0].get("onError") == "continueErrorOutput", (
+        "Send to Discord must use continueErrorOutput so delivery failures are visible"
+    )
+
+
+def test_weekly_review_delivery_failure_is_logged():
+    wf = _fixture()
+    names = [n["name"] for n in wf["nodes"]]
+    assert any("Failure" in name or "failure" in name for name in names), (
+        "Expected a log/handle delivery failure node"
+    )
+
+
+def test_weekly_review_discord_error_output_is_connected():
+    wf = _fixture()
+    discord_conn = wf["connections"].get("Send to Discord", {}).get("main", [])
+    assert len(discord_conn) >= 2, "Send to Discord must have both success and error outputs defined"
+    assert len(discord_conn[1]) > 0, "Send to Discord error output must connect to a failure-handling node"

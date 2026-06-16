@@ -40,13 +40,48 @@
     },
     {
       "parameters": {
-        "jsCode": "// Build a structured daily digest message for Discord.\n// All counts come from the capture service — no data is stored here.\nconst d = $input.first().json;\n\nconst ts = new Date(d.generated_at).toLocaleString('en-US', {\n  timeZone: 'UTC', month: 'short', day: 'numeric',\n  hour: '2-digit', minute: '2-digit', hour12: false,\n});\n\nconst lines = [\n  `**Second Brain – Daily Digest** (${ts} UTC)`,\n  '',\n  '**Intake (last 24 h)**',\n  `  New captures: ${d.new_captures_count}`,\n  `  Filed notes: ${d.filed_notes_count}`,\n  `  Sensitive rejections: ${d.sensitive_rejections_count}`,\n];\n\nif (d.attachment_warnings_count > 0) {\n  lines.push(`  ⚠️ Pending captures with attachments: ${d.attachment_warnings_count}`);\n}\n\nlines.push(\n  '',\n  '**Backlog**',\n  `  Inbox: ${d.inbox_backlog_count}`,\n  `  Awaiting clarification: ${d.awaiting_clarification_count}`,\n);\n\nif (d.open_tasks_count !== null && d.open_tasks_count !== undefined) {\n  lines.push(`  Open tasks: ${d.open_tasks_count}`);\n}\n\nlines.push(\n  '',\n  '**Failures & Retries (last 24 h)**',\n  `  Terminal failures: ${d.failed_captures_count}`,\n  `  Retry events: ${d.retry_events_count}`,\n);\n\nreturn [{ json: { content: lines.join('\\n') } }];"
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "activity-check",
+              "leftValue": "={{ ($json.new_captures_count ?? 0) + ($json.filed_notes_count ?? 0) + ($json.failed_captures_count ?? 0) + ($json.sensitive_rejections_count ?? 0) + ($json.retry_events_count ?? 0) }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "dd000005-0005-0005-0005-000500050005",
+      "name": "Has Activity?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build a structured daily digest message for Discord.\n// All counts come from the capture service — no data is stored here.\nconst d = $input.first().json;\n\nconst ts = new Date(d.generated_at).toLocaleString('en-US', {\n  timeZone: 'UTC', month: 'short', day: 'numeric',\n  hour: '2-digit', minute: '2-digit', hour12: false,\n});\n\nconst lines = [\n  `**Second Brain – Daily Digest** (${ts} UTC)`,\n  '',\n  '**Intake (last 24 h)**',\n  `  New captures: ${d.new_captures_count}`,\n  `  Filed notes: ${d.filed_notes_count}`,\n  `  Sensitive rejections: ${d.sensitive_rejections_count}`,\n];\n\nif (d.attachment_warnings_count > 0) {\n  lines.push(`  ⚠️ Pending captures with attachments: ${d.attachment_warnings_count}`);\n}\n\nlines.push(\n  '',\n  '**Backlog**',\n  `  Inbox: ${d.inbox_backlog_count}`,\n  `  Awaiting clarification: ${d.awaiting_clarification_count}`,\n);\n\nif (d.open_tasks_count !== null && d.open_tasks_count !== undefined) {\n  lines.push(`  Open tasks: ${d.open_tasks_count}`);\n}\n\nif (d.open_tasks_by_project && Object.keys(d.open_tasks_by_project).length > 0) {\n  lines.push('  Tasks by project:');\n  for (const [project, count] of Object.entries(d.open_tasks_by_project)) {\n    const label = project === '__none__' ? '(unassigned)' : project;\n    lines.push(`    • ${label}: ${count}`);\n  }\n}\n\nlines.push(\n  '',\n  '**Failures & Retries (last 24 h)**',\n  `  Terminal failures: ${d.failed_captures_count}`,\n  `  Retry events: ${d.retry_events_count}`,\n);\n\nreturn [{ json: { content: lines.join('\\n') } }];"
       },
       "id": "dd000003-0003-0003-0003-000300030003",
       "name": "Format Digest Message",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [700, 300]
+      "position": [920, 180]
+    },
+    {
+      "parameters": {},
+      "id": "dd000006-0006-0006-0006-000600060006",
+      "name": "No Activity - Skip",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [920, 440]
     },
     {
       "parameters": {
@@ -61,7 +96,18 @@
       "name": "Send to Discord",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [920, 300]
+      "onError": "continueErrorOutput",
+      "position": [1140, 180]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Digest delivery to Discord failed. Log safe metadata only — no capture content.\nconsole.log(JSON.stringify({\n  event: 'digest_delivery_failed',\n  workflow: 'second_brain_daily_digest',\n  error_description: $input.first().json?.error?.description ?? 'unknown',\n  error_status: $input.first().json?.error?.httpCode ?? null,\n  timestamp: new Date().toISOString(),\n}));\nreturn [{ json: { recorded: true, delivery_failed: true } }];"
+      },
+      "id": "dd000007-0007-0007-0007-000700070007",
+      "name": "Log Delivery Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1360, 300]
     }
   ],
   "connections": {
@@ -80,7 +126,25 @@
       "main": [
         [
           {
+            "node": "Has Activity?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Activity?": {
+      "main": [
+        [
+          {
             "node": "Format Digest Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Activity - Skip",
             "type": "main",
             "index": 0
           }
@@ -92,6 +156,18 @@
         [
           {
             "node": "Send to Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Discord": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Log Delivery Failure",
             "type": "main",
             "index": 0
           }

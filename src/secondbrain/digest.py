@@ -10,6 +10,34 @@ from pathlib import Path
 _OPEN_STATUS_LINE_RE = re.compile(r'^    status: "?open"?\s*$', re.MULTILINE)
 
 
+def scan_open_tasks_by_project(vault_path: Path) -> dict[str, int]:
+    """Count open tasks grouped by project slug across all vault notes.
+
+    Returns a dict mapping project slug (or '__none__' for notes without a project)
+    to the number of open action items in that project.
+    """
+    by_project: dict[str, int] = {}
+    for note_path in vault_path.rglob("*.md"):
+        if not note_path.is_file():
+            continue
+        try:
+            text = note_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not text.startswith("---"):
+            continue
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            continue
+        frontmatter = parts[1]
+        open_count = len(_OPEN_STATUS_LINE_RE.findall(frontmatter))
+        if open_count == 0:
+            continue
+        project = _extract_frontmatter_field(frontmatter, "project") or "__none__"
+        by_project[project] = by_project.get(project, 0) + open_count
+    return by_project
+
+
 def scan_open_tasks(vault_path: Path) -> int:
     """Count action items with status: open across all vault notes."""
     count = 0

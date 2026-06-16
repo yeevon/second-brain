@@ -273,6 +273,7 @@ class DailyDigestResponse(BaseModel):
     inbox_backlog_count: int
     awaiting_clarification_count: int
     open_tasks_count: int | None
+    open_tasks_by_project: dict[str, int] | None
     failed_captures_count: int
     retry_events_count: int
     sensitive_rejections_count: int

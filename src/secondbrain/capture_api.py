@@ -51,7 +51,6 @@ def _fetch_open_task_count(capture_service: CaptureService) -> int | None:
     2. Fall back to direct vault scan if vault_path is set (local-full mode).
     3. Return None if neither is available (capture-only mode with no vault access).
     """
-    import urllib.error
     import urllib.request
     from secondbrain.digest import scan_open_tasks
 
@@ -74,6 +73,23 @@ def _fetch_open_task_count(capture_service: CaptureService) -> int | None:
     if vault_path is not None:
         try:
             return scan_open_tasks(vault_path)
+        except Exception:
+            pass
+    return None
+
+
+def _fetch_open_tasks_by_project(capture_service: CaptureService) -> dict[str, int] | None:
+    """Return open task counts grouped by project from a direct vault scan.
+
+    Only available when vault_path is configured. Returns None in capture-only mode.
+    Writer-service does not expose a grouped endpoint, so this always falls back to local scan.
+    """
+    from secondbrain.digest import scan_open_tasks_by_project
+
+    vault_path = getattr(capture_service.settings, "vault_path", None)
+    if vault_path is not None:
+        try:
+            return scan_open_tasks_by_project(vault_path)
         except Exception:
             pass
     return None
@@ -448,6 +464,7 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             generated_at=now,
             window_hours=24,
             open_tasks_count=_fetch_open_task_count(capture_service),
+            open_tasks_by_project=_fetch_open_tasks_by_project(capture_service),
             **snapshot,
         )
 
