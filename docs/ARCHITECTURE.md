@@ -1,8 +1,8 @@
 # Second Brain — Canonical Architecture & Build Plan
 
-**Status:** V2 release candidate / implemented architecture  
+**Status:** V2 production release candidate / implemented architecture  
 **Last updated:** 2026-06-16  
-**Revision:** V2 validation pass: writer-service vault ownership, n8n update-in-place bootstrap, Daily/Weekly vault-backed briefs, host Obsidian bind-mount validation, read-only MCP posture, and V3 proposal-only write boundary.  
+**Revision:** V2 production release prep: writer-service vault ownership, n8n update-in-place bootstrap, Daily/Weekly vault-backed briefs, host Obsidian bind-mount validation, read-only MCP posture, and V3 proposal-only write boundary.  
 **Canonical document:** This file is the source of truth for implementation.  
 **Application repository:** `yeevon/second-brain`  
 **Vault repository:** private Git repository  
