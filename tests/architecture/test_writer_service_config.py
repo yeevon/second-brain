@@ -594,6 +594,17 @@ def test_local_n8n_init_patches_all_placeholder_ids():
     assert "PLACEHOLDER_SECOND_BRAIN_ERROR_HANDLER" in script
 
 
+def test_local_n8n_init_updates_all_workflows_in_place():
+    script = _n8n_init_script()
+    assert "def import_workflow(" not in script
+    assert "def import_or_update_workflow(" in script
+    assert "eh_id   = import_or_update_workflow(eh_json)" in script
+    assert "intake_wf_id = import_or_update_workflow(intake_json)" in script
+    assert "daily_digest_id   = import_or_update_workflow(daily_digest_json)" in script
+    assert "weekly_review_id   = import_or_update_workflow(weekly_review_json)" in script
+    assert "updated in place" in script
+
+
 def test_local_n8n_init_activates_intake_workflow():
     script = _n8n_init_script()
     assert "/activate" in script

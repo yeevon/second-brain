@@ -172,19 +172,6 @@ def _find_workflow(name):
     return None
 
 
-def import_workflow(wf_json):
-    name = wf_json["name"]
-    existing = _find_workflow(name)
-    if existing:
-        print(f"  Workflow exists:  {name!r} (id={existing})")
-        return existing
-    _, body = _api("POST", "/rest/workflows", wf_json)
-    data = _unwrap(body)
-    wf_id = str(data.get("id") if isinstance(data, dict) else body.get("id"))
-    print(f"  Workflow imported: {name!r} (id={wf_id})")
-    return wf_id
-
-
 def import_or_update_workflow(wf_json):
     name = wf_json["name"]
     existing = _find_workflow(name)
@@ -298,7 +285,7 @@ def main():
 
     print("Importing Error Handler workflow…")
     eh_json = patch_json(ERROR_HANDLER_WF, cred_patches)
-    eh_id   = import_workflow(eh_json)
+    eh_id   = import_or_update_workflow(eh_json)
 
     print("Activating Error Handler workflow…")
     activate_workflow(eh_id)
@@ -307,7 +294,7 @@ def main():
     intake_patches = dict(cred_patches)
     intake_patches["PLACEHOLDER_SECOND_BRAIN_ERROR_HANDLER"] = eh_id
     intake_json  = patch_json(INTAKE_WF, intake_patches)
-    intake_wf_id = import_workflow(intake_json)
+    intake_wf_id = import_or_update_workflow(intake_json)
 
     print("Activating Intake workflow…")
     activate_workflow(intake_wf_id)
