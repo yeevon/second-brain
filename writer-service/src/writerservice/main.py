@@ -39,6 +39,39 @@ def _count_open_tasks(vault_path: Path) -> int:
         count += len(_OPEN_STATUS_LINE_RE.findall(parts[1]))
     return count
 
+
+def _count_open_tasks_by_project(vault_path: Path) -> dict[str, int]:
+    """Count open tasks grouped by project slug from frontmatter.
+
+    Notes without a project field are counted under '__none__'.
+    """
+    by_project: dict[str, int] = {}
+    for note_path in vault_path.rglob("*.md"):
+        if not note_path.is_file():
+            continue
+        try:
+            text = note_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not text.startswith("---"):
+            continue
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            continue
+        frontmatter = parts[1]
+        open_count = len(_OPEN_STATUS_LINE_RE.findall(frontmatter))
+        if open_count == 0:
+            continue
+        project = None
+        for line in frontmatter.splitlines():
+            if line.startswith("project: "):
+                value = line[9:].strip().strip('"')
+                project = value or None
+                break
+        key = project if project else "__none__"
+        by_project[key] = by_project.get(key, 0) + open_count
+    return by_project
+
 WRITER_TOKEN_HEADER = "X-Second-Brain-Writer-Token"
 
 
@@ -78,17 +111,69 @@ def _build_app() -> FastAPI:
         return HealthResponse(status="ok")
 
     @app.get(
+        "/internal/vault/brief/daily",
+        dependencies=[Depends(require_token)],
+    )
+    async def vault_daily_brief() -> dict:
+        from datetime import date
+        from writerservice.brief import scan_daily_brief
+
+        settings = get_settings()
+        vault_path = Path(settings.vault_path)
+        try:
+            return scan_daily_brief(vault_path, today=date.today())
+        except Exception:
+            today = date.today().isoformat()
+            return {
+                "today": today,
+                "focus_items": [],
+                "due_today": [],
+                "coming_up": [],
+                "birthdays": [],
+                "pending_tasks": [],
+                "stale_tasks": [],
+            }
+
+    @app.get(
+        "/internal/vault/brief/weekly",
+        dependencies=[Depends(require_token)],
+    )
+    async def vault_weekly_brief() -> dict:
+        from datetime import date, timedelta
+        from writerservice.brief import scan_weekly_brief
+
+        settings = get_settings()
+        vault_path = Path(settings.vault_path)
+        today = date.today()
+        week_start = today - timedelta(days=7)
+        try:
+            return scan_weekly_brief(vault_path, week_start=week_start, week_end=today)
+        except Exception:
+            return {
+                "week_start": week_start.isoformat(),
+                "week_end": today.isoformat(),
+                "accomplished": [],
+                "completed_tasks": [],
+                "decisions": [],
+                "still_open": [],
+                "study_progress": [],
+            }
+
+    @app.get(
         "/internal/vault/stats/open-tasks",
         dependencies=[Depends(require_token)],
     )
     async def vault_open_task_stats() -> dict:
         settings = get_settings()
         vault_path = Path(settings.vault_path)
+        count: int | None = None
+        by_project: dict[str, int] | None = None
         try:
             count = _count_open_tasks(vault_path)
+            by_project = _count_open_tasks_by_project(vault_path)
         except Exception:
-            count = None
-        return {"open_tasks_count": count}
+            pass
+        return {"open_tasks_count": count, "open_tasks_by_project": by_project}
 
     @app.post(
         "/internal/notes/file",
