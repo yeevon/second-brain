@@ -256,3 +256,25 @@ def test_weekly_review_discord_error_output_is_connected():
     discord_conn = wf["connections"].get("Send to Discord", {}).get("main", [])
     assert len(discord_conn) >= 2, "Send to Discord must have both success and error outputs defined"
     assert len(discord_conn[1]) > 0, "Send to Discord error output must connect to a failure-handling node"
+
+
+def test_weekly_review_gemini_has_continue_on_error():
+    """Gemini failure must not block the weekly factual summary from posting."""
+    wf = _fixture()
+    gemini_nodes = [
+        n for n in wf["nodes"]
+        if "generativelanguage.googleapis.com" in n.get("parameters", {}).get("url", "")
+    ]
+    assert len(gemini_nodes) >= 1
+    on_error = gemini_nodes[0].get("onError", "")
+    assert on_error in ("continueRegularOutput", "continueErrorOutput"), (
+        "Gemini node must set onError so weekly review posts factual counts even if Gemini is down"
+    )
+
+
+def test_weekly_review_format_message_has_priorities_unavailable_fallback():
+    """Format node must handle missing Gemini output gracefully."""
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "priorities unavailable" in fixture_text.lower(), (
+        "Format Review Message must include a fallback string for when Gemini output is missing"
+    )

@@ -48,7 +48,7 @@
           "conditions": [
             {
               "id": "activity-check",
-              "leftValue": "={{ ($json.new_captures_count ?? 0) + ($json.filed_notes_count ?? 0) + ($json.failed_captures_count ?? 0) + ($json.sensitive_rejections_count ?? 0) + ($json.retry_events_count ?? 0) }}",
+              "leftValue": "={{ ($json.new_captures_count ?? 0) + ($json.filed_notes_count ?? 0) + ($json.failed_captures_count ?? 0) + ($json.sensitive_rejections_count ?? 0) + ($json.retry_events_count ?? 0) + ($json.inbox_backlog_count ?? 0) + ($json.awaiting_clarification_count ?? 0) + ($json.open_tasks_count ?? 0) + ($json.attachment_warnings_count ?? 0) }}",
               "rightValue": 0,
               "operator": {
                 "type": "number",

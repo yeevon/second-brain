@@ -79,12 +79,33 @@ def _fetch_open_task_count(capture_service: CaptureService) -> int | None:
 
 
 def _fetch_open_tasks_by_project(capture_service: CaptureService) -> dict[str, int] | None:
-    """Return open task counts grouped by project from a direct vault scan.
+    """Return open task counts grouped by project.
 
-    Only available when vault_path is configured. Returns None in capture-only mode.
-    Writer-service does not expose a grouped endpoint, so this always falls back to local scan.
+    Priority order:
+    1. Call writer-service GET /internal/vault/stats/open-tasks (returns both count + by_project)
+       if writer_service_url and writer_service_token are configured.
+    2. Fall back to direct vault scan if vault_path is set (local-full mode).
+    3. Return None if neither is available (capture-only mode with no vault access).
     """
+    import urllib.request
     from secondbrain.digest import scan_open_tasks_by_project
+
+    writer_url = getattr(capture_service.settings, "writer_service_url", None)
+    writer_token = getattr(capture_service.settings, "writer_service_token", None)
+    if writer_url and writer_token:
+        try:
+            req = urllib.request.Request(
+                f"{writer_url}/internal/vault/stats/open-tasks",
+                headers={"X-Second-Brain-Writer-Token": writer_token},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                import json
+                data = json.loads(resp.read())
+                by_project = data.get("open_tasks_by_project")
+                if isinstance(by_project, dict):
+                    return by_project
+        except Exception:
+            pass  # fall through to direct scan
 
     vault_path = getattr(capture_service.settings, "vault_path", None)
     if vault_path is not None:

@@ -207,6 +207,18 @@ def test_daily_digest_has_activity_branch_covers_new_captures():
     assert "new_captures_count" in fixture_text
 
 
+def test_daily_digest_activity_check_includes_backlog_and_open_tasks():
+    """Activity check must include backlog fields so backlog-only days still post."""
+    wf = _fixture()
+    if_nodes = [n for n in wf["nodes"] if n["type"] == "n8n-nodes-base.if"]
+    assert len(if_nodes) >= 1
+    if_json = json.dumps(if_nodes[0])
+    for field in ("inbox_backlog_count", "awaiting_clarification_count", "open_tasks_count", "attachment_warnings_count"):
+        assert field in if_json, (
+            f"Activity check must include {field!r} so backlog-only days still post the digest"
+        )
+
+
 # ── Error handling ────────────────────────────────────────────────────────────
 
 
