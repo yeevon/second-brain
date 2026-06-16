@@ -4,6 +4,10 @@ A Discord bot that durably captures messages and, in local mode, automatically f
 
 Send a message to a designated Discord channel. The bot screens it for secrets, persists it to SQLite, sends an immediate receipt, and — depending on the runtime mode — either stops there or classifies and files it into your vault.
 
+## Release status
+
+V2 is being prepared for production release. The V2 release line includes the EC2 `capture-only` stack, n8n intake orchestration, writer-service-owned vault writes, Daily/Weekly vault-backed briefs, host-visible Obsidian bind-mount support, and a read-only local MCP posture. V3 writable MCP work remains proposal-only and is not part of the V2 production boundary.
+
 ## Runtime modes
 
 Two explicit modes are supported via `CAPTURE_PROCESSING_MODE`:

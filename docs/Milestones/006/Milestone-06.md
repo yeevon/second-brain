@@ -12,7 +12,7 @@ Implements Architecture Phase 5 (scheduled digests) and Phase 6 (local query acc
 - **SB-123** Add the local read-only MCP server — Done
 - **SB-124** Add gembrain CLI wrapper — Done
 
-Milestone 6 is implemented. The final shipped shape uses vault-backed brief endpoints for Daily and Weekly, a tracked-clean pull-only vault sync, a read-only MCP server, and the `gembrain` host CLI wrapper.
+Milestone 6 is implemented and ready for V2 production release prep. The final shipped shape uses vault-backed brief endpoints for Daily and Weekly, a tracked-clean pull-only vault sync, a read-only MCP server, and the `gembrain` host CLI wrapper. Production deployment should preserve the V2 boundary: writer-service owns vault mutation, n8n updates workflows in place, local MCP stays read-only, and V3 writable MCP remains proposal-only.
 
 ---
 

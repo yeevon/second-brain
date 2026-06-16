@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 
 ---
 
+## v2.0.0 — Production release prep
+
+**Release branch:** `milestone_6_2`
+
+V2 is being prepared for production deployment. This release line promotes the implemented architecture to the production boundary: durable Discord capture on EC2, n8n orchestration, writer-service-owned vault writes, Git-backed Obsidian sync, Daily/Weekly vault-backed briefs, host-visible local vault access, and read-only MCP querying.
+
+Release validation evidence:
+
+- n8n bootstrap updates Intake, Daily Digest, and Weekly Review in place on EC2/staging; Error Handler is imported only when missing.
+- Local no-wipe E2E uses `docker compose up -d --build` to refresh workflow fixtures without UI delete/reimport.
+- Daily Brief and Weekly Review read current vault state through `/internal/brief/daily` and `/internal/brief/weekly`, not stale capture-count summaries.
+- Host Obsidian bind-mount mode keeps filed notes visible to local Obsidian and `brain-mcp`.
+- `brain-mcp` remains read-only for V2. V3 write capabilities stay behind a proposal-only boundary.
+
+---
+
 ## v1.0.8 — MCP gap: host vault access and writer-service hardening
 
 **Branch:** `mcp_gap`
