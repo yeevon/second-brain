@@ -67,16 +67,20 @@ def test_weekly_review_has_schedule_trigger():
 
 def test_weekly_review_schedule_is_weekly():
     fixture_text = FIXTURE_PATH.read_text()
-    # Cron expression for every Monday at 8am: "0 8 * * 1"
     assert "1" in fixture_text and "8" in fixture_text  # day 1 and hour 8 present
 
 
-# ── Digest endpoint ──────────────────────────────────────────────────────────
+# ── Brief endpoint ───────────────────────────────────────────────────────────
 
 
-def test_weekly_review_calls_correct_capture_service_url():
+def test_weekly_review_calls_brief_endpoint():
     fixture_text = FIXTURE_PATH.read_text()
-    assert "http://capture-service:8000/internal/digest/weekly" in fixture_text
+    assert "http://capture-service:8000/internal/brief/weekly" in fixture_text
+
+
+def test_weekly_review_does_not_call_old_digest_endpoint():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "/internal/digest/weekly" not in fixture_text
 
 
 def test_weekly_review_capture_service_url_uses_internal_hostname():
@@ -119,7 +123,27 @@ def test_weekly_review_gemini_credential_is_placeholder():
         assert cred["id"] == "PLACEHOLDER_GEMINI_API_KEY"
 
 
-# ── AI priorities label ───────────────────────────────────────────────────────
+# ── Brief output format ───────────────────────────────────────────────────────
+
+
+def test_weekly_review_format_references_accomplished():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "accomplished" in fixture_text
+
+
+def test_weekly_review_format_references_still_open():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "still_open" in fixture_text
+
+
+def test_weekly_review_format_references_decisions():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "decisions" in fixture_text
+
+
+def test_weekly_review_format_references_study_progress():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "study_progress" in fixture_text
 
 
 def test_weekly_review_message_labels_ai_section():
@@ -129,35 +153,7 @@ def test_weekly_review_message_labels_ai_section():
 
 def test_weekly_review_ai_prompt_does_not_infer_completion_from_prose():
     fixture_text = FIXTURE_PATH.read_text()
-    assert "explicit state" in fixture_text.lower() or "grounded in the numbers" in fixture_text.lower()
-
-
-# ── Message content ───────────────────────────────────────────────────────────
-
-
-def test_weekly_review_references_corrections():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "corrections_count" in fixture_text
-
-
-def test_weekly_review_references_failures():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "failures_count" in fixture_text
-
-
-def test_weekly_review_references_created_tasks():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "created_tasks_count" in fixture_text
-
-
-def test_weekly_review_references_completed_actions():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "completed_actions_count" in fixture_text
-
-
-def test_weekly_review_references_decisions():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "decisions_count" in fixture_text
+    assert "explicit state" in fixture_text.lower() or "grounded in the" in fixture_text.lower()
 
 
 # ── Security invariants ───────────────────────────────────────────────────────
@@ -220,15 +216,15 @@ def test_weekly_review_capture_service_node_uses_placeholder_credential():
             assert cred["id"] == "PLACEHOLDER_CAPTURE_SERVICE_TOKEN"
 
 
-def test_weekly_review_prepare_node_uses_let_not_const_for_week_summary():
-    """weekSummary must be `let` so outstanding_tasks_count can be appended."""
+def test_weekly_review_prepare_node_uses_open_tasks_data():
+    """Prepare AI input must use still_open and accomplished from the brief response."""
     wf = _fixture()
     code_nodes = [n for n in wf["nodes"] if n.get("type") == "n8n-nodes-base.code"]
-    prepare_nodes = [n for n in code_nodes if "Prepare" in n["name"] or "Priority" in n["name"].lower()]
-    assert len(prepare_nodes) >= 1, "Prepare AI Priorities Input node not found"
+    prepare_nodes = [n for n in code_nodes if "Prepare" in n["name"] or "Input" in n["name"]]
+    assert len(prepare_nodes) >= 1, "Prepare AI Input node not found"
     code = prepare_nodes[0]["parameters"]["jsCode"]
-    assert "let weekSummary" in code, "weekSummary must be declared with 'let' so += assignment works"
-    assert "weekSummary +=" in code, "outstanding_tasks_count must be appended via += not discarded"
+    assert "still_open" in code, "Prepare AI input must reference still_open tasks"
+    assert "accomplished" in code, "Prepare AI input must reference accomplished items"
 
 
 # ── Error handling ────────────────────────────────────────────────────────────

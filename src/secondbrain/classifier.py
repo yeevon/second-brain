@@ -27,6 +27,29 @@ Allowed folders:
 
 Use inbox when the capture is too vague to file confidently.
 Keep the body close to the original thought. Do not invent facts.
+
+note_type should be one of: note, task, idea, decision, birthday, reminder, event, study
+
+For birthday captures (e.g. "Mom's birthday June 22"):
+  - Set note_type to "birthday"
+  - Set note_date to the ISO date (YYYY-MM-DD); use current year if no year given
+
+For reminder or due-date captures (e.g. "remember to submit form by Friday"):
+  - Set note_type to "reminder"
+  - Set note_date to the ISO due date
+
+For event captures (e.g. "ENGR 110 starts June 18"):
+  - Set note_type to "event"
+  - Set note_date to the ISO date of the event
+
+For study captures (e.g. "finished algebra section"):
+  - Set note_type to "study"
+  - Use folder "learning"
+
+For action items in any note:
+  - Set due to "YYYY-MM-DD" if a due date is mentioned
+  - Set priority to "high", "medium", or "low" if urgency is explicit or strongly implied
+  - Set project to the project slug if the action belongs to a specific project different from the note's project
 """
 
 
@@ -107,6 +130,7 @@ def inbox_fallback(raw_text: str, *, reason: str) -> ClassificationOutcome:
             folder="inbox",
             project=None,
             note_type="note",
+            note_date=None,
             title="Unclassified capture",
             tags=["inbox"],
             body=raw_text,
@@ -135,6 +159,10 @@ def gemini_classification_schema() -> dict[str, Any]:
             "note_type": {
                 "type": "string",
             },
+            "note_date": {
+                "type": "string",
+                "nullable": True,
+            },
             "title": {
                 "type": "string",
             },
@@ -152,6 +180,13 @@ def gemini_classification_schema() -> dict[str, Any]:
                     "properties": {
                         "text": {"type": "string"},
                         "status": {"type": "string", "enum": ["open", "done"]},
+                        "due": {"type": "string", "nullable": True},
+                        "priority": {
+                            "type": "string",
+                            "enum": ["high", "medium", "low"],
+                            "nullable": True,
+                        },
+                        "project": {"type": "string", "nullable": True},
                     },
                     "required": ["text", "status"],
                 },
@@ -171,6 +206,7 @@ def gemini_classification_schema() -> dict[str, Any]:
             "folder",
             "project",
             "note_type",
+            "note_date",
             "title",
             "tags",
             "body",
@@ -183,6 +219,7 @@ def gemini_classification_schema() -> dict[str, Any]:
             "folder",
             "project",
             "note_type",
+            "note_date",
             "title",
             "tags",
             "body",

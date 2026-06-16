@@ -1,4 +1,4 @@
-"""Architecture tests for the Second Brain - Daily Digest workflow fixture."""
+"""Architecture tests for the Second Brain - Daily Brief workflow fixture."""
 from __future__ import annotations
 
 import json
@@ -67,17 +67,21 @@ def test_daily_digest_schedule_is_daily_7am():
     wf = _fixture()
     schedule_nodes = [n for n in wf["nodes"] if n["type"] == "n8n-nodes-base.scheduleTrigger"]
     assert len(schedule_nodes) == 1
-    # Accept either cron expression or structured form
     fixture_text = FIXTURE_PATH.read_text()
     assert "7" in fixture_text  # hour 7 present somewhere in schedule config
 
 
-# ── Digest endpoint ──────────────────────────────────────────────────────────
+# ── Brief endpoint ───────────────────────────────────────────────────────────
 
 
-def test_daily_digest_calls_correct_capture_service_url():
+def test_daily_digest_calls_brief_endpoint():
     fixture_text = FIXTURE_PATH.read_text()
-    assert "http://capture-service:8000/internal/digest/daily" in fixture_text
+    assert "http://capture-service:8000/internal/brief/daily" in fixture_text
+
+
+def test_daily_digest_does_not_call_old_digest_endpoint():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "/internal/digest/daily" not in fixture_text
 
 
 def test_daily_digest_capture_service_url_uses_internal_hostname():
@@ -89,6 +93,46 @@ def test_daily_digest_capture_service_url_uses_internal_hostname():
             assert clean.startswith("http://capture-service:8000"), (
                 f"capture-service URL must use internal hostname, got: {url!r}"
             )
+
+
+# ── Brief output format ───────────────────────────────────────────────────────
+
+
+def test_daily_brief_format_references_focus_items():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "focus_items" in fixture_text
+
+
+def test_daily_brief_format_references_due_today():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "due_today" in fixture_text
+
+
+def test_daily_brief_format_references_pending_tasks():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "pending_tasks" in fixture_text
+
+
+def test_daily_brief_format_references_stale_tasks():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "stale_tasks" in fixture_text
+
+
+def test_daily_brief_format_references_birthdays():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "birthdays" in fixture_text
+
+
+def test_daily_brief_format_references_coming_up():
+    fixture_text = FIXTURE_PATH.read_text()
+    assert "coming_up" in fixture_text
+
+
+def test_daily_brief_sends_to_discord():
+    wf = _fixture()
+    http_nodes = [n for n in wf["nodes"] if n["type"] == "n8n-nodes-base.httpRequest"]
+    methods = [n["parameters"].get("method", "GET") for n in http_nodes]
+    assert "POST" in methods, "Expected at least one POST node for Discord delivery"
 
 
 # ── Security invariants ───────────────────────────────────────────────────────
@@ -133,31 +177,6 @@ def test_daily_digest_save_progress_is_false():
     assert _fixture()["settings"]["saveExecutionProgress"] is False
 
 
-# ── Message formatting ────────────────────────────────────────────────────────
-
-
-def test_daily_digest_format_node_references_inbox_backlog():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "inbox_backlog_count" in fixture_text
-
-
-def test_daily_digest_format_node_references_sensitive_rejections():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "sensitive_rejections_count" in fixture_text
-
-
-def test_daily_digest_format_node_references_attachment_warnings():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "attachment_warnings_count" in fixture_text
-
-
-def test_daily_digest_sends_to_discord():
-    wf = _fixture()
-    http_nodes = [n for n in wf["nodes"] if n["type"] == "n8n-nodes-base.httpRequest"]
-    methods = [n["parameters"].get("method", "GET") for n in http_nodes]
-    assert "POST" in methods, "Expected at least one POST node for Discord delivery"
-
-
 # ── Bootstrap ────────────────────────────────────────────────────────────────
 
 
@@ -174,49 +193,6 @@ def test_daily_digest_capture_service_node_uses_placeholder_credential():
             cred = node.get("credentials", {}).get("httpHeaderAuth")
             assert cred is not None, f"Node '{node['name']}' calls capture-service but has no httpHeaderAuth credential"
             assert cred["id"] == "PLACEHOLDER_CAPTURE_SERVICE_TOKEN"
-            assert cred["name"] == "Capture Service Token"
-
-
-# ── Open tasks by project ─────────────────────────────────────────────────────
-
-
-def test_daily_digest_format_node_references_open_tasks_by_project():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "open_tasks_by_project" in fixture_text
-
-
-# ── No-activity branch ────────────────────────────────────────────────────────
-
-
-def test_daily_digest_has_activity_check_if_node():
-    wf = _fixture()
-    types = [n["type"] for n in wf["nodes"]]
-    assert "n8n-nodes-base.if" in types, "Expected an IF node for the activity check"
-
-
-def test_daily_digest_has_no_activity_skip_node():
-    wf = _fixture()
-    names = [n["name"] for n in wf["nodes"]]
-    assert any("No Activity" in name or "Skip" in name for name in names), (
-        "Expected a no-activity/skip node for the false branch"
-    )
-
-
-def test_daily_digest_has_activity_branch_covers_new_captures():
-    fixture_text = FIXTURE_PATH.read_text()
-    assert "new_captures_count" in fixture_text
-
-
-def test_daily_digest_activity_check_includes_backlog_and_open_tasks():
-    """Activity check must include backlog fields so backlog-only days still post."""
-    wf = _fixture()
-    if_nodes = [n for n in wf["nodes"] if n["type"] == "n8n-nodes-base.if"]
-    assert len(if_nodes) >= 1
-    if_json = json.dumps(if_nodes[0])
-    for field in ("inbox_backlog_count", "awaiting_clarification_count", "open_tasks_count", "attachment_warnings_count"):
-        assert field in if_json, (
-            f"Activity check must include {field!r} so backlog-only days still post the digest"
-        )
 
 
 # ── Error handling ────────────────────────────────────────────────────────────

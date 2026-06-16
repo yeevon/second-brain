@@ -18,6 +18,7 @@ from secondbrain.api_models import (
     ClassificationValidationResponse,
     CorrectionRequest,
     CorrectionResponse,
+    DailyBriefResponse,
     DailyDigestResponse,
     DeliveryTransitionResponse,
     DownstreamCaptureResponse,
@@ -29,6 +30,7 @@ from secondbrain.api_models import (
     ScheduleRetryRequest,
     SecurityScreenRequest,
     SecurityScreenResponse,
+    WeeklyBriefResponse,
     WeeklyDigestResponse,
     WorkflowErrorResponse,
 )
@@ -509,7 +511,91 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             **snapshot,
         )
 
+    # ------------------------------------------------------------------
+    # SB-120 / SB-121: Actionable brief endpoints
+    # Replace count-based digest with vault-scanned brief data.
+    # ------------------------------------------------------------------
+
+    @app.get(
+        "/internal/brief/daily",
+        response_model=DailyBriefResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def get_daily_brief():
+        from datetime import UTC, datetime
+        from secondbrain.digest import scan_daily_brief
+
+        now = datetime.now(UTC)
+        vault_path = _resolve_vault_path(capture_service)
+        if vault_path is None:
+            return DailyBriefResponse(
+                generated_at=now,
+                today=now.date().isoformat(),
+                focus_items=[],
+                due_today=[],
+                coming_up=[],
+                birthdays=[],
+                pending_tasks=[],
+                stale_tasks=[],
+            )
+        data = scan_daily_brief(vault_path, today=now.date())
+        return DailyBriefResponse(
+            generated_at=now,
+            today=data["today"],
+            focus_items=data["focus_items"],
+            due_today=data["due_today"],
+            coming_up=data["coming_up"],
+            birthdays=data["birthdays"],
+            pending_tasks=data["pending_tasks"],
+            stale_tasks=data["stale_tasks"],
+        )
+
+    @app.get(
+        "/internal/brief/weekly",
+        response_model=WeeklyBriefResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def get_weekly_brief():
+        from datetime import UTC, datetime, timedelta
+        from secondbrain.digest import scan_weekly_brief
+
+        now = datetime.now(UTC)
+        today = now.date()
+        week_start = today - timedelta(days=7)
+        vault_path = _resolve_vault_path(capture_service)
+        if vault_path is None:
+            return WeeklyBriefResponse(
+                generated_at=now,
+                week_start=week_start.isoformat(),
+                week_end=today.isoformat(),
+                accomplished=[],
+                completed_tasks=[],
+                decisions=[],
+                still_open=[],
+                study_progress=[],
+            )
+        data = scan_weekly_brief(vault_path, week_start=week_start, week_end=today)
+        return WeeklyBriefResponse(
+            generated_at=now,
+            week_start=data["week_start"],
+            week_end=data["week_end"],
+            accomplished=data["accomplished"],
+            completed_tasks=data["completed_tasks"],
+            decisions=data["decisions"],
+            still_open=data["still_open"],
+            study_progress=data["study_progress"],
+        )
+
     return app
+
+
+def _resolve_vault_path(capture_service: CaptureService):
+    """Return a Path to the vault, or None if not accessible from this service instance."""
+    from pathlib import Path
+    vault_path_setting = getattr(capture_service.settings, "vault_path", None)
+    if vault_path_setting is not None:
+        return Path(vault_path_setting)
+    return None
 
 
 def _get_capture(capture_service: CaptureService, capture_id: str) -> CaptureRecord:
