@@ -329,7 +329,7 @@ Milestone 6 adds scheduled n8n review workflows that post Discord summaries from
 - **Weekly Review** — `Second Brain - Weekly Review` calls `GET http://capture-service:8000/internal/brief/weekly`, formats accomplished notes, completed tasks, decisions, still-open work, and study progress, then asks Gemini for a clearly labelled AI-generated priorities section.
 - **Data source** — capture-service first proxies to writer-service (`GET /internal/vault/brief/{daily,weekly}`) so the brief is grounded in the current vault. If writer-service is unavailable and `VAULT_PATH` is configured, capture-service falls back to a local vault scan.
 - **Activation** — both scheduled workflows are imported inactive. Bind the Capture Service Token credential and configure `DISCORD_DIGEST_WEBHOOK_URL` in n8n before activating them.
-- **No-wipe updates** — local `docker compose up -d --build` runs `local-n8n-init`, which updates all four local workflows in place by existing ID. EC2/staging bootstrap uses the same update-in-place behavior for Daily and Weekly through `deploy/bootstrap-n8n.sh`.
+- **No-wipe updates** — local `docker compose up -d --build` runs `local-n8n-init`, which updates all four local workflows in place by existing ID. EC2/staging bootstrap updates Intake, Daily Digest, and Weekly Review in place; Error Handler is imported only when missing.
 
 ### Writer-service (SB-114+)
 

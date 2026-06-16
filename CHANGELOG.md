@@ -108,7 +108,7 @@ Adds a host command that wraps vault freshness, direct local queries, and Gemini
 
 ### Bootstrap updates
 
-- **`deploy/bootstrap-n8n.sh`** — imports or updates Daily Digest and Weekly Review in place by existing workflow ID on EC2/staging. Existing workflows are no longer skipped, so operators do not need to delete workflows in the n8n UI to pick up fixture changes.
+- **`deploy/bootstrap-n8n.sh`** — imports or updates Intake, Daily Digest, and Weekly Review in place by existing workflow ID on EC2/staging. Error Handler is imported only when missing.
 - **`deploy/local-n8n-init.py`** — imports or updates Error Handler, Intake, Daily Digest, and Weekly Review in place by existing workflow ID for the local full stack. Error Handler and Intake are activated after update; Daily/Weekly remain inactive until intentionally activated.
 - **`compose.override.yaml`** — `local-n8n-init` mounts `./n8n/workflows:/workflows:ro` and `./deploy/local-n8n-init.py:/init.py:ro`, making `docker compose up -d --build` a no-wipe workflow refresh path.
 - **Architecture tests** — lock the update-in-place bootstrap behavior and the exact local workflow mount paths so local no-wipe E2E does not regress to stale workflow fixtures.

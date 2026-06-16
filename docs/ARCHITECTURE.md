@@ -1,8 +1,8 @@
 # Second Brain — Canonical Architecture & Build Plan
 
-**Status:** Approved design, pre-build  
-**Last updated:** 2026-06-07  
-**Revision:** Runtime-hardening pass: Docker egress, SQLite write serialization, lease reaper, OS advisory Git lock, correction targeting, and digest labeling.  
+**Status:** V2 release candidate / implemented architecture  
+**Last updated:** 2026-06-16  
+**Revision:** V2 validation pass: writer-service vault ownership, n8n update-in-place bootstrap, Daily/Weekly vault-backed briefs, host Obsidian bind-mount validation, read-only MCP posture, and V3 proposal-only write boundary.  
 **Canonical document:** This file is the source of truth for implementation.  
 **Application repository:** `yeevon/second-brain`  
 **Vault repository:** private Git repository  

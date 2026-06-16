@@ -80,7 +80,7 @@ Implemented and tested. `gembrain` provides:
 The local and EC2 n8n bootstrap paths now support no-wipe workflow refresh:
 
 - Local `local-n8n-init` updates Error Handler, Intake, Daily Digest, and Weekly Review in place by existing workflow ID.
-- EC2/staging `deploy/bootstrap-n8n.sh` updates Daily Digest and Weekly Review in place by existing workflow ID.
+- EC2/staging `deploy/bootstrap-n8n.sh` updates Intake, Daily Digest, and Weekly Review in place by existing workflow ID. Error Handler is imported only when missing.
 - Daily and Weekly remain inactive unless intentionally activated.
 - Architecture tests lock exact local workflow mounts (`./n8n/workflows:/workflows:ro`, `./deploy/local-n8n-init.py:/init.py:ro`) and update-in-place behavior.
 
