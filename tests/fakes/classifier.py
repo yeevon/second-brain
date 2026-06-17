@@ -17,8 +17,7 @@ VALID_CLASSIFICATION = {
 
 class FakeClassifier:
     def __init__(self, result=None, *, error=None):
-        resolved_result = VALID_CLASSIFICATION if result is None else result
-        self.aio = SimpleNamespace(models=_FakeClassifierModels(resolved_result, error))
+        self.aio = SimpleNamespace(models=_FakeClassifierModels(result or VALID_CLASSIFICATION, error))
 
     @classmethod
     def raise_error(cls, error=None):
@@ -35,6 +34,10 @@ class FakeClassifier:
     @property
     def received_prompts(self):
         return self.aio.models.received_prompts
+
+    @property
+    def received_capture_ids(self):
+        return ()
 
 
 class _FakeClassifierModels:

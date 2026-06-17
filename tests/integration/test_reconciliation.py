@@ -1,10 +1,10 @@
 import pytest
 
-from secondbrain.capture_service import CaptureService
+from secondbrain.app import create_capture_handler
 from secondbrain.ledger import FILED
-from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID
+from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID, reconcile_discord_history
 from secondbrain.vault_writer import VaultWriter
-from secondbrain.worker import CaptureQueue
+from secondbrain.worker import CaptureQueue, enqueue_capture_ids, unfinished_capture_ids
 
 from tests.fakes.classifier import FakeClassifier
 from tests.fakes.discord import FakeDiscordChannel, FakeDiscordClient, FakeDiscordMessage
@@ -20,21 +20,25 @@ async def test_startup_catchup_recovers_missed_message_exactly_once(
     missed = FakeDiscordMessage(message_id=1101, content="Missed while the bot was offline.")
     channel = FakeDiscordChannel([missed])
     discord = FakeDiscordClient(channel)
+    handler = create_capture_handler(test_settings, ledger, queue, enqueue_captures=False)
     classifier = FakeClassifier()
-    service = CaptureService(
+    app = make_app(test_settings, ledger, queue, VaultWriter(test_settings.vault_path), classifier, discord)
+
+    first = await reconcile_discord_history(
+        client=discord,
         settings=test_settings,
         ledger=ledger,
-        notify_capture=queue.enqueue,
-        receipt_client=discord,
+        handle_capture=handler,
     )
-    app = make_app(test_settings, ledger, queue, VaultWriter(test_settings.vault_path), classifier, discord)
-    app.capture_service = service
-
-    first = await service.startup_reconcile(discord)
-    await service.enqueue_unfinished_captures()
+    await enqueue_capture_ids(unfinished_capture_ids(ledger), queue)
     await drain_worker(app)
-    second = await service.startup_reconcile(discord)
-    await service.enqueue_unfinished_captures()
+    second = await reconcile_discord_history(
+        client=discord,
+        settings=test_settings,
+        ledger=ledger,
+        handle_capture=handler,
+    )
+    await enqueue_capture_ids(unfinished_capture_ids(ledger), queue)
     await drain_worker(app)
 
     assert first.handled == 1

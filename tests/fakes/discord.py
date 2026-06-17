@@ -81,21 +81,19 @@ class FakeDiscordChannel:
         self.edit_attempts = 0
         self.next_receipt_id = 9001
         self.fail_initial_send = False
-        self.initial_send_failed = False
         self.fail_receipt_edit = False
         for message in self.history_messages:
             message.channel = self
 
     async def send(self, content):
-        if self.fail_initial_send and not self.initial_send_failed:
-            self.initial_send_failed = True
+        if self.fail_initial_send:
             raise RuntimeError("simulated initial receipt failure")
         receipt_id = self.next_receipt_id
         self.next_receipt_id += 1
         receipt = FakeReceiptMessage(receipt_id, content, self)
         self.messages[receipt_id] = receipt
         self.sent_receipts.append((receipt_id, content))
-        if len(self.sent_receipts) > 1 or self.initial_send_failed:
+        if len(self.sent_receipts) > 1:
             self.replacement_receipts.append((receipt_id, content))
         return SimpleNamespace(id=receipt_id)
 

@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from secondbrain.capture_service import CaptureService
+from secondbrain.app import create_capture_handler
 from secondbrain.ledger import Ledger
 from secondbrain.vault_writer import VaultWriter
 from secondbrain.worker import CaptureQueue
@@ -63,15 +63,5 @@ def fake_classifier():
 
 
 @pytest.fixture
-def capture_service(test_settings, ledger, queue, fake_discord):
-    return CaptureService(
-        settings=test_settings,
-        ledger=ledger,
-        notify_capture=queue.enqueue,
-        receipt_client=fake_discord,
-    )
-
-
-@pytest.fixture
-def capture_handler(capture_service):
-    return capture_service.handle_gateway_message
+def capture_handler(test_settings, ledger, queue):
+    return create_capture_handler(test_settings, ledger, queue)
