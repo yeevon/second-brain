@@ -1,6 +1,6 @@
 # Milestone 8: Tech Debt Resolution
 
-Addresses all twelve open items from `docs/tech_debt_1/`. These were identified during Milestone 3 and deferred to keep earlier milestones focused on feature delivery. They are now prioritized before V3 work begins, because V3 will add new concurrency and write paths that amplify any existing SQLite, logging, or shutdown fragility.
+Addresses all twelve open items from `docs/tech_debt_1/`. These were identified during Milestone 3 and deferred to keep earlier milestones focused on feature delivery. They are resolved after V3 (Milestone 7) and before EC2 production deployment (Milestone 9).
 
 Items are grouped by theme so related changes land together.
 
@@ -13,6 +13,7 @@ Items are grouped by theme so related changes land together.
 See [SB-130.md](SB-130.md) for the full spec.
 
 Covers:
+
 - TD-003: Prevent SQLite contention from blocking the asyncio event loop
 - TD-004: Add bounded SQLite runtime startup and shutdown watchdogs
 - TD-007: Add defensive validation inside `SQLiteRuntime` constructor
@@ -26,6 +27,7 @@ Covers:
 See [SB-131.md](SB-131.md) for the full spec.
 
 Covers:
+
 - TD-005: Validate adopted legacy schemas before recording migration adoption
 
 ---
@@ -37,6 +39,7 @@ Covers:
 See [SB-132.md](SB-132.md) for the full spec.
 
 Covers:
+
 - TD-006: Define a WAL-aware backup and restore procedure
 
 ---
@@ -48,6 +51,7 @@ Covers:
 See [SB-133.md](SB-133.md) for the full spec.
 
 Covers:
+
 - TD-001: Sanitize persisted local-worker exception messages
 - TD-008: Centralize structured application logging
 
@@ -60,6 +64,7 @@ Covers:
 See [SB-134.md](SB-134.md) for the full spec.
 
 Covers:
+
 - TD-002: Make shutdown cleanup resilient to cleanup errors
 - TD-009: Add durable receipt-repair tracking
 
@@ -72,6 +77,7 @@ Covers:
 See [SB-135.md](SB-135.md) for the full spec.
 
 Covers:
+
 - TD-011: Add a configuration preflight command
 - TD-012: Monitor background-task liveness independently
 - TD-013: Persist dedicated last-successful-vault-write metadata
