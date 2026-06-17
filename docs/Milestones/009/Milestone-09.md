@@ -4,7 +4,7 @@ Deploys the full system to EC2 production after V3 (Milestone 7) and tech-debt c
 
 ---
 
-## SB-126 — Deploy V2+V3 to EC2 with security hardening
+## SB-126 — Deploy V3/M8-hardened system to EC2 with security hardening
 
 **Branch:** `release/production`
 
