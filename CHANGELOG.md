@@ -4,6 +4,65 @@ All notable changes to this project are documented here.
 
 ---
 
+## v3.0.0 — Milestone 7: V3 controlled vault updates (local)
+
+**Release branch:** `milestone_7`
+
+V3 introduces a proposal-only write path: an LLM client proposes structured vault changes via `brain-mcp-propose`, the user approves or rejects via Discord, and `writer-service` applies approved changes under the same `flock` Git lock used for filing. The raw capture ledger is never touched by LLM tooling. EC2 production deployment is deferred to Milestone 9; this milestone builds and validates V3 locally.
+
+### SB-136 — Vault-update-proposal schema and storage
+
+Added `vault_update_proposals` to the SQLite schema and the internal CRUD API in `capture-service` for creating, reading, and listing proposals.
+
+- **`src/secondbrain/migrations.py`** — new migration adds `vault_update_proposals` with a `VUP-YYYYMMDD-NNNN` ID format (same transactional counter pattern as capture IDs) and a `(status, submitted_at)` index. A follow-on migration adds `approval_message_id` for Discord message tracking. Status lifecycle: `PENDING` → `APPROVED` → `APPLYING` → `APPLIED`; or `REJECTED`; or `FAILED`.
+- **`POST /internal/vault/proposals`** — creates a proposal; validates `operation` against the nine-entry allowlist and `target_note_path` against path-traversal / hidden-file guards. Returns `{proposal_id, status}`.
+- **`GET /internal/vault/proposals/:proposal_id`** — full proposal record; 404 for unknown IDs.
+- **`GET /internal/vault/proposals?status=PENDING`** — lists proposals by status, most recent first, limit 50.
+- **`PATCH /internal/vault/proposals/:proposal_id`** — updates proposal status; used internally during the apply and reject flows.
+- **`src/secondbrain/capture_models.py`** — `ALLOWED_PROPOSAL_OPERATIONS`, `ALL_PROPOSAL_STATUSES` constants; `VaultUpdateProposal` dataclass.
+- **Allowlist (initial set):** `mark_task_done`, `mark_task_open`, `set_task_due_date`, `set_task_priority`, `append_task`, `append_note_section`, `move_note_to_folder`, `add_project_tag`, `add_weekly_review_entry`.
+
+### SB-137 — Vault-update-service: validate and apply proposals
+
+Extended `writer-service` with a proposal-apply endpoint. Approved proposals run under the existing `flock` writer lock with the same Git sequence used for note filing.
+
+- **`POST /internal/vault/apply-proposal`** — fetches the full proposal from capture-service, verifies `APPROVED` status, acquires flock, runs the full apply sequence (`git fetch` → `git merge --ff-only` → clean-worktree check → path guard → lifecycle check → anchor verify → mutate → audit → `git add` → `git commit` → `git push`), then calls back to capture-service with the commit hash.
+- **`writer-service/src/writerservice/proposal_ops.py`** — nine operation implementations. Path guards reject traversal, hidden-path prefixes (`.`), and non-markdown targets. Lifecycle guards reject archived and superseded notes. Anchor verification fails fast if the target text no longer matches file content — no change applied. Operations are idempotent where semantically appropriate (marking an already-done task done is a no-op).
+- **Audit record** — `VAULT_UPDATE_APPLIED` event appended to `99_log/events.ndjson` on every successful apply. The commit hash is returned to capture-service and stored on the proposal row; the audit line itself does not carry the hash (tracked as future work for SB-140 follow-up).
+- **`writer-service/src/writerservice/config.py`** — `CAPTURE_SERVICE_URL` and `CAPTURE_SERVICE_INTERNAL_TOKEN` settings added for writer-service → capture-service callbacks.
+
+### SB-138 — Discord approval surface
+
+`capture-service` posts an approval request to Discord when a proposal is created and routes two new reply patterns. These are checked before the `fix:` prefix check and never create captures.
+
+- **`approve VUP-YYYYMMDD-NNNN`** — validates proposal is `PENDING`, transitions to `APPROVED`, calls writer-service apply endpoint, then edits the Discord approval message to show ✅ + commit hash (success) or ❌ + error type (failure).
+- **`reject VUP-YYYYMMDD-NNNN`** — transitions to `REJECTED`, appends `VAULT_UPDATE_REJECTED` audit event, edits the approval message to show ❌ Rejected. Vault is never touched.
+- **Error cases** — approving or rejecting an already-closed proposal replies with a visible error; approving an unknown proposal ID also replies with an error. None of these create ledger rows.
+- **`approval_message_id`** — stored on the proposal row so capture-service can edit the correct Discord message after apply or reject.
+
+### SB-139 — V3 proposal-only MCP tools (`brain-mcp-propose`)
+
+Added a second MCP entry point that exposes proposal tools to LLM clients. The existing `brain-mcp` read-only profile is unchanged and remains the default.
+
+- **`src/secondbrain/mcp_propose_server.py`** — `brain-mcp-propose` stdio server. Eight tools: `propose_task_completion`, `propose_due_date_change`, `propose_priority_change`, `propose_note_move`, `propose_task_append`, `propose_review_entry`, `list_pending_update_proposals`, `read_update_proposal`. All proposal tools call `POST /internal/vault/proposals` — none write vault files or invoke the apply endpoint.
+- **`pyproject.toml`** — `brain-mcp-propose` script entry point added alongside `brain-mcp`.
+- **Disallowed tools** — `write_note`, `delete_note`, `replace_note`, `move_note_directly`, `git_commit`, `git_push`, `shell` are absent from the proposal profile by design.
+- **Input validation** — `propose_task_completion` rejects empty `task_text` or `note_path`; all proposal tools surface API-level validation errors (path traversal, unsupported operation) back to the LLM client.
+
+### SB-140 — V3 security hardening
+
+Verified and enforced V3 write-path invariants through targeted hardening and the test suite.
+
+- **Authorization gate** — all proposal endpoints require `X-Second-Brain-Internal-Token`; the apply endpoint requires `X-Second-Brain-Writer-Token`. Both verified with `secrets.compare_digest`.
+- **Proposal JSON validation** — `operation` checked against the allowlist and `target_note_path` checked for `..`, absolute paths, hidden-path prefixes, and `.git/` components at creation time.
+- **Apply endpoint boundary** — `POST /internal/vault/apply-proposal` verifies `APPROVED` status before acquiring flock; PENDING and already-closed proposals are rejected with typed errors.
+- **Stale anchor detection** — operations with `target_anchor_json` verify the anchor text still exists in the file before mutation; stale anchor returns failure without touching the vault.
+- **Lifecycle guard** — notes with `status: archived` or `status: superseded` in frontmatter are rejected before any mutation.
+- **Crashed-write detection** — `check_working_tree_clean` in `git_ops.py` switched from `--untracked-files=no` to `--untracked-files=normal` so a partially-written note left untracked by a prior crash blocks the next apply instead of silently appearing clean. `.obsidian/` and `.obsidian/**` are filtered from the dirty-lines check to prevent Obsidian workspace noise from blocking applies on live vaults.
+- **`tests/unit/test_vault_proposals.py`** — 147 tests covering schema, CRUD, endpoint auth, path validation, all nine operation implementations, lifecycle guards, Discord command routing, MCP tool surface, and proposal idempotency.
+
+---
+
 ## v2.0.0 — Production release prep
 
 **Release branch:** `milestone_6_2`
