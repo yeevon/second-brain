@@ -138,6 +138,44 @@ _MIGRATIONS: list[Migration] = [
             "CREATE INDEX IF NOT EXISTS idx_captures_clarification ON captures(clarification_status)",
         ),
     ),
+    Migration(
+        version=6,
+        name="vault_update_proposals",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS vault_update_proposals (
+                proposal_id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                requested_by TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                target_note_path TEXT NOT NULL,
+                target_anchor_json TEXT,
+                change_json TEXT NOT NULL,
+                reason TEXT,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                requires_approval INTEGER NOT NULL DEFAULT 1,
+                submitted_at TEXT NOT NULL,
+                reviewed_at TEXT,
+                reviewed_by TEXT,
+                applied_at TEXT,
+                rejected_reason TEXT,
+                git_commit_hash TEXT,
+                last_error TEXT
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_vault_update_proposals_status
+                ON vault_update_proposals(status, submitted_at)
+            """,
+        ),
+    ),
+    Migration(
+        version=7,
+        name="vault_update_proposals_approval_message",
+        statements=(
+            "ALTER TABLE vault_update_proposals ADD COLUMN approval_message_id TEXT",
+        ),
+    ),
 ]
 
 

@@ -10,9 +10,9 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from writerservice.api_models import FileNoteRequest, FileNoteResponse, HealthResponse, MoveNoteRequest, MoveNoteResponse
+from writerservice.api_models import ApplyProposalRequest, ApplyProposalResponse, FileNoteRequest, FileNoteResponse, HealthResponse, MoveNoteRequest, MoveNoteResponse
 from writerservice.config import get_settings
-from writerservice.git_errors import CaptureDuplicateError, WriterError
+from writerservice.git_errors import CaptureDuplicateError, PathTraversalError, WriterError
 from writerservice.vault import check_vault_writable
 from writerservice.writer import DuplicateCaptureError, VaultWriter
 
@@ -255,6 +255,42 @@ def _build_app() -> FastAPI:
             old_note_path=result.old_note_path,
             new_note_path=result.new_note_path,
             git_commit_hash=result.git_commit_hash,
+        )
+
+    @app.post(
+        "/internal/vault/apply-proposal",
+        response_model=ApplyProposalResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def apply_proposal(request: ApplyProposalRequest) -> ApplyProposalResponse:
+        from writerservice.flock import vault_write_lock
+        from writerservice.proposal_ops import apply_proposal as _apply
+
+        settings = get_settings()
+        vault_path = Path(settings.vault_path)
+        audit_log_path = Path(settings.audit_log_path)
+        lock_path = vault_path / ".vault_write.lock"
+
+        try:
+            with vault_write_lock(lock_path):
+                result = _apply(
+                    vault_root=vault_path,
+                    request=request,
+                    audit_log_path=audit_log_path,
+                    git_sync_enabled=settings.git_sync_enabled,
+                )
+        except PathTraversalError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        return ApplyProposalResponse(
+            proposal_id=request.proposal_id,
+            changed_path=result.changed_path,
+            commit_hash=result.commit_hash,
+            audit_record=result.audit_record,
         )
 
     return app

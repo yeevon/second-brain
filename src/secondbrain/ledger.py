@@ -11,6 +11,7 @@ import uuid
 
 from secondbrain.capture_models import (
     ALL_DELIVERY_STATUSES,
+    ALL_PROPOSAL_STATUSES,
     ALL_STATUSES,
     CLASSIFYING,
     COMPLETE,
@@ -25,6 +26,11 @@ from secondbrain.capture_models import (
     LEASABLE_DELIVERY_STATUSES,
     NOT_APPLICABLE,
     PENDING_FORWARD,
+    PROPOSAL_APPLYING,
+    PROPOSAL_APPLIED,
+    PROPOSAL_FAILED,
+    PROPOSAL_PENDING,
+    PROPOSAL_REJECTED,
     RECEIVED,
     REJECTED_SENSITIVE,
     RETRY_WAIT,
@@ -33,6 +39,7 @@ from secondbrain.capture_models import (
     DeliveryMutationResult,
     FailedLease,
     LeaseReaperResult,
+    ProposalRecord,
     RequeuedLease,
     RetryDisposition,
     TransitionResult,
@@ -669,6 +676,80 @@ class Ledger:
         return self._read(
             "weekly_digest_snapshot",
             lambda conn: self._weekly_digest_snapshot(conn, since=since, now=now),
+        )
+
+    # ------------------------------------------------------------------
+    # SB-136: Vault update proposal public methods
+    # ------------------------------------------------------------------
+
+    def create_proposal(
+        self,
+        *,
+        source: str,
+        requested_by: str,
+        operation: str,
+        target_note_path: str,
+        target_anchor_json: str | None,
+        change_json: str,
+        reason: str | None,
+        requires_approval: bool = True,
+    ) -> ProposalRecord:
+        submitted_at = _now()
+        return self._write(
+            "create_proposal",
+            lambda conn: self._create_proposal(
+                conn,
+                source=source,
+                requested_by=requested_by,
+                operation=operation,
+                target_note_path=target_note_path,
+                target_anchor_json=target_anchor_json,
+                change_json=change_json,
+                reason=reason,
+                requires_approval=requires_approval,
+                submitted_at=submitted_at,
+            ),
+        )
+
+    def get_proposal(self, proposal_id: str) -> ProposalRecord:
+        return self._read(
+            "get_proposal",
+            lambda conn: self._get_proposal(conn, proposal_id),
+        )
+
+    def list_proposals(self, *, status: str | None = None, limit: int = 50) -> list[ProposalRecord]:
+        return self._read(
+            "list_proposals",
+            lambda conn: self._list_proposals(conn, status=status, limit=limit),
+        )
+
+    def update_proposal(
+        self,
+        proposal_id: str,
+        *,
+        status: str | None = None,
+        reviewed_at: datetime | None = None,
+        reviewed_by: str | None = None,
+        applied_at: datetime | None = None,
+        rejected_reason: str | None = None,
+        git_commit_hash: str | None = None,
+        last_error: str | None = None,
+        approval_message_id: str | None = None,
+    ) -> ProposalRecord:
+        return self._write(
+            "update_proposal",
+            lambda conn: self._update_proposal(
+                conn,
+                proposal_id,
+                status=status,
+                reviewed_at=reviewed_at,
+                reviewed_by=reviewed_by,
+                applied_at=applied_at,
+                rejected_reason=rejected_reason,
+                git_commit_hash=git_commit_hash,
+                last_error=last_error,
+                approval_message_id=approval_message_id,
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -2247,6 +2328,130 @@ class Ledger:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    # ------------------------------------------------------------------
+    # SB-136: Vault update proposal private implementations
+    # ------------------------------------------------------------------
+
+    def _next_proposal_id(self, conn: sqlite3.Connection, submitted_at: datetime) -> str:
+        prefix = f"VUP-{submitted_at.strftime('%Y%m%d')}-"
+        row = conn.execute(
+            "SELECT proposal_id FROM vault_update_proposals WHERE proposal_id LIKE ? ORDER BY proposal_id DESC LIMIT 1",
+            (f"{prefix}%",),
+        ).fetchone()
+        next_number = 1
+        if row is not None:
+            next_number = int(row["proposal_id"].rsplit("-", 1)[1]) + 1
+        return f"{prefix}{next_number:04d}"
+
+    def _create_proposal(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        source: str,
+        requested_by: str,
+        operation: str,
+        target_note_path: str,
+        target_anchor_json: str | None,
+        change_json: str,
+        reason: str | None,
+        requires_approval: bool,
+        submitted_at: datetime,
+    ) -> ProposalRecord:
+        proposal_id = self._next_proposal_id(conn, submitted_at)
+        submitted_at_iso = _iso(submitted_at)
+        conn.execute(
+            """
+            INSERT INTO vault_update_proposals (
+                proposal_id, source, requested_by, operation,
+                target_note_path, target_anchor_json, change_json, reason,
+                status, requires_approval, submitted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+            """,
+            (
+                proposal_id, source, requested_by, operation,
+                target_note_path, target_anchor_json, change_json, reason,
+                1 if requires_approval else 0, submitted_at_iso,
+            ),
+        )
+        return self._get_proposal(conn, proposal_id)
+
+    def _get_proposal(self, conn: sqlite3.Connection, proposal_id: str) -> ProposalRecord:
+        row = conn.execute(
+            "SELECT * FROM vault_update_proposals WHERE proposal_id = ?",
+            (proposal_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"proposal not found: {proposal_id}")
+        return _proposal_from_row(row)
+
+    def _list_proposals(
+        self, conn: sqlite3.Connection, *, status: str | None, limit: int
+    ) -> list[ProposalRecord]:
+        if status is not None:
+            rows = conn.execute(
+                "SELECT * FROM vault_update_proposals WHERE status = ? ORDER BY submitted_at DESC LIMIT ?",
+                (status, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM vault_update_proposals ORDER BY submitted_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [_proposal_from_row(row) for row in rows]
+
+    def _update_proposal(
+        self,
+        conn: sqlite3.Connection,
+        proposal_id: str,
+        *,
+        status: str | None,
+        reviewed_at: datetime | None,
+        reviewed_by: str | None,
+        applied_at: datetime | None,
+        rejected_reason: str | None,
+        git_commit_hash: str | None,
+        last_error: str | None,
+        approval_message_id: str | None,
+    ) -> ProposalRecord:
+        row = conn.execute(
+            "SELECT * FROM vault_update_proposals WHERE proposal_id = ?",
+            (proposal_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"proposal not found: {proposal_id}")
+        sets = []
+        params: list[Any] = []
+        if status is not None:
+            sets.append("status = ?")
+            params.append(status)
+        if reviewed_at is not None:
+            sets.append("reviewed_at = ?")
+            params.append(_iso(reviewed_at))
+        if reviewed_by is not None:
+            sets.append("reviewed_by = ?")
+            params.append(reviewed_by)
+        if applied_at is not None:
+            sets.append("applied_at = ?")
+            params.append(_iso(applied_at))
+        if rejected_reason is not None:
+            sets.append("rejected_reason = ?")
+            params.append(rejected_reason)
+        if git_commit_hash is not None:
+            sets.append("git_commit_hash = ?")
+            params.append(git_commit_hash)
+        if last_error is not None:
+            sets.append("last_error = ?")
+            params.append(last_error)
+        if approval_message_id is not None:
+            sets.append("approval_message_id = ?")
+            params.append(approval_message_id)
+        if sets:
+            params.append(proposal_id)
+            conn.execute(
+                f"UPDATE vault_update_proposals SET {', '.join(sets)} WHERE proposal_id = ?",
+                params,
+            )
+        return self._get_proposal(conn, proposal_id)
 
     def _daily_digest_snapshot(
         self, conn: sqlite3.Connection, *, since: datetime, now: datetime
@@ -2440,6 +2645,33 @@ def _record_from_row(row: sqlite3.Row) -> CaptureRecord:
         delivery_reason_type=row["delivery_reason_type"],
         clarification_status=row["clarification_status"] if "clarification_status" in keys else None,
         clarification_question=row["clarification_question"] if "clarification_question" in keys else None,
+    )
+
+
+def _proposal_from_row(row: sqlite3.Row) -> ProposalRecord:
+    def _parse_dt(value: str | None) -> datetime | None:
+        return datetime.fromisoformat(value) if value else None
+
+    keys = row.keys()
+    return ProposalRecord(
+        proposal_id=row["proposal_id"],
+        source=row["source"],
+        requested_by=row["requested_by"],
+        operation=row["operation"],
+        target_note_path=row["target_note_path"],
+        target_anchor_json=row["target_anchor_json"],
+        change_json=row["change_json"],
+        reason=row["reason"],
+        status=row["status"],
+        requires_approval=bool(row["requires_approval"]),
+        submitted_at=datetime.fromisoformat(row["submitted_at"]),
+        reviewed_at=_parse_dt(row["reviewed_at"]),
+        reviewed_by=row["reviewed_by"],
+        applied_at=_parse_dt(row["applied_at"]),
+        rejected_reason=row["rejected_reason"],
+        git_commit_hash=row["git_commit_hash"],
+        last_error=row["last_error"],
+        approval_message_id=row["approval_message_id"] if "approval_message_id" in keys else None,
     )
 
 

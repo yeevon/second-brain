@@ -18,18 +18,21 @@ from secondbrain.api_models import (
     ClassificationValidationResponse,
     CorrectionRequest,
     CorrectionResponse,
+    CreateProposalRequest,
     DailyBriefResponse,
     DailyDigestResponse,
     DeliveryTransitionResponse,
     DownstreamCaptureResponse,
     EditReceiptRequest,
     HealthResponse,
+    ProposalResponse,
     ReceiptDeliveryResponse,
     RenewLeaseRequest,
     ReportWorkflowErrorRequest,
     ScheduleRetryRequest,
     SecurityScreenRequest,
     SecurityScreenResponse,
+    UpdateProposalStatusRequest,
     WeeklyBriefResponse,
     WeeklyDigestResponse,
     WorkflowErrorResponse,
@@ -39,7 +42,12 @@ from secondbrain.capture_service import (
     CaptureService,
     ReceiptDeliveryError,
 )
-from secondbrain.capture_models import CaptureRecord, DeliveryMutationResult
+from secondbrain.capture_models import (
+    ALLOWED_PROPOSAL_OPERATIONS,
+    ALL_PROPOSAL_STATUSES,
+    CaptureRecord,
+    DeliveryMutationResult,
+)
 
 
 INTERNAL_TOKEN_HEADER = "X-Second-Brain-Internal-Token"
@@ -559,6 +567,104 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             study_progress=data.get("study_progress", []),
         )
 
+    # ------------------------------------------------------------------
+    # SB-136: Vault update proposal routes
+    # ------------------------------------------------------------------
+
+    @app.post(
+        "/internal/vault/proposals",
+        response_model=ProposalResponse,
+        status_code=201,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def create_proposal(request: CreateProposalRequest):
+        if request.operation not in ALLOWED_PROPOSAL_OPERATIONS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"unsupported operation: {request.operation!r}; "
+                       f"allowed: {sorted(ALLOWED_PROPOSAL_OPERATIONS)}",
+            )
+        _validate_proposal_path(request.target_note_path)
+        try:
+            proposal = capture_service.create_proposal(
+                source=request.source,
+                requested_by=request.requested_by,
+                operation=request.operation,
+                target_note_path=request.target_note_path,
+                target_anchor_json=request.target_anchor_json,
+                change_json=request.change_json,
+                reason=request.reason,
+                requires_approval=request.requires_approval,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="failed to create proposal") from exc
+
+        if proposal.requires_approval:
+            channel_id = getattr(capture_service.settings, "discord_capture_channel_id", None)
+            if channel_id:
+                msg_id = await capture_service.post_proposal_approval_message(
+                    proposal, int(channel_id)
+                )
+                if msg_id:
+                    proposal = capture_service.update_proposal(
+                        proposal.proposal_id, approval_message_id=msg_id
+                    )
+
+        return _proposal_response(proposal)
+
+    @app.get(
+        "/internal/vault/proposals/{proposal_id}",
+        response_model=ProposalResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def get_proposal(proposal_id: str):
+        try:
+            proposal = capture_service.get_proposal(proposal_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="proposal not found")
+        return _proposal_response(proposal)
+
+    @app.get(
+        "/internal/vault/proposals",
+        response_model=list[ProposalResponse],
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def list_proposals(status: str | None = None):
+        if status is not None and status not in ALL_PROPOSAL_STATUSES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"unknown proposal status: {status!r}",
+            )
+        proposals = capture_service.list_proposals(status=status)
+        return [_proposal_response(p) for p in proposals]
+
+    @app.patch(
+        "/internal/vault/proposals/{proposal_id}",
+        response_model=ProposalResponse,
+        dependencies=[Depends(require_internal_token)],
+    )
+    async def update_proposal(proposal_id: str, request: UpdateProposalStatusRequest):
+        if request.status not in ALL_PROPOSAL_STATUSES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"unknown proposal status: {request.status!r}",
+            )
+        try:
+            proposal = capture_service.update_proposal(
+                proposal_id,
+                status=request.status,
+                reviewed_at=request.reviewed_at,
+                reviewed_by=request.reviewed_by,
+                applied_at=request.applied_at,
+                rejected_reason=request.rejected_reason,
+                git_commit_hash=request.git_commit_hash,
+                last_error=request.last_error,
+                approval_message_id=request.approval_message_id,
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="proposal not found")
+        return _proposal_response(proposal)
+
     return app
 
 
@@ -618,6 +724,44 @@ def _get_capture(capture_service: CaptureService, capture_id: str) -> CaptureRec
         return capture_service.get_capture(capture_id)
     except CaptureNotFoundError as exc:
         raise HTTPException(status_code=404, detail="capture not found") from exc
+
+
+def _validate_proposal_path(target_note_path: str) -> None:
+    """Reject paths that could escape the vault root."""
+    import posixpath
+    if ".." in target_note_path.replace("\\", "/").split("/"):
+        raise HTTPException(status_code=422, detail="path traversal detected in target_note_path")
+    if target_note_path.startswith("/"):
+        raise HTTPException(status_code=422, detail="absolute paths are not allowed in target_note_path")
+    normalized = posixpath.normpath(target_note_path)
+    if normalized.startswith("..") or normalized.startswith("/."):
+        raise HTTPException(status_code=422, detail="path traversal detected in target_note_path")
+    parts = target_note_path.replace("\\", "/").split("/")
+    if any(part.startswith(".") for part in parts if part):
+        raise HTTPException(status_code=422, detail="hidden paths are not allowed in target_note_path")
+
+
+def _proposal_response(proposal) -> ProposalResponse:
+    return ProposalResponse(
+        proposal_id=proposal.proposal_id,
+        source=proposal.source,
+        requested_by=proposal.requested_by,
+        operation=proposal.operation,
+        target_note_path=proposal.target_note_path,
+        target_anchor_json=proposal.target_anchor_json,
+        change_json=proposal.change_json,
+        reason=proposal.reason,
+        status=proposal.status,
+        requires_approval=proposal.requires_approval,
+        submitted_at=proposal.submitted_at,
+        reviewed_at=proposal.reviewed_at,
+        reviewed_by=proposal.reviewed_by,
+        applied_at=proposal.applied_at,
+        rejected_reason=proposal.rejected_reason,
+        git_commit_hash=proposal.git_commit_hash,
+        last_error=proposal.last_error,
+        approval_message_id=proposal.approval_message_id,
+    )
 
 
 def _capture_response(capture: CaptureRecord) -> CaptureResponse:

@@ -149,6 +149,63 @@ class WorkflowErrorOutcome:
     outcome: str
 
 
+# ---------------------------------------------------------------------------
+# Vault update proposal statuses (SB-136)
+# ---------------------------------------------------------------------------
+
+PROPOSAL_PENDING = "PENDING"
+PROPOSAL_APPROVED = "APPROVED"
+PROPOSAL_REJECTED = "REJECTED"
+PROPOSAL_APPLYING = "APPLYING"
+PROPOSAL_APPLIED = "APPLIED"
+PROPOSAL_FAILED = "FAILED"
+
+ALL_PROPOSAL_STATUSES = {
+    PROPOSAL_PENDING,
+    PROPOSAL_APPROVED,
+    PROPOSAL_REJECTED,
+    PROPOSAL_APPLYING,
+    PROPOSAL_APPLIED,
+    PROPOSAL_FAILED,
+}
+
+TERMINAL_PROPOSAL_STATUSES = {PROPOSAL_REJECTED, PROPOSAL_APPLIED}
+
+ALLOWED_PROPOSAL_OPERATIONS = {
+    "mark_task_done",
+    "mark_task_open",
+    "set_task_due_date",
+    "set_task_priority",
+    "append_task",
+    "append_note_section",
+    "move_note_to_folder",
+    "add_project_tag",
+    "add_weekly_review_entry",
+}
+
+
+@dataclass(frozen=True)
+class ProposalRecord:
+    proposal_id: str
+    source: str
+    requested_by: str
+    operation: str
+    target_note_path: str
+    target_anchor_json: str | None
+    change_json: str
+    reason: str | None
+    status: str
+    requires_approval: bool
+    submitted_at: datetime
+    reviewed_at: datetime | None
+    reviewed_by: str | None
+    applied_at: datetime | None
+    rejected_reason: str | None
+    git_commit_hash: str | None
+    last_error: str | None
+    approval_message_id: str | None = None
+
+
 @dataclass(frozen=True)
 class DeliveryMutationResult:
     capture_id: str

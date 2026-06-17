@@ -19,6 +19,7 @@ dependencies = [
 secondbrain = "secondbrain.app:main"
 vault-pull = "secondbrain.vault_pull:main"
 brain-mcp = "secondbrain.mcp_server:main"
+brain-mcp-propose = "secondbrain.mcp_propose_server:main"
 gembrain = "secondbrain.gembrain:main"
 
 [build-system]
