@@ -25,6 +25,10 @@ def test_settings(tmp_path):
         classification_confidence_threshold=0.75,
         ledger_path=tmp_path / "runtime" / "ledger.sqlite3",
         vault_path=tmp_path / "vault",
+        downstream_delivery_enabled=True,
+        capture_processing_mode="local-full",
+        writer_service_url=None,
+        writer_service_token=None,
     )
 
 

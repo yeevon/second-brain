@@ -18,6 +18,7 @@ class ReceiptDeliveryResult:
     delivered: bool
     replaced: bool
     receipt_message_id: str | None
+    replacement_reason: str | None = None
 
 
 async def send_saved_receipt(
@@ -65,6 +66,7 @@ async def deliver_final_receipt(
     capture: CaptureRecord,
     content: str,
 ) -> ReceiptDeliveryResult:
+    replacement_reason: str | None = None
     if capture.receipt_message_id:
         try:
             await edit_final_receipt(client, capture, content)
@@ -74,11 +76,12 @@ async def deliver_final_receipt(
                 receipt_message_id=capture.receipt_message_id,
             )
         except Exception as exc:
+            replacement_reason = type(exc).__name__
             log_metadata(
                 "receipt_edit_failed",
                 capture_id=capture.capture_id,
                 discord_message_id=capture.discord_message_id,
-                error_type=type(exc).__name__,
+                error_type=replacement_reason,
             )
 
     try:
@@ -96,6 +99,7 @@ async def deliver_final_receipt(
         delivered=True,
         replaced=True,
         receipt_message_id=replacement_receipt_message_id,
+        replacement_reason=replacement_reason,
     )
 
 

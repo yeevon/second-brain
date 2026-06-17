@@ -15,6 +15,8 @@ from secondbrain.capture_service import CaptureService
 from secondbrain.config import Settings
 from secondbrain.discord_capture import create_discord_client
 from secondbrain.heartbeat import run_capture_service_heartbeat
+from secondbrain.logging_config import configure_logging
+from secondbrain.observability import log_metadata
 from secondbrain.reconcile import ReconcileResult
 from secondbrain.vault_writer import VaultWriter
 from secondbrain.worker import CaptureQueue, run_capture_worker
@@ -155,6 +157,8 @@ def ensure_heartbeat_task(
     capture_service: CaptureService,
     instance_id: str,
     interval_seconds: int,
+    reaper_liveness_threshold_s: int = 300,
+    reconcile_liveness_threshold_s: int = 300,
 ) -> None:
     if startup.heartbeat_task is not None:
         return
@@ -163,6 +167,8 @@ def ensure_heartbeat_task(
             ledger=capture_service,
             instance_id=instance_id,
             interval_seconds=interval_seconds,
+            reaper_liveness_threshold_s=reaper_liveness_threshold_s,
+            reconcile_liveness_threshold_s=reconcile_liveness_threshold_s,
         )
     )
 
@@ -172,6 +178,8 @@ def initialize_capture_service_lifecycle(
     startup,
     capture_service: CaptureService,
     heartbeat_interval_seconds: int,
+    reaper_liveness_threshold_s: int = 300,
+    reconcile_liveness_threshold_s: int = 300,
 ) -> str:
     instance_id = str(uuid.uuid4())
     capture_service.record_capture_service_start(
@@ -183,6 +191,8 @@ def initialize_capture_service_lifecycle(
         capture_service=capture_service,
         instance_id=instance_id,
         interval_seconds=heartbeat_interval_seconds,
+        reaper_liveness_threshold_s=reaper_liveness_threshold_s,
+        reconcile_liveness_threshold_s=reconcile_liveness_threshold_s,
     )
     return instance_id
 
@@ -229,6 +239,8 @@ async def run_local_full_runtime(settings: Settings) -> None:
         startup=startup,
         capture_service=capture_service,
         heartbeat_interval_seconds=settings.capture_service_heartbeat_interval_seconds,
+        reaper_liveness_threshold_s=getattr(settings, "reaper_liveness_threshold_s", 300),
+        reconcile_liveness_threshold_s=getattr(settings, "reconcile_liveness_threshold_s", 300),
     )
     api = create_capture_api(
         capture_service=capture_service,
@@ -245,14 +257,17 @@ async def run_local_full_runtime(settings: Settings) -> None:
         if startup_result is not None:
             reconcile_result = startup_result.reconcile_result
             capture_ids = startup_result.capture_ids
-            print("startup Discord history reconciliation complete")
-            print(f"  messages seen: {reconcile_result.seen}")
-            print(f"  captures handled: {reconcile_result.handled}")
-            print(f"  ignored messages: {reconcile_result.ignored}")
-            if reconcile_result.warning:
-                print(f"  warning: {reconcile_result.warning}")
-            print("background classifier worker started")
-            print(f"  recovered captures queued: {len(capture_ids)}")
+            log_metadata(
+                "startup_reconcile_complete",
+                messages_seen=reconcile_result.seen,
+                captures_handled=reconcile_result.handled,
+                ignored_messages=reconcile_result.ignored,
+                warning=reconcile_result.warning or None,
+            )
+            log_metadata(
+                "background_worker_started",
+                recovered_captures=len(capture_ids),
+            )
         ensure_periodic_reconciliation_task(
             startup=startup,
             client=client,
@@ -263,25 +278,28 @@ async def run_local_full_runtime(settings: Settings) -> None:
                 instance_id=instance_id,
                 now=datetime.now(UTC),
             )
-            print(f"  periodic reconciliation started (interval: {settings.periodic_reconcile_interval_seconds}s)")
+            log_metadata(
+                "periodic_reconcile_started",
+                interval_seconds=settings.periodic_reconcile_interval_seconds,
+            )
 
     client = create_discord_client(
         capture_service.handle_gateway_message,
         start_background_worker_once,
     )
     capture_service.attach_receipt_client(client)
-    print("capture-service runtime mode: local-full")
-    print("downstream processing: enabled")
-    print("starting Discord listener")
-    print(f"  guild_id: {settings.discord_guild_id}")
-    print(f"  capture_channel_id: {settings.discord_capture_channel_id}")
-    print(f"  allowed_user_id: {settings.discord_allowed_user_id}")
-    print(f"  ledger_path: {settings.ledger_path}")
-    print(f"  vault_path: {settings.vault_path}")
-    print(f"  internal API host: {settings.capture_api_host}")
-    print(f"  internal API port: {settings.capture_api_port}")
-    print("  internal API authentication: configured")
-    print(f"capture-service API started on internal container port {settings.capture_api_port}")
+    log_metadata(
+        "capture_service_starting",
+        mode="local-full",
+        downstream_processing="enabled",
+        guild_id=settings.discord_guild_id,
+        capture_channel_id=settings.discord_capture_channel_id,
+        allowed_user_id=settings.discord_allowed_user_id,
+        ledger_path=str(settings.ledger_path),
+        vault_path=str(settings.vault_path),
+        api_host=settings.capture_api_host,
+        api_port=settings.capture_api_port,
+    )
 
     api_task = asyncio.create_task(api_server.serve())
     discord_task = asyncio.create_task(client.start(settings.discord_bot_token))
@@ -303,6 +321,8 @@ async def run_capture_only_runtime(settings: Settings) -> None:
         startup=startup,
         capture_service=capture_service,
         heartbeat_interval_seconds=settings.capture_service_heartbeat_interval_seconds,
+        reaper_liveness_threshold_s=getattr(settings, "reaper_liveness_threshold_s", 300),
+        reconcile_liveness_threshold_s=getattr(settings, "reconcile_liveness_threshold_s", 300),
     )
     api = create_capture_api(
         capture_service=capture_service,
@@ -317,13 +337,14 @@ async def run_capture_only_runtime(settings: Settings) -> None:
     async def reconcile_once() -> None:
         reconcile_result = await startup.start_once(client)
         if reconcile_result is not None:
-            print("startup Discord history reconciliation complete")
-            print(f"  messages seen: {reconcile_result.seen}")
-            print(f"  captures handled: {reconcile_result.handled}")
-            print(f"  ignored messages: {reconcile_result.ignored}")
-            if reconcile_result.warning:
-                print(f"  warning: {reconcile_result.warning}")
-            print("Discord listener ready")
+            log_metadata(
+                "startup_reconcile_complete",
+                messages_seen=reconcile_result.seen,
+                captures_handled=reconcile_result.handled,
+                ignored_messages=reconcile_result.ignored,
+                warning=reconcile_result.warning or None,
+            )
+            log_metadata("discord_listener_ready")
         ensure_periodic_reconciliation_task(
             startup=startup,
             client=client,
@@ -344,7 +365,10 @@ async def run_capture_only_runtime(settings: Settings) -> None:
                 instance_id=instance_id,
                 now=datetime.now(UTC),
             )
-            print(f"  periodic reconciliation started (interval: {settings.periodic_reconcile_interval_seconds}s)")
+            log_metadata(
+                "periodic_reconcile_started",
+                interval_seconds=settings.periodic_reconcile_interval_seconds,
+            )
 
     client = create_discord_client(
         capture_service.handle_gateway_message,
@@ -355,20 +379,17 @@ async def run_capture_only_runtime(settings: Settings) -> None:
         startup=startup,
         capture_service=capture_service,
     )
-    print("capture-service runtime mode: capture-only")
-    if settings.downstream_delivery_enabled:
-        print("downstream processing: enabled (n8n webhook delivery)")
-    else:
-        print("downstream processing: disabled")
-    print("starting Discord listener")
-    print(f"  guild_id: {settings.discord_guild_id}")
-    print(f"  capture_channel_id: {settings.discord_capture_channel_id}")
-    print(f"  allowed_user_id: {settings.discord_allowed_user_id}")
-    print(f"  ledger_path: {settings.ledger_path}")
-    print(f"  internal API host: {settings.capture_api_host}")
-    print(f"  internal API port: {settings.capture_api_port}")
-    print("  internal API authentication: configured")
-    print(f"capture-service API started on internal container port {settings.capture_api_port}")
+    log_metadata(
+        "capture_service_starting",
+        mode="capture-only",
+        downstream_processing="enabled" if settings.downstream_delivery_enabled else "disabled",
+        guild_id=settings.discord_guild_id,
+        capture_channel_id=settings.discord_capture_channel_id,
+        allowed_user_id=settings.discord_allowed_user_id,
+        ledger_path=str(settings.ledger_path),
+        api_host=settings.capture_api_host,
+        api_port=settings.capture_api_port,
+    )
 
     api_task = asyncio.create_task(api_server.serve())
     discord_task = asyncio.create_task(client.start(settings.discord_bot_token))
@@ -419,15 +440,32 @@ async def run_service_runtime(
         with suppress(asyncio.CancelledError):
             await stop_waiter
 
-        await api_server.stop()
-        await client.close()
+        async def _shutdown_step(name: str, coro) -> None:
+            try:
+                await coro
+            except Exception as exc:
+                log_metadata(
+                    "shutdown_step_failed",
+                    step=name,
+                    error_type=type(exc).__name__,
+                )
+
+        await _shutdown_step("stop_api_server", api_server.stop())
+        await _shutdown_step("close_discord_client", client.close())
 
         for attr in ("periodic_task", "worker_task", "reaper_task", "heartbeat_task", "delivery_task"):
             task = getattr(startup, attr, None)
             if task is not None and not task.done():
                 task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+                except (asyncio.CancelledError, asyncio.TimeoutError, Exception) as exc:
+                    if not isinstance(exc, asyncio.CancelledError):
+                        log_metadata(
+                            "shutdown_step_failed",
+                            step=f"cancel_{attr}",
+                            error_type=type(exc).__name__,
+                        )
 
         if instance_id is not None:
             try:
@@ -435,8 +473,12 @@ async def run_service_runtime(
                     instance_id=instance_id,
                     now=datetime.now(UTC),
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                log_metadata(
+                    "shutdown_step_failed",
+                    step="record_capture_service_stop",
+                    error_type=type(exc).__name__,
+                )
 
         for task in tasks:
             if not task.done():
@@ -444,17 +486,32 @@ async def run_service_runtime(
             with suppress(asyncio.CancelledError):
                 await task
 
-        capture_service.close()
+        try:
+            capture_service.close()
+        except Exception as exc:
+            log_metadata(
+                "shutdown_step_failed",
+                step="close_capture_service",
+                error_type=type(exc).__name__,
+            )
 
         for sig in installed_signals:
-            loop.remove_signal_handler(sig)
+            try:
+                loop.remove_signal_handler(sig)
+            except Exception as exc:
+                log_metadata(
+                    "shutdown_step_failed",
+                    step=f"remove_signal_handler_{sig}",
+                    error_type=type(exc).__name__,
+                )
 
 
 def run_discord_listener() -> None:
+    configure_logging()
     try:
         asyncio.run(run_service())
     except KeyboardInterrupt:
-        print("shutdown complete")
+        log_metadata("shutdown_complete")
 
 
 def run_status() -> int:
@@ -500,11 +557,20 @@ def run_manual_retry(capture_id: str) -> bool:
         capture_service.close()
 
 
+def run_preflight_command() -> int:
+    from secondbrain.preflight import run_preflight, format_preflight_results
+    checks = run_preflight()
+    output, all_passed = format_preflight_results(checks)
+    print(output)
+    return 0 if all_passed else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="secondbrain")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("run", help="listen for Discord captures and print them")
     subparsers.add_parser("status", help="report local ledger and vault status")
+    subparsers.add_parser("preflight", help="validate configuration without starting the service")
     retry_parser = subparsers.add_parser("retry", help="queue a manual retry for a failed capture")
     retry_parser.add_argument("capture_id", help="the capture ID to retry (e.g. SB-20260607-0042)")
 
@@ -515,6 +581,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "status":
             return run_status()
+        if args.command == "preflight":
+            return run_preflight_command()
         if args.command == "retry":
             return 0 if run_manual_retry(args.capture_id) else 1
     except RuntimeError as exc:

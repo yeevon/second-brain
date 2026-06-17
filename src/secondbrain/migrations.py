@@ -1,10 +1,49 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Callable
 
 from secondbrain.observability import log_metadata
+
+
+@dataclass(frozen=True)
+class ColumnSpec:
+    name: str
+    type: str
+    not_null: bool = False
+
+
+@dataclass(frozen=True)
+class SchemaAssertion:
+    """Read-only schema check run once after a migration is applied."""
+    table: str
+    expected_columns: tuple[ColumnSpec, ...]
+
+    def verify(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute(f"PRAGMA table_info({self.table})").fetchall()
+        if not rows:
+            raise RuntimeError(
+                f"Schema assertion failed: table '{self.table}' does not exist"
+            )
+        actual = {row["name"]: row for row in rows}
+        for spec in self.expected_columns:
+            if spec.name not in actual:
+                raise RuntimeError(
+                    f"Schema assertion failed: column '{spec.name}' missing from '{self.table}'"
+                )
+            row = actual[spec.name]
+            if row["type"].upper() != spec.type.upper():
+                raise RuntimeError(
+                    f"Schema assertion failed: column '{self.table}.{spec.name}' "
+                    f"has type '{row['type']}', expected '{spec.type}'"
+                )
+            if spec.not_null and not row["notnull"]:
+                raise RuntimeError(
+                    f"Schema assertion failed: column '{self.table}.{spec.name}' "
+                    f"must be NOT NULL"
+                )
 
 
 @dataclass(frozen=True)
@@ -12,6 +51,7 @@ class Migration:
     version: int
     name: str
     statements: tuple[str, ...]
+    assertions: tuple[SchemaAssertion, ...] = field(default_factory=tuple)
 
 
 _MIGRATIONS: list[Migration] = [
@@ -75,6 +115,34 @@ _MIGRATIONS: list[Migration] = [
             "CREATE INDEX IF NOT EXISTS idx_captures_status ON captures(status)",
             "CREATE INDEX IF NOT EXISTS idx_capture_events_capture_id ON capture_events(capture_id)",
         ),
+        assertions=(
+            SchemaAssertion(
+                table="captures",
+                expected_columns=(
+                    ColumnSpec("capture_id", "TEXT", not_null=True),
+                    ColumnSpec("discord_message_id", "TEXT", not_null=True),
+                    ColumnSpec("status", "TEXT", not_null=True),
+                    ColumnSpec("received_at", "TEXT", not_null=True),
+                    ColumnSpec("updated_at", "TEXT", not_null=True),
+                ),
+            ),
+            SchemaAssertion(
+                table="capture_events",
+                expected_columns=(
+                    ColumnSpec("capture_id", "TEXT", not_null=True),
+                    ColumnSpec("event_type", "TEXT", not_null=True),
+                    ColumnSpec("created_at", "TEXT", not_null=True),
+                ),
+            ),
+            SchemaAssertion(
+                table="system_state",
+                expected_columns=(
+                    ColumnSpec("key", "TEXT"),  # PRIMARY KEY; SQLite notnull=0 for non-INTEGER PKs
+                    ColumnSpec("value", "TEXT", not_null=True),
+                    ColumnSpec("updated_at", "TEXT", not_null=True),
+                ),
+            ),
+        ),
     ),
     Migration(
         version=2,
@@ -94,6 +162,17 @@ _MIGRATIONS: list[Migration] = [
             "CREATE INDEX IF NOT EXISTS idx_captures_delivery_due ON captures(delivery_status, next_attempt_at)",
             "CREATE INDEX IF NOT EXISTS idx_captures_processing_lease ON captures(delivery_status, processing_lease_until)",
         ),
+        assertions=(
+            SchemaAssertion(
+                table="captures",
+                expected_columns=(
+                    ColumnSpec("delivery_status", "TEXT", not_null=True),
+                    ColumnSpec("delivery_attempts", "INTEGER", not_null=True),
+                    ColumnSpec("processing_lease_until", "TEXT"),
+                    ColumnSpec("next_attempt_at", "TEXT"),
+                ),
+            ),
+        ),
     ),
     Migration(
         version=3,
@@ -103,6 +182,15 @@ _MIGRATIONS: list[Migration] = [
             "ALTER TABLE captures ADD COLUMN delivery_commit_hash TEXT",
             "ALTER TABLE captures ADD COLUMN delivery_reason_type TEXT",
         ),
+        assertions=(
+            SchemaAssertion(
+                table="captures",
+                expected_columns=(
+                    ColumnSpec("delivery_commit_hash", "TEXT"),
+                    ColumnSpec("delivery_reason_type", "TEXT"),
+                ),
+            ),
+        ),
     ),
     Migration(
         version=4,
@@ -111,6 +199,14 @@ _MIGRATIONS: list[Migration] = [
             "ALTER TABLE captures ADD COLUMN retry_attempts INTEGER NOT NULL DEFAULT 0",
             "CREATE INDEX IF NOT EXISTS idx_captures_stale_lease ON captures(delivery_status, processing_lease_until)",
             "CREATE INDEX IF NOT EXISTS idx_captures_retry_due ON captures(delivery_status, next_attempt_at)",
+        ),
+        assertions=(
+            SchemaAssertion(
+                table="captures",
+                expected_columns=(
+                    ColumnSpec("retry_attempts", "INTEGER", not_null=True),
+                ),
+            ),
         ),
     ),
     Migration(
@@ -136,6 +232,24 @@ _MIGRATIONS: list[Migration] = [
             """,
             "CREATE INDEX IF NOT EXISTS idx_corrections_capture_id ON corrections(capture_id)",
             "CREATE INDEX IF NOT EXISTS idx_captures_clarification ON captures(clarification_status)",
+        ),
+        assertions=(
+            SchemaAssertion(
+                table="captures",
+                expected_columns=(
+                    ColumnSpec("clarification_status", "TEXT"),
+                    ColumnSpec("clarification_question", "TEXT"),
+                ),
+            ),
+            SchemaAssertion(
+                table="corrections",
+                expected_columns=(
+                    ColumnSpec("correction_id", "TEXT", not_null=True),
+                    ColumnSpec("capture_id", "TEXT", not_null=True),
+                    ColumnSpec("old_note_path", "TEXT", not_null=True),
+                    ColumnSpec("new_note_path", "TEXT", not_null=True),
+                ),
+            ),
         ),
     ),
     Migration(
@@ -168,12 +282,32 @@ _MIGRATIONS: list[Migration] = [
                 ON vault_update_proposals(status, submitted_at)
             """,
         ),
+        assertions=(
+            SchemaAssertion(
+                table="vault_update_proposals",
+                expected_columns=(
+                    ColumnSpec("proposal_id", "TEXT"),  # PRIMARY KEY; SQLite notnull=0 for non-INTEGER PKs
+                    ColumnSpec("source", "TEXT", not_null=True),
+                    ColumnSpec("operation", "TEXT", not_null=True),
+                    ColumnSpec("status", "TEXT", not_null=True),
+                    ColumnSpec("submitted_at", "TEXT", not_null=True),
+                ),
+            ),
+        ),
     ),
     Migration(
         version=7,
         name="vault_update_proposals_approval_message",
         statements=(
             "ALTER TABLE vault_update_proposals ADD COLUMN approval_message_id TEXT",
+        ),
+        assertions=(
+            SchemaAssertion(
+                table="vault_update_proposals",
+                expected_columns=(
+                    ColumnSpec("approval_message_id", "TEXT"),
+                ),
+            ),
         ),
     ),
 
@@ -213,6 +347,10 @@ def _apply(connection: sqlite3.Connection, migration: Migration) -> None:
 
         for statement in migration.statements:
             connection.execute(statement)
+
+        # TD-005: run schema assertions before recording the migration version
+        for assertion in migration.assertions:
+            assertion.verify(connection)
 
         connection.execute(
             "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",

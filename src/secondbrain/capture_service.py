@@ -152,6 +152,9 @@ class CaptureService:
     def record_capture_service_heartbeat(self, *, instance_id: str, now: datetime) -> bool:
         return self._ledger.record_capture_service_heartbeat(instance_id=instance_id, now=now)
 
+    def get_system_state(self, key: str) -> str | None:
+        return self._ledger.get_system_state(key)
+
     def record_capture_service_stop(self, *, instance_id: str, now: datetime) -> bool:
         updated = self._ledger.record_capture_service_stop(instance_id=instance_id, now=now)
         if updated:
@@ -540,6 +543,10 @@ class CaptureService:
             classification_json=classification_json,
         )
         if result.outcome in {"changed", "idempotent_replay"}:
+            self._ledger.set_system_state(
+                "last_vault_write_at",
+                datetime.now(UTC).isoformat(),
+            )
             try:
                 await self.edit_receipt(
                     capture_id=capture_id,
@@ -576,6 +583,10 @@ class CaptureService:
             classification_json=classification_json,
         )
         if result.outcome in {"changed", "idempotent_replay"}:
+            self._ledger.set_system_state(
+                "last_vault_write_at",
+                datetime.now(UTC).isoformat(),
+            )
             try:
                 await self.edit_receipt(
                     capture_id=capture_id,
@@ -1253,6 +1264,7 @@ class CaptureService:
                 event_payload={
                     "old_receipt_message_id": capture.receipt_message_id,
                     "new_receipt_message_id": delivery.receipt_message_id,
+                    "reason": delivery.replacement_reason,
                 },
             )
         return delivery
@@ -1469,11 +1481,10 @@ def _format_correction_receipt(*, capture_id: str, new_note_path: str) -> str:
 def _safe_failure_error_type(reason: str) -> str:
     if ": " not in reason:
         return "CaptureFailure"
-    prefix = reason.split(":", maxsplit=1)[0]
-    if prefix in {"vault write failed", "worker error"}:
-        parts = reason.split(":", maxsplit=2)
-        if len(parts) >= 2:
-            return parts[1].strip() or "CaptureFailure"
+    prefix = reason.split(":", maxsplit=1)[0].strip()
+    # Sanitized format: "{ExceptionType}: {description}" — prefix is a Python identifier
+    if prefix.isidentifier():
+        return prefix
     return "CaptureFailure"
 
 

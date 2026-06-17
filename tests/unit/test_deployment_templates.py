@@ -60,6 +60,17 @@ def _make_settings(monkeypatch, base_env: dict) -> Settings:
     return Settings()
 
 
+_COMPOSE_ONLY_KEYS = {
+    # Local Docker Compose bind-mount and init variables, not consumed by Settings
+    "LOCAL_VAULT_PATH",
+    "LOCAL_UID",
+    "LOCAL_GID",
+    "GIT_SYNC_ENABLED",
+    "VAULT_DEPLOY_KEY_FILE",
+    "GITHUB_KNOWN_HOSTS_FILE",
+}
+
+
 @pytest.mark.parametrize("template,base_env", [
     (".env.example", _LOCAL_FULL_ENV),
     ("deploy/capture-service.env.example", _CAPTURE_ONLY_ENV),
@@ -69,7 +80,10 @@ def test_template_keys_map_to_settings_attributes(monkeypatch, template, base_en
     keys = _parse_template_keys(path)
     settings = _make_settings(monkeypatch, base_env)
 
-    unknown_keys = [k for k in keys if not hasattr(settings, k.lower())]
+    unknown_keys = [
+        k for k in keys
+        if k not in _COMPOSE_ONLY_KEYS and not hasattr(settings, k.lower())
+    ]
 
     assert unknown_keys == [], (
         f"{template} contains key(s) with no matching Settings attribute: "

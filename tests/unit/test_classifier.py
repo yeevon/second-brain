@@ -224,6 +224,7 @@ def test_gemini_schema_omits_unsupported_additional_properties():
         "folder",
         "project",
         "note_type",
+        "note_date",
         "title",
         "tags",
         "body",

@@ -91,6 +91,11 @@ class OperationalStatusSnapshot:
     captures_needing_clarification: int
     last_successful_backup_at: datetime | None
     last_successful_restore_validation_at: datetime | None
+    receipt_repairs_today: int
+    last_vault_write_at: datetime | None
+    reaper_last_heartbeat_at: datetime | None
+    reconcile_last_heartbeat_at: datetime | None
+    background_task_stale: bool
 
 
 def calculate_capture_service_health(
@@ -239,6 +244,7 @@ def _query_snapshot(
         """
     ).fetchone()
     last_successful_vault_write = vault_row["derived_note_path"] if vault_row else None
+    last_vault_write_at = parse_dt(get_state("last_vault_write_at"))
 
     last_reconciled_discord_message_id = get_state("last_reconciled_discord_message_id")
     last_successful_reconciliation_at = parse_dt(get_state("last_successful_reconciliation_at"))
@@ -270,6 +276,20 @@ def _query_snapshot(
     last_successful_backup_at = parse_dt(get_state("last_successful_backup_at"))
     last_successful_restore_validation_at = parse_dt(get_state("last_successful_restore_validation_at"))
 
+    # SB-134 TD-009: receipt repair count for today
+    try:
+        receipt_repairs_row = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM capture_events
+            WHERE event_type = 'RECEIPT_REPLACED'
+              AND created_at >= ? AND created_at < ?
+            """,
+            (today_utc_iso, tomorrow_utc_iso),
+        ).fetchone()
+        receipt_repairs_today = int(receipt_repairs_row["c"])
+    except Exception:
+        receipt_repairs_today = 0
+
     return OperationalStatusSnapshot(
         generated_at=now,
         timezone_name=settings.status_timezone,
@@ -296,6 +316,11 @@ def _query_snapshot(
         captures_needing_clarification=captures_needing_clarification,
         last_successful_backup_at=last_successful_backup_at,
         last_successful_restore_validation_at=last_successful_restore_validation_at,
+        receipt_repairs_today=receipt_repairs_today,
+        last_vault_write_at=last_vault_write_at,
+        reaper_last_heartbeat_at=parse_dt(get_state("reaper_last_heartbeat_at")),
+        reconcile_last_heartbeat_at=parse_dt(get_state("reconcile_last_heartbeat_at")),
+        background_task_stale=get_state("background_task_stale") == "true",
     )
 
 
@@ -325,7 +350,9 @@ def format_operational_status(snapshot: OperationalStatusSnapshot) -> str:
         f"  captures in inbox: {snapshot.captures_in_inbox}",
         f"  captures needing clarification: {snapshot.captures_needing_clarification}",
         f"  captures failed: {snapshot.captures_failed}",
+        f"  receipt repairs today: {snapshot.receipt_repairs_today}",
         f"  last successful vault write: {_fmt(snapshot.last_successful_vault_write)}",
+        f"  last vault write at: {_fmt(snapshot.last_vault_write_at)}",
         "",
         "Delivery backlog",
         f"  captures waiting for retry: {snapshot.captures_waiting_for_retry}",
@@ -343,6 +370,11 @@ def format_operational_status(snapshot: OperationalStatusSnapshot) -> str:
         f"  capture-service started at: {_fmt(snapshot.capture_service_started_at)}",
         f"  capture-service last heartbeat: {_fmt(snapshot.capture_service_last_heartbeat_at)}",
         f"  capture-service stopped at: {_fmt(snapshot.capture_service_stopped_at)}",
+        "",
+        "Background tasks",
+        f"  reaper last heartbeat: {_fmt(snapshot.reaper_last_heartbeat_at)}",
+        f"  reconcile last heartbeat: {_fmt(snapshot.reconcile_last_heartbeat_at)}",
+        f"  background task stale: {snapshot.background_task_stale}",
         "",
         "Backup",
         f"  last successful backup: {_fmt(snapshot.last_successful_backup_at)}",
