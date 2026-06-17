@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from typing import Any, Literal
@@ -389,6 +390,30 @@ class CreateProposalRequest(BaseModel):
     change_json: str = Field(min_length=2, max_length=10000)
     reason: str | None = Field(default=None, max_length=500)
     requires_approval: bool = True
+
+    @field_validator("change_json")
+    @classmethod
+    def validate_change_json(cls, v: str) -> str:
+        try:
+            parsed = json.loads(v)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"change_json must be valid JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("change_json must be a JSON object, not an array or scalar")
+        return v
+
+    @field_validator("target_anchor_json")
+    @classmethod
+    def validate_target_anchor_json(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        try:
+            parsed = json.loads(v)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"target_anchor_json must be valid JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("target_anchor_json must be a JSON object, not an array or scalar")
+        return v
 
 
 class ProposalResponse(BaseModel):

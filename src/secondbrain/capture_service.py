@@ -109,6 +109,8 @@ class CaptureService:
         self._receipt_client = client
 
     async def handle_gateway_message(self, message) -> None:
+        if not should_capture_message(message, self.settings):
+            return
         content = (message.content or "").strip()
         approve_m = _APPROVE_VUP_RE.match(content)
         if approve_m:
@@ -963,15 +965,8 @@ class CaptureService:
             await _safe_reply(message, f"❌ Apply failed for `{proposal_id}`: writer-service not configured.")
             return
 
-        import json as _json
         try:
-            result = await self._writer_client.apply_proposal(
-                proposal_id=proposal_id,
-                operation=proposal.operation,
-                target_note_path=proposal.target_note_path,
-                target_anchor_json=proposal.target_anchor_json,
-                change_json=proposal.change_json,
-            )
+            result = await self._writer_client.apply_proposal(proposal_id=proposal_id)
             self._ledger.update_proposal(
                 proposal_id,
                 status=PROPOSAL_APPLIED,
@@ -1515,25 +1510,11 @@ class WriterServiceClient:
         response.raise_for_status()
         return response.json()
 
-    async def apply_proposal(
-        self,
-        *,
-        proposal_id: str,
-        operation: str,
-        target_note_path: str,
-        target_anchor_json: str | None,
-        change_json: str,
-    ) -> dict:
+    async def apply_proposal(self, *, proposal_id: str) -> dict:
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             response = await client.post(
                 f"{self._url}/internal/vault/apply-proposal",
-                json={
-                    "proposal_id": proposal_id,
-                    "operation": operation,
-                    "target_note_path": target_note_path,
-                    "target_anchor_json": target_anchor_json,
-                    "change_json": change_json,
-                },
+                json={"proposal_id": proposal_id},
                 headers={_WRITER_TOKEN_HEADER: self._token},
             )
         response.raise_for_status()

@@ -102,10 +102,6 @@ class ApplyProposalRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     proposal_id: str = Field(min_length=1, max_length=30)
-    operation: str = Field(min_length=1, max_length=100)
-    target_note_path: str = Field(min_length=1, max_length=1000)
-    target_anchor_json: str | None = Field(default=None, max_length=2000)
-    change_json: str = Field(min_length=2, max_length=10000)
 
     @field_validator("proposal_id")
     @classmethod

@@ -15,7 +15,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from writerservice.api_models import ApplyProposalRequest
 from writerservice.git_errors import PathTraversalError
 
 logger = logging.getLogger(__name__)
@@ -191,7 +190,7 @@ def op_append_note_section(file_path: Path, section_heading: str, section_body: 
 
 def op_move_note_to_folder(vault_root: Path, file_path: Path, new_folder: str) -> Path:
     """Move file to new_folder under vault_root via git mv; return new absolute path."""
-    new_folder_path = vault_root / new_folder
+    new_folder_path = validate_vault_path(vault_root, new_folder)
     new_folder_path.mkdir(parents=True, exist_ok=True)
     dest = new_folder_path / file_path.name
     result = subprocess.run(
@@ -236,45 +235,54 @@ class ApplyResult:
 
 def apply_proposal(
     vault_root: Path,
-    request: ApplyProposalRequest,
+    proposal_id: str,
+    operation: str,
+    target_note_path: str,
+    target_anchor_json: str | None,
+    change_json: str,
     audit_log_path: Path,
     git_sync_enabled: bool,
 ) -> ApplyResult:
     """Apply a single approved proposal under the existing flock writer lock."""
-    change = json.loads(request.change_json)
+    from writerservice.git_ops import (
+        check_index_lock,
+        check_working_tree_clean,
+        git_add,
+        git_commit,
+        git_fetch,
+        git_merge_ff_only,
+        git_push,
+        git_rev_parse_head,
+    )
+
+    change = json.loads(change_json)
 
     # Resolve and validate path
-    file_path = validate_vault_path(vault_root, request.target_note_path)
+    file_path = validate_vault_path(vault_root, target_note_path)
 
     if not file_path.exists():
-        raise FileNotFoundError(f"target note not found: {request.target_note_path!r}")
+        raise FileNotFoundError(f"target note not found: {target_note_path!r}")
 
     # Lifecycle protection
     check_lifecycle_status(file_path)
 
     # Anchor verification (if provided)
-    if request.target_anchor_json:
-        anchor_data = json.loads(request.target_anchor_json)
+    if target_anchor_json:
+        anchor_data = json.loads(target_anchor_json)
         anchor_text = anchor_data.get("task_text") or anchor_data.get("anchor_text") or ""
         if anchor_text:
             verify_anchor(file_path, anchor_text)
 
-    # Sync before mutation
+    # Sync before mutation — all Git helpers raise on failure
     if git_sync_enabled:
-        subprocess.run(
-            ["git", "fetch", "origin"],
-            cwd=str(vault_root),
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "merge", "--ff-only", "origin/main"],
-            cwd=str(vault_root),
-            capture_output=True,
-        )
+        check_index_lock(vault_root)
+        check_working_tree_clean(vault_root)
+        git_fetch(vault_root)
+        git_merge_ff_only(vault_root)
 
     # Execute operation
     final_path = file_path
-    op = request.operation
+    op = operation
     if op == "mark_task_done":
         op_mark_task_done(file_path, change["task_text"])
     elif op == "mark_task_open":
@@ -299,52 +307,27 @@ def apply_proposal(
     # Relative path for audit / return
     changed_rel_path = str(final_path.relative_to(vault_root))
 
-    # Build audit record
+    # Build and persist audit record before commit so it is included in the commit
     now = datetime.now(UTC).isoformat()
     audit_record: dict[str, Any] = {
         "event": "VAULT_UPDATE_APPLIED",
-        "proposal_id": request.proposal_id,
+        "proposal_id": proposal_id,
         "operation": op,
         "target_path": changed_rel_path,
         "timestamp": now,
     }
-
-    # Append audit record to events log
     audit_log_path.parent.mkdir(parents=True, exist_ok=True)
     with audit_log_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(audit_record, separators=(",", ":")) + "\n")
 
-    # Git commit
-    commit_hash: str | None = None
-    subprocess.run(
-        ["git", "add", str(final_path), str(audit_log_path)],
-        cwd=str(vault_root),
-        capture_output=True,
-    )
-    msg = f"vault update: {op} on {changed_rel_path} [{request.proposal_id}]"
-    result = subprocess.run(
-        ["git", "commit", "-m", msg],
-        cwd=str(vault_root),
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        hash_result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(vault_root),
-            capture_output=True,
-            text=True,
-        )
-        if hash_result.returncode == 0:
-            commit_hash = hash_result.stdout.strip()
-        audit_record["commit"] = commit_hash
+    # Stage and commit — all helpers raise on failure
+    git_add(vault_root, str(final_path), str(audit_log_path))
+    msg = f"vault update: {op} on {changed_rel_path} [{proposal_id}]"
+    git_commit(vault_root, msg)
+    commit_hash = git_rev_parse_head(vault_root)
 
-    if git_sync_enabled and commit_hash:
-        subprocess.run(
-            ["git", "push", "origin", "main"],
-            cwd=str(vault_root),
-            capture_output=True,
-        )
+    if git_sync_enabled:
+        git_push(vault_root)
 
     return ApplyResult(
         changed_path=changed_rel_path,
