@@ -335,7 +335,7 @@ def test_existing_mvp_database_is_adopted_without_data_loss(tmp_path):
     migration_count = ledger._runtime.read(
         lambda conn: conn.execute("SELECT COUNT(*) AS c FROM schema_migrations").fetchone()["c"]
     )
-    assert migration_count == 5  # 001 initial + 002 delivery_leases + 003 terminal_fields + 004 stale_lease_reaper + 005 clarifications_and_corrections
+    assert migration_count == 7  # 001–005 original + 006 vault_update_proposals + 007 approval_message
     # Verify delivery columns were added and existing row has correct default
     capture = ledger.get_capture("SB-20260607-0001")
     assert capture.delivery_status == "PENDING_FORWARD"
@@ -810,12 +810,12 @@ def test_sqlite_busy_retry_log_includes_operation_name(tmp_path, capsys):
             data = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if data.get("event") == "sqlite_busy_retry":
+        if data.get("event") == "sqlite_busy_retry_count":
             retry_logs.append(data)
 
     assert len(retry_logs) >= 1
     log = retry_logs[0]
-    assert log["event"] == "sqlite_busy_retry"
+    assert log["event"] == "sqlite_busy_retry_count"
     assert log["operation_name"] == "insert_accepted_capture"
     assert log["attempt"] >= 1
     assert log["error_type"] == "OperationalError"

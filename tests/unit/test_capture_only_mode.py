@@ -591,7 +591,7 @@ def test_old_instance_ready_logs_ignored_not_ready(tmp_path, capsys):
     assert result is False
     assert "capture_service_ready_ignored" in output
     assert "superseded_instance" in output
-    assert "capture_service_ready" not in output.replace("capture_service_ready_ignored", "")
+    assert '"event":"capture_service_ready"' not in output
 
     service.close()
 

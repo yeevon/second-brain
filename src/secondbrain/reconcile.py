@@ -215,6 +215,7 @@ async def _run_one_periodic_pass(
     success_now_iso = success_now.isoformat()
     ledger.set_system_state("periodic_reconcile_last_success_at", success_now_iso)
     ledger.set_system_state("periodic_reconcile_last_recovered_count", str(result.recovered))
+    ledger.set_system_state("reconcile_last_heartbeat_at", success_now_iso)
     ledger.record_successful_reconciliation(mode="periodic", now=success_now)
 
     if result.limit_exceeded:

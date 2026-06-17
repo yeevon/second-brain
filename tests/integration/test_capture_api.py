@@ -35,6 +35,10 @@ async def api_context(tmp_path):
         delivery_processing_lease_seconds=300,
         delivery_dispatch_interval_seconds=2,
         delivery_dispatch_batch_size=25,
+        downstream_delivery_enabled=True,
+        capture_processing_mode="capture-only",
+        writer_service_url=None,
+        writer_service_token=None,
     )
     ledger = Ledger(settings.ledger_path)
     channel = FakeDiscordChannel()

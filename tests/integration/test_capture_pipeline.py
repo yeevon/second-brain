@@ -339,7 +339,7 @@ async def test_vault_write_failure_preserves_raw_capture(
 
     assert capture["status"] == FAILED
     assert capture["raw_text"] == "Keep my raw capture if the vault write fails."
-    assert capture["last_error"] == "vault write failed: OSError: simulated vault write failure"
+    assert capture["last_error"] == "OSError: vault write failed"
     assert note_files(test_settings.vault_path) == []
     assert "vault filing failed" in final_receipt
     assert "safe in the local ledger" in final_receipt

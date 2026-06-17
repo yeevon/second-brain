@@ -70,7 +70,7 @@ async def process_capture_once(
             model=settings.gemini_model,
         )
     except Exception as exc:
-        failure_reason = f"vault write failed: {type(exc).__name__}: {exc}"
+        failure_reason = f"{type(exc).__name__}: vault write failed"
         await capture_service.complete_failed(
             capture_id=capture.capture_id,
             reason=failure_reason,
@@ -125,7 +125,7 @@ async def run_capture_worker(
                 classifier_client=classifier_client,
             )
         except Exception as exc:
-            failure_reason = f"worker error: {type(exc).__name__}: {exc}"
+            failure_reason = f"{type(exc).__name__}: worker error"
             try:
                 await capture_service.complete_failed(
                     capture_id=capture_id,

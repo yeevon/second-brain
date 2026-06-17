@@ -282,7 +282,7 @@ async def test_process_capture_marks_failed_when_vault_write_fails(tmp_path, cap
     assert updated.status == FAILED
     assert updated.raw_text == "Review reconnect handling."
     assert updated.derived_note_path is None
-    assert updated.last_error == "vault write failed: OSError: vault unavailable"
+    assert updated.last_error == "OSError: vault write failed"
 
     output = capsys.readouterr().out
     assert "capture_failed" in output
@@ -368,7 +368,7 @@ async def test_run_capture_worker_marks_unexpected_errors_failed(tmp_path, monke
 
     updated = ledger.get_capture(capture.capture_id)
     assert updated.status == FAILED
-    assert updated.last_error == "worker error: RuntimeError: unexpected boom"
+    assert updated.last_error == "RuntimeError: worker error"
 
 
 @pytest.mark.asyncio

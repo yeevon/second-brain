@@ -26,6 +26,10 @@ def make_settings(**overrides):
         "periodic_reconcile_limit": 10,
         "periodic_reconcile_interval_seconds": 60,
         "classifier_queue_maxsize": 10,
+        "downstream_delivery_enabled": False,
+        "capture_processing_mode": "capture-only",
+        "writer_service_url": None,
+        "writer_service_token": None,
     }
     data.update(overrides)
     return SimpleNamespace(**data)

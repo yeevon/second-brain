@@ -50,6 +50,10 @@ async def run_stale_lease_reaper(
     while True:
         try:
             await reaper.run_once(receipt_client)
+            ledger.set_system_state(
+                "reaper_last_heartbeat_at",
+                datetime.now(UTC).isoformat(),
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:

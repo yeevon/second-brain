@@ -29,6 +29,7 @@ class _DatabaseJob:
     future: Future
     write: bool
     operation_name: str = ""
+    enqueued_at: float = 0.0
 
 
 def _is_transient_lock_error(exc: sqlite3.OperationalError) -> bool:
@@ -56,16 +57,21 @@ def _set_wal_mode(
     # PRAGMA journal_mode = WAL on a fresh database does not respect busy_timeout
     # (SQLite's WAL-file setup bypasses the busy handler). Retry explicitly.
     delay_ms = retry_base_delay_ms
-    for attempt in range(retry_attempts):
+    total_attempts = max(1, retry_attempts)
+    for attempt in range(total_attempts):
         try:
             conn.execute("PRAGMA journal_mode = WAL")
             return
         except sqlite3.OperationalError as exc:
-            if _is_transient_lock_error(exc) and attempt + 1 < retry_attempts:
+            if _is_transient_lock_error(exc) and attempt + 1 < total_attempts:
                 time.sleep(delay_ms / 1000.0)
                 delay_ms *= 2
                 continue
             raise
+
+
+DEFAULT_STARTUP_TIMEOUT_S = 10
+DEFAULT_SHUTDOWN_TIMEOUT_S = 10
 
 
 class SQLiteRuntime:
@@ -77,7 +83,17 @@ class SQLiteRuntime:
         retry_attempts: int = 5,
         retry_base_delay_ms: int = 25,
         job_queue_maxsize: int = 10000,
+        startup_timeout_s: int = DEFAULT_STARTUP_TIMEOUT_S,
+        shutdown_timeout_s: int = DEFAULT_SHUTDOWN_TIMEOUT_S,
     ) -> None:
+        # TD-007: defensive constructor validation
+        if database_path is None or str(database_path).strip() == "":
+            raise ValueError("database_path must not be empty or None")
+        if job_queue_maxsize <= 0:
+            raise ValueError(f"job_queue_maxsize must be positive, got {job_queue_maxsize}")
+        if retry_attempts < 0:
+            raise ValueError(f"retry_attempts must not be negative, got {retry_attempts}")
+
         if sqlite3.sqlite_version_info < MIN_SQLITE_VERSION:
             raise RuntimeError(
                 f"SQLite {sqlite3.sqlite_version} is installed; "
@@ -88,16 +104,31 @@ class SQLiteRuntime:
         self._busy_timeout_ms = busy_timeout_ms
         self._retry_attempts = retry_attempts
         self._retry_base_delay_ms = retry_base_delay_ms
+        self._startup_timeout_s = startup_timeout_s
+        self._shutdown_timeout_s = shutdown_timeout_s
         self._closed = False
         self._close_lock = threading.Lock()
         self._queue: queue.Queue[_DatabaseJob | object] = queue.Queue(maxsize=job_queue_maxsize)
+
+        log_metadata(
+            "sqlite_runtime_init",
+            path=self._database_path,
+            queue_maxsize=job_queue_maxsize,
+            retry_attempts=retry_attempts,
+            busy_timeout_ms=busy_timeout_ms,
+        )
 
         self._started = threading.Event()
         self._startup_error: BaseException | None = None
         self._thread = threading.Thread(target=self._worker, daemon=True, name="sqlite-worker")
         self._thread.start()
 
-        self._started.wait()
+        # TD-004: bounded startup timeout
+        if not self._started.wait(timeout=startup_timeout_s):
+            log_metadata("sqlite_runtime_startup_timeout", timeout_s=startup_timeout_s)
+            raise RuntimeError(
+                f"SQLite runtime did not start within {startup_timeout_s}s"
+            )
         if self._startup_error is not None:
             raise RuntimeError(f"SQLite runtime failed to start: {self._startup_error}") from self._startup_error
 
@@ -113,7 +144,15 @@ class SQLiteRuntime:
                 return
             self._closed = True
             self._queue.put(_SENTINEL)
-        self._thread.join()
+        # TD-004: bounded shutdown timeout
+        self._thread.join(timeout=self._shutdown_timeout_s)
+        if self._thread.is_alive():
+            remaining = self._queue.qsize()
+            log_metadata(
+                "sqlite_runtime_shutdown_timeout",
+                timeout_s=self._shutdown_timeout_s,
+                remaining_jobs=remaining,
+            )
 
     def _submit(
         self,
@@ -123,16 +162,24 @@ class SQLiteRuntime:
         operation_name: str = "",
     ) -> Any:
         future: Future = Future()
+        enqueued_at = time.monotonic()
         job = _DatabaseJob(
             operation=operation,
             future=future,
             write=write,
             operation_name=operation_name,
+            enqueued_at=enqueued_at,
         )
         with self._close_lock:
             if self._closed:
                 raise RuntimeError("SQLite runtime is closed")
+            queue_depth = self._queue.qsize()
             self._queue.put(job)
+        log_metadata(
+            "sqlite_queue_depth",
+            operation_name=operation_name,
+            depth=queue_depth,
+        )
         return future.result()
 
     def _worker(self) -> None:
@@ -177,11 +224,26 @@ class SQLiteRuntime:
             if job is _SENTINEL:
                 break
             assert isinstance(job, _DatabaseJob)
+            dequeued_at = time.monotonic()
+            wait_ms = int((dequeued_at - job.enqueued_at) * 1000) if job.enqueued_at else 0
+            log_metadata(
+                "sqlite_queue_wait_ms",
+                operation_name=job.operation_name,
+                wait_ms=wait_ms,
+            )
+            job_start = time.monotonic()
             try:
                 result = self._execute_with_retry(conn, job)
                 job.future.set_result(result)
             except BaseException as exc:
                 job.future.set_exception(exc)
+            finally:
+                duration_ms = int((time.monotonic() - job_start) * 1000)
+                log_metadata(
+                    "sqlite_job_duration_ms",
+                    operation_name=job.operation_name,
+                    duration_ms=duration_ms,
+                )
 
         conn.close()
         log_metadata("sqlite_runtime_stopped", path=self._database_path)
@@ -213,7 +275,7 @@ class SQLiteRuntime:
                     last_exc = exc
                     retrying = attempt + 1 < len(delays_ms)
                     log_metadata(
-                        "sqlite_busy_retry",
+                        "sqlite_busy_retry_count",
                         operation_name=job.operation_name,
                         attempt=attempt + 1,
                         error_type=type(exc).__name__,
@@ -223,7 +285,7 @@ class SQLiteRuntime:
                 raise
 
         log_metadata(
-            "sqlite_busy_exhausted",
+            "sqlite_busy_exhausted_count",
             operation_name=job.operation_name,
             attempts=len(delays_ms),
             error_type=type(last_exc).__name__ if last_exc else "Unknown",
