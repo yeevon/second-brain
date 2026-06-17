@@ -91,3 +91,28 @@ class MoveNoteResponse(BaseModel):
     old_note_path: str
     new_note_path: str
     git_commit_hash: str | None
+
+
+# ── Vault update proposal apply models (SB-137) ───────────────────────────────
+
+_PROPOSAL_ID_RE = re.compile(r"^VUP-\d{8}-\d{4}$")
+
+
+class ApplyProposalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id: str = Field(min_length=1, max_length=30)
+
+    @field_validator("proposal_id")
+    @classmethod
+    def validate_proposal_id(cls, v: str) -> str:
+        if not _PROPOSAL_ID_RE.match(v):
+            raise ValueError("proposal_id must match ^VUP-\\d{8}-\\d{4}$")
+        return v
+
+
+class ApplyProposalResponse(BaseModel):
+    proposal_id: str
+    changed_path: str
+    commit_hash: str | None
+    audit_record: dict

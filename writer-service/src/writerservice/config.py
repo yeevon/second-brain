@@ -15,6 +15,10 @@ class Settings:
             os.environ.get("GIT_SYNC_ENABLED", "false").lower() == "true"
         )
         self.vault_remote: str = os.environ.get("VAULT_REMOTE", "")
+        self.capture_service_url: str | None = os.environ.get("CAPTURE_SERVICE_URL")
+        self.capture_service_internal_token: str | None = os.environ.get(
+            "CAPTURE_SERVICE_INTERNAL_TOKEN"
+        )
 
 
 _settings: Settings | None = None

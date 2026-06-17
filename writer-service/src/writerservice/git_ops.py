@@ -32,7 +32,7 @@ def check_index_lock(vault_path: Path) -> None:
 def check_working_tree_clean(vault_path: Path) -> None:
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=no"],
+            ["git", "status", "--porcelain", "--untracked-files=normal"],
             cwd=vault_path,
             capture_output=True,
             text=True,
@@ -47,7 +47,15 @@ def check_working_tree_clean(vault_path: Path) -> None:
             "git status failed: vault may not be a valid Git repository. "
             "Inspect the vault and verify it is properly initialized."
         )
-    if result.stdout.strip():
+    dirty_lines = []
+    for line in result.stdout.splitlines():
+        if line.startswith("?? "):
+            path = line[3:]
+            # Ignore local Obsidian workspace noise.
+            if path == ".obsidian" or path.startswith(".obsidian/"):
+                continue
+        dirty_lines.append(line)
+    if dirty_lines:
         raise GitWorkdirDirtyError(
             "Vault working tree is not clean. "
             "A previous write may have crashed after filesystem mutation. "

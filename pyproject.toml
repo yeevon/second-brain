@@ -1,6 +1,6 @@
 [project]
 name = "second-brain"
-version = "2.0.0"
+version = "2.0.1"
 description = "A Discord bot that captures messages and automatically files them into an Obsidian vault using Gemini AI classification."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -19,6 +19,7 @@ dependencies = [
 secondbrain = "secondbrain.app:main"
 vault-pull = "secondbrain.vault_pull:main"
 brain-mcp = "secondbrain.mcp_server:main"
+brain-mcp-propose = "secondbrain.mcp_propose_server:main"
 gembrain = "secondbrain.gembrain:main"
 
 [build-system]

@@ -109,7 +109,17 @@ class CaptureService:
         self._receipt_client = client
 
     async def handle_gateway_message(self, message) -> None:
+        if not should_capture_message(message, self.settings):
+            return
         content = (message.content or "").strip()
+        approve_m = _APPROVE_VUP_RE.match(content)
+        if approve_m:
+            await self._handle_proposal_approve(approve_m.group(1), message)
+            return
+        reject_m = _REJECT_VUP_RE.match(content)
+        if reject_m:
+            await self._handle_proposal_reject(reject_m.group(1), message)
+            return
         if _FIX_REPLY_RE.match(content) or _FIX_EXPLICIT_RE.match(content):
             await self.handle_gateway_correction(message)
             return
@@ -315,6 +325,22 @@ class CaptureService:
 
     def weekly_digest_snapshot(self, *, since, now) -> dict:
         return self._ledger.weekly_digest_snapshot(since=since, now=now)
+
+    # ------------------------------------------------------------------
+    # SB-136: Vault update proposal delegation
+    # ------------------------------------------------------------------
+
+    def create_proposal(self, **kwargs):
+        return self._ledger.create_proposal(**kwargs)
+
+    def get_proposal(self, proposal_id: str):
+        return self._ledger.get_proposal(proposal_id)
+
+    def list_proposals(self, *, status=None, limit=50):
+        return self._ledger.list_proposals(status=status, limit=limit)
+
+    def update_proposal(self, proposal_id: str, **kwargs):
+        return self._ledger.update_proposal(proposal_id, **kwargs)
 
     def assert_healthy(self) -> None:
         self._ledger.ping()
@@ -853,6 +879,168 @@ class CaptureService:
         )
         return result is not None
 
+    # ------------------------------------------------------------------
+    # SB-138: Vault update proposal Discord approval surface
+    # ------------------------------------------------------------------
+
+    async def post_proposal_approval_message(self, proposal, channel_id: int) -> str | None:
+        """Post an approval request message to Discord; return the message ID."""
+        if self._receipt_client is None:
+            return None
+        try:
+            channel = self._receipt_client.get_channel(channel_id)
+            if channel is None:
+                channel = await self._receipt_client.fetch_channel(channel_id)
+            text = _format_proposal_approval_message(proposal)
+            msg = await channel.send(text)
+            return str(msg.id)
+        except Exception as exc:
+            log_metadata(
+                "proposal_approval_message_failed",
+                proposal_id=proposal.proposal_id,
+                error_type=type(exc).__name__,
+            )
+            return None
+
+    async def _edit_proposal_message(self, proposal, content: str) -> None:
+        """Edit the approval-request Discord message to show final outcome."""
+        if self._receipt_client is None or not proposal.approval_message_id:
+            return
+        try:
+            channel_id = int(getattr(self.settings, "discord_capture_channel_id", 0))
+            channel = self._receipt_client.get_channel(channel_id)
+            if channel is None:
+                channel = await self._receipt_client.fetch_channel(channel_id)
+            msg = await channel.fetch_message(int(proposal.approval_message_id))
+            await msg.edit(content=content)
+        except Exception as exc:
+            log_metadata(
+                "proposal_message_edit_failed",
+                proposal_id=proposal.proposal_id,
+                error_type=type(exc).__name__,
+            )
+
+    async def _handle_proposal_approve(self, proposal_id: str, message) -> None:
+        """Handle `approve VUP-...` from Discord: apply the proposal."""
+        try:
+            proposal = self._ledger.get_proposal(proposal_id)
+        except KeyError:
+            await _safe_reply(message, f"❌ Proposal `{proposal_id}` not found.")
+            return
+
+        from secondbrain.capture_models import (
+            PROPOSAL_PENDING, PROPOSAL_APPROVED, PROPOSAL_APPLYING,
+            PROPOSAL_APPLIED, PROPOSAL_FAILED, TERMINAL_PROPOSAL_STATUSES,
+        )
+        if proposal.status in TERMINAL_PROPOSAL_STATUSES:
+            await _safe_reply(
+                message,
+                f"⚠️ Proposal `{proposal_id}` is already closed (status: {proposal.status}).",
+            )
+            return
+
+        reviewer = str(message.author) if message.author else "discord"
+        from datetime import UTC
+        now = datetime.now(UTC)
+
+        # Transition: PENDING → APPROVED → APPLYING
+        self._ledger.update_proposal(
+            proposal_id,
+            status=PROPOSAL_APPROVED,
+            reviewed_by=reviewer,
+            reviewed_at=now,
+        )
+        self._ledger.update_proposal(proposal_id, status=PROPOSAL_APPLYING)
+
+        # Reload for apply
+        proposal = self._ledger.get_proposal(proposal_id)
+
+        # Call writer-service apply
+        if self._writer_client is None:
+            self._ledger.update_proposal(
+                proposal_id,
+                status=PROPOSAL_FAILED,
+                last_error="writer_service_not_configured",
+            )
+            await _safe_reply(message, f"❌ Apply failed for `{proposal_id}`: writer-service not configured.")
+            return
+
+        try:
+            result = await self._writer_client.apply_proposal(proposal_id=proposal_id)
+            self._ledger.update_proposal(
+                proposal_id,
+                status=PROPOSAL_APPLIED,
+                applied_at=datetime.now(UTC),
+                git_commit_hash=result.get("commit_hash"),
+            )
+            commit = result.get("commit_hash", "")[:8] if result.get("commit_hash") else "no commit"
+            outcome_text = (
+                f"✅ Applied — `{proposal_id}`\n"
+                f"Operation: `{proposal.operation}`\n"
+                f"File: `{result.get('changed_path', proposal.target_note_path)}`\n"
+                f"Commit: `{commit}`"
+            )
+            await _safe_reply(message, outcome_text)
+        except Exception as exc:
+            error_type = type(exc).__name__
+            self._ledger.update_proposal(
+                proposal_id,
+                status=PROPOSAL_FAILED,
+                last_error=error_type,
+            )
+            await _safe_reply(
+                message,
+                f"❌ Apply failed for `{proposal_id}` ({error_type}).",
+            )
+            log_metadata(
+                "proposal_apply_failed",
+                proposal_id=proposal_id,
+                error_type=error_type,
+            )
+
+        # Edit the original approval-request message if we have it
+        refreshed = self._ledger.get_proposal(proposal_id)
+        if refreshed.status == PROPOSAL_APPLIED:
+            commit = refreshed.git_commit_hash[:8] if refreshed.git_commit_hash else "no commit"
+            await self._edit_proposal_message(
+                refreshed,
+                f"✅ APPLIED — `{proposal_id}` ({commit})",
+            )
+        else:
+            await self._edit_proposal_message(
+                refreshed,
+                f"❌ FAILED — `{proposal_id}` ({refreshed.last_error})",
+            )
+
+    async def _handle_proposal_reject(self, proposal_id: str, message) -> None:
+        """Handle `reject VUP-...` from Discord."""
+        try:
+            proposal = self._ledger.get_proposal(proposal_id)
+        except KeyError:
+            await _safe_reply(message, f"❌ Proposal `{proposal_id}` not found.")
+            return
+
+        from secondbrain.capture_models import PROPOSAL_REJECTED, TERMINAL_PROPOSAL_STATUSES
+        if proposal.status in TERMINAL_PROPOSAL_STATUSES:
+            await _safe_reply(
+                message,
+                f"⚠️ Proposal `{proposal_id}` is already closed (status: {proposal.status}).",
+            )
+            return
+
+        from datetime import UTC
+        reviewer = str(message.author) if message.author else "discord"
+        self._ledger.update_proposal(
+            proposal_id,
+            status=PROPOSAL_REJECTED,
+            reviewed_by=reviewer,
+            reviewed_at=datetime.now(UTC),
+            rejected_reason="User rejected via Discord",
+        )
+        await _safe_reply(message, f"❌ Rejected — `{proposal_id}`")
+        refreshed = self._ledger.get_proposal(proposal_id)
+        await self._edit_proposal_message(refreshed, f"❌ REJECTED — `{proposal_id}`")
+
     async def run_stale_lease_reaper_loop(self) -> None:
         from secondbrain.reaper import run_stale_lease_reaper
         await run_stale_lease_reaper(
@@ -887,11 +1075,17 @@ class CaptureService:
 
         raw_text = message.content.strip() if message.content else ""
 
-        # Correction commands are handled by the gateway path. Reconciliation
-        # must not persist them as normal captures.
+        # Correction and proposal commands are handled by the gateway path.
+        # Reconciliation must not persist them as normal captures.
         if _FIX_REPLY_RE.match(raw_text) or _FIX_EXPLICIT_RE.match(raw_text):
             log_metadata(
                 "correction_command_skipped_for_capture",
+                discord_message_id=str(message.id),
+            )
+            return None
+        if _APPROVE_VUP_RE.match(raw_text) or _REJECT_VUP_RE.match(raw_text):
+            log_metadata(
+                "proposal_command_skipped_for_capture",
                 discord_message_id=str(message.id),
             )
             return None
@@ -1130,6 +1324,42 @@ class CaptureService:
         )
 
 
+async def _safe_reply(message, content: str) -> None:
+    """Reply to a Discord message, swallowing errors."""
+    try:
+        await message.channel.send(content)
+    except Exception as exc:
+        from secondbrain.observability import log_metadata as _log
+        _log("proposal_reply_failed", error_type=type(exc).__name__)
+
+
+def _format_proposal_approval_message(proposal) -> str:
+    import json as _json
+    try:
+        change = _json.loads(proposal.change_json)
+    except Exception:
+        change = {}
+
+    lines = [
+        f"📋 {proposal.proposal_id} — vault update proposal",
+        "",
+        f"Operation:  {proposal.operation}",
+        f"File:       {proposal.target_note_path}",
+    ]
+    if change:
+        for k, v in change.items():
+            lines.append(f"{k.capitalize()}: {v!r}")
+    if proposal.reason:
+        lines.append(f"Reason:     {proposal.reason}")
+    lines += [
+        "",
+        "Reply with:",
+        f"  approve {proposal.proposal_id}  — to apply this change",
+        f"  reject {proposal.proposal_id}   — to discard without applying",
+    ]
+    return "\n".join(lines)
+
+
 def _safe_inbox_reason_type(reason: str | None) -> str:
     if not reason:
         return "unspecified"
@@ -1161,6 +1391,10 @@ _FIX_EXPLICIT_RE = re.compile(
 )
 # Matches: fix: <reason including folder> (reply-to-receipt form)
 _FIX_REPLY_RE = re.compile(r"^fix\s*:\s*(.+)$", re.IGNORECASE | re.DOTALL)
+
+# SB-138: Vault update proposal approval / rejection patterns
+_APPROVE_VUP_RE = re.compile(r"^approve\s+(VUP-\d{8}-\d{4})\s*$", re.IGNORECASE)
+_REJECT_VUP_RE = re.compile(r"^reject\s+(VUP-\d{8}-\d{4})\s*$", re.IGNORECASE)
 
 # Simple keyword-to-folder mapping used when parsing a correction reason
 _FOLDER_KEYWORDS = {
@@ -1247,7 +1481,7 @@ _WRITER_TOKEN_HEADER = "X-Second-Brain-Writer-Token"
 
 
 class WriterServiceClient:
-    """Calls writer-service directly for note move operations (SB-118)."""
+    """Calls writer-service directly for note operations."""
 
     def __init__(self, *, url: str, token: str, timeout_seconds: int = 30) -> None:
         self._url = url.rstrip("/")
@@ -1271,6 +1505,16 @@ class WriterServiceClient:
                     "new_project": new_project,
                     "correction_reason": correction_reason,
                 },
+                headers={_WRITER_TOKEN_HEADER: self._token},
+            )
+        response.raise_for_status()
+        return response.json()
+
+    async def apply_proposal(self, *, proposal_id: str) -> dict:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.post(
+                f"{self._url}/internal/vault/apply-proposal",
+                json={"proposal_id": proposal_id},
                 headers={_WRITER_TOKEN_HEADER: self._token},
             )
         response.raise_for_status()
