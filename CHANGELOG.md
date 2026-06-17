@@ -19,24 +19,24 @@ Added `vault_update_proposals` to the SQLite schema and the internal CRUD API in
 - **`GET /internal/vault/proposals/:proposal_id`** — full proposal record; 404 for unknown IDs.
 - **`GET /internal/vault/proposals?status=PENDING`** — lists proposals by status, most recent first, limit 50.
 - **`PATCH /internal/vault/proposals/:proposal_id`** — updates proposal status; used internally during the apply and reject flows.
-- **`src/secondbrain/capture_models.py`** — `ALLOWED_PROPOSAL_OPERATIONS`, `ALL_PROPOSAL_STATUSES` constants; `VaultUpdateProposal` dataclass.
+- **`src/secondbrain/capture_models.py`** — `ALLOWED_PROPOSAL_OPERATIONS`, `ALL_PROPOSAL_STATUSES` constants; `ProposalRecord` dataclass.
 - **Allowlist (initial set):** `mark_task_done`, `mark_task_open`, `set_task_due_date`, `set_task_priority`, `append_task`, `append_note_section`, `move_note_to_folder`, `add_project_tag`, `add_weekly_review_entry`.
 
 ### SB-137 — Vault-update-service: validate and apply proposals
 
 Extended `writer-service` with a proposal-apply endpoint. Approved proposals run under the existing `flock` writer lock with the same Git sequence used for note filing.
 
-- **`POST /internal/vault/apply-proposal`** — fetches the full proposal from capture-service, verifies `APPROVED` status, acquires flock, runs the full apply sequence (`git fetch` → `git merge --ff-only` → clean-worktree check → path guard → lifecycle check → anchor verify → mutate → audit → `git add` → `git commit` → `git push`), then calls back to capture-service with the commit hash.
+- **`POST /internal/vault/apply-proposal`** — accepts `{ proposal_id }`, fetches the full proposal from capture-service, verifies the proposal is in `APPLYING` state, acquires flock, runs the full apply sequence (`git fetch` → `git merge --ff-only` → clean-worktree check → path guard → lifecycle check → anchor verify → mutate → audit → `git add` → `git commit` → `git push`), and returns the changed path and commit hash to capture-service, which updates the proposal row.
 - **`writer-service/src/writerservice/proposal_ops.py`** — nine operation implementations. Path guards reject traversal, hidden-path prefixes (`.`), and non-markdown targets. Lifecycle guards reject archived and superseded notes. Anchor verification fails fast if the target text no longer matches file content — no change applied. Operations are idempotent where semantically appropriate (marking an already-done task done is a no-op).
 - **Audit record** — `VAULT_UPDATE_APPLIED` event appended to `99_log/events.ndjson` on every successful apply. The commit hash is returned to capture-service and stored on the proposal row; the audit line itself does not carry the hash (tracked as future work for SB-140 follow-up).
-- **`writer-service/src/writerservice/config.py`** — `CAPTURE_SERVICE_URL` and `CAPTURE_SERVICE_INTERNAL_TOKEN` settings added for writer-service → capture-service callbacks.
+- **`writer-service/src/writerservice/config.py`** — `CAPTURE_SERVICE_URL` and `CAPTURE_SERVICE_INTERNAL_TOKEN` settings added so writer-service can fetch the full proposal from capture-service before applying.
 
 ### SB-138 — Discord approval surface
 
 `capture-service` posts an approval request to Discord when a proposal is created and routes two new reply patterns. These are checked before the `fix:` prefix check and never create captures.
 
 - **`approve VUP-YYYYMMDD-NNNN`** — validates proposal is `PENDING`, transitions to `APPROVED`, calls writer-service apply endpoint, then edits the Discord approval message to show ✅ + commit hash (success) or ❌ + error type (failure).
-- **`reject VUP-YYYYMMDD-NNNN`** — transitions to `REJECTED`, appends `VAULT_UPDATE_REJECTED` audit event, edits the approval message to show ❌ Rejected. Vault is never touched.
+- **`reject VUP-YYYYMMDD-NNNN`** — transitions the proposal to `REJECTED`, records the reviewer and rejection reason on the proposal row, and edits the approval message to show ❌ Rejected. Vault is never touched.
 - **Error cases** — approving or rejecting an already-closed proposal replies with a visible error; approving an unknown proposal ID also replies with an error. None of these create ledger rows.
 - **`approval_message_id`** — stored on the proposal row so capture-service can edit the correct Discord message after apply or reject.
 
@@ -51,15 +51,16 @@ Added a second MCP entry point that exposes proposal tools to LLM clients. The e
 
 ### SB-140 — V3 security hardening
 
-Verified and enforced V3 write-path invariants through targeted hardening and the test suite.
+Added targeted hardening and regression coverage for the V3 write-path invariants.
 
 - **Authorization gate** — all proposal endpoints require `X-Second-Brain-Internal-Token`; the apply endpoint requires `X-Second-Brain-Writer-Token`. Both verified with `secrets.compare_digest`.
 - **Proposal JSON validation** — `operation` checked against the allowlist and `target_note_path` checked for `..`, absolute paths, hidden-path prefixes, and `.git/` components at creation time.
-- **Apply endpoint boundary** — `POST /internal/vault/apply-proposal` verifies `APPROVED` status before acquiring flock; PENDING and already-closed proposals are rejected with typed errors.
+- **Apply endpoint boundary** — `POST /internal/vault/apply-proposal` verifies `APPLYING` state before acquiring flock; proposals not in `APPLYING` state are rejected with typed errors.
 - **Stale anchor detection** — operations with `target_anchor_json` verify the anchor text still exists in the file before mutation; stale anchor returns failure without touching the vault.
 - **Lifecycle guard** — notes with `status: archived` or `status: superseded` in frontmatter are rejected before any mutation.
 - **Crashed-write detection** — `check_working_tree_clean` in `git_ops.py` switched from `--untracked-files=no` to `--untracked-files=normal` so a partially-written note left untracked by a prior crash blocks the next apply instead of silently appearing clean. `.obsidian/` and `.obsidian/**` are filtered from the dirty-lines check to prevent Obsidian workspace noise from blocking applies on live vaults.
-- **`tests/unit/test_vault_proposals.py`** — 147 tests covering schema, CRUD, endpoint auth, path validation, all nine operation implementations, lifecycle guards, Discord command routing, MCP tool surface, and proposal idempotency.
+- **`tests/unit/test_vault_proposals.py`** — 60 tests covering schema, CRUD, endpoint auth, path validation, operation helpers, lifecycle guards, Discord command routing, MCP tool surface, and proposal idempotency.
+- **Validation run** — `writer-service/tests/unit` plus `tests/unit/test_vault_proposals.py`: 147 tests passing.
 
 ---
 

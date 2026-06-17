@@ -8,7 +8,7 @@ Send a message to a designated Discord channel. The bot screens it for secrets, 
 
 V3 (Milestone 7) is the current development branch. V3 adds a proposal-only vault-write path: an LLM client proposes structured changes via `brain-mcp-propose`, the user approves or rejects via Discord, and `writer-service` applies approved changes under the existing Git lock. The read-only `brain-mcp` profile is unchanged. EC2 production deployment of V3 is deferred to Milestone 9; V3 is built and validated locally in this milestone.
 
-V2 production work (EC2 `capture-only` stack, n8n intake orchestration, writer-service-owned vault writes, Daily/Weekly vault-backed briefs, host-visible Obsidian bind-mount) is complete and was released as v2.0.0.
+V2 local/full-stack validation work is complete and was released as `v2.0.0`. V2 validated Discord capture, n8n orchestration, writer-service-owned vault writes, Daily/Weekly vault-backed briefs, and host-visible Obsidian bind-mount behavior. EC2 production deployment is intentionally deferred until Milestone 9, after V3 and the post-V3 tech-debt cleanup.
 
 ## Runtime modes
 
@@ -270,6 +270,8 @@ deploy/test-n8n-error-workflow.sh    # n8n error workflow end-to-end regression
 `test-container-packaging.sh` runs four tests. The SIGTERM test stops the container — run `docker compose up -d` again before the next test cycle.
 
 ## Setup — capture-only (EC2)
+
+This EC2 path is documented for staging/non-production validation. Do not treat it as production deployment until Milestone 9 is complete.
 
 See [deploy/README.md](deploy/README.md) for the full EC2 provisioning, deployment, and verification guide.
 
