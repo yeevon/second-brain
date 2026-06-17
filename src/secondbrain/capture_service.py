@@ -784,6 +784,10 @@ class CaptureService:
             git_commit_hash=writer_result.get("git_commit_hash"),
             correction_reason=correction_reason,
         )
+        self._ledger.set_system_state(
+            "last_vault_write_at",
+            datetime.now(UTC).isoformat(),
+        )
         log_metadata(
             "correction_applied",
             capture_id=capture_id,

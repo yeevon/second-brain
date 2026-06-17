@@ -810,12 +810,12 @@ def test_sqlite_busy_retry_log_includes_operation_name(tmp_path, capsys):
             data = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if data.get("event") == "sqlite_busy_retry":
+        if data.get("event") == "sqlite_busy_retry_count":
             retry_logs.append(data)
 
     assert len(retry_logs) >= 1
     log = retry_logs[0]
-    assert log["event"] == "sqlite_busy_retry"
+    assert log["event"] == "sqlite_busy_retry_count"
     assert log["operation_name"] == "insert_accepted_capture"
     assert log["attempt"] >= 1
     assert log["error_type"] == "OperationalError"

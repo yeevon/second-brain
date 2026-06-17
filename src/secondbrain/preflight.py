@@ -14,8 +14,11 @@ class PreflightCheck(NamedTuple):
     detail: str
 
 
-def run_preflight() -> list[PreflightCheck]:
+def run_preflight(*, compose: bool = False, compose_dir: Path | None = None) -> list[PreflightCheck]:
     """Run mode-aware configuration checks. Never starts Discord or makes network calls."""
+    if compose:
+        return _compose_checks(compose_dir or Path.cwd())
+
     load_dotenv()
     checks: list[PreflightCheck] = []
 
@@ -75,8 +78,11 @@ def _check_ledger_path(path_str: str) -> tuple[PreflightCheck, Path | None]:
 
 
 def _check_sqlite_openable(ledger_path: Path) -> PreflightCheck:
+    if not ledger_path.exists():
+        # No file yet — parent is already confirmed writable; will be created on first run.
+        return PreflightCheck("SQLite open", True, f"{ledger_path} (will be created on first run)")
     try:
-        conn = sqlite3.connect(str(ledger_path))
+        conn = sqlite3.connect(f"file:{ledger_path}?mode=rw", uri=True)
         conn.close()
         return PreflightCheck("SQLite open", True, str(ledger_path))
     except Exception as exc:
@@ -132,6 +138,67 @@ def _capture_only_checks() -> list[PreflightCheck]:
 
         webhook_token = (os.environ.get("N8N_INTAKE_WEBHOOK_TOKEN") or "").strip()
         checks.append(_check_present("N8N_INTAKE_WEBHOOK_TOKEN", webhook_token))
+
+    return checks
+
+
+_COMPOSE_REQUIRED_KEYS = (
+    "CAPTURE_SERVICE_INTERNAL_TOKEN",
+    "WRITER_SERVICE_TOKEN",
+    "N8N_INTAKE_WEBHOOK_TOKEN",
+    "GEMINI_API_KEY",
+)
+
+
+def _compose_checks(compose_dir: Path) -> list[PreflightCheck]:
+    """Validate local Docker compose stack configuration before docker compose up."""
+    checks: list[PreflightCheck] = []
+
+    # .env must exist
+    dotenv_path = compose_dir / ".env"
+    if not dotenv_path.exists():
+        checks.append(PreflightCheck(".env file", False, f"{dotenv_path} does not exist"))
+    else:
+        checks.append(PreflightCheck(".env file", True, str(dotenv_path)))
+        # Check required keys are present (not necessarily non-empty, just present)
+        env_content = dotenv_path.read_text()
+        for key in _COMPOSE_REQUIRED_KEYS:
+            found = any(
+                line.startswith(f"{key}=") or line.startswith(f"{key} =")
+                for line in env_content.splitlines()
+                if not line.strip().startswith("#")
+            )
+            checks.append(PreflightCheck(
+                f".env:{key}",
+                found,
+                "present" if found else f"missing from {dotenv_path}",
+            ))
+
+    # n8n env file
+    n8n_env = Path(os.environ.get("N8N_ENV_FILE", "") or str(compose_dir / "n8n.local.env"))
+    if n8n_env.exists():
+        checks.append(PreflightCheck("n8n env file", True, str(n8n_env)))
+    else:
+        checks.append(PreflightCheck("n8n env file", False, f"{n8n_env} does not exist"))
+
+    # n8n encryption key file
+    n8n_key = Path(
+        os.environ.get("N8N_ENCRYPTION_KEY_FILE", "")
+        or str(compose_dir / "n8n-encryption-key.local")
+    )
+    if n8n_key.exists():
+        checks.append(PreflightCheck("n8n encryption key", True, str(n8n_key)))
+    else:
+        checks.append(PreflightCheck("n8n encryption key", False, f"{n8n_key} does not exist"))
+
+    # LOCAL_VAULT_PATH if set
+    local_vault = (os.environ.get("LOCAL_VAULT_PATH") or "").strip()
+    if local_vault:
+        vault_path = Path(local_vault)
+        if vault_path.is_dir():
+            checks.append(PreflightCheck("LOCAL_VAULT_PATH", True, f"{vault_path} (exists)"))
+        else:
+            checks.append(PreflightCheck("LOCAL_VAULT_PATH", False, f"{vault_path} does not exist or is not a directory"))
 
     return checks
 

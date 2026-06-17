@@ -557,9 +557,10 @@ def run_manual_retry(capture_id: str) -> bool:
         capture_service.close()
 
 
-def run_preflight_command() -> int:
+def run_preflight_command(*, compose: bool = False) -> int:
+    from pathlib import Path
     from secondbrain.preflight import run_preflight, format_preflight_results
-    checks = run_preflight()
+    checks = run_preflight(compose=compose)
     output, all_passed = format_preflight_results(checks)
     print(output)
     return 0 if all_passed else 1
@@ -570,7 +571,12 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("run", help="listen for Discord captures and print them")
     subparsers.add_parser("status", help="report local ledger and vault status")
-    subparsers.add_parser("preflight", help="validate configuration without starting the service")
+    preflight_parser = subparsers.add_parser("preflight", help="validate configuration without starting the service")
+    preflight_parser.add_argument(
+        "--compose",
+        action="store_true",
+        help="validate local Docker compose stack (.env, n8n env/key files, vault path)",
+    )
     retry_parser = subparsers.add_parser("retry", help="queue a manual retry for a failed capture")
     retry_parser.add_argument("capture_id", help="the capture ID to retry (e.g. SB-20260607-0042)")
 
@@ -582,7 +588,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "status":
             return run_status()
         if args.command == "preflight":
-            return run_preflight_command()
+            return run_preflight_command(compose=getattr(args, "compose", False))
         if args.command == "retry":
             return 0 if run_manual_retry(args.capture_id) else 1
     except RuntimeError as exc:

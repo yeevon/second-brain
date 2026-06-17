@@ -275,7 +275,7 @@ class SQLiteRuntime:
                     last_exc = exc
                     retrying = attempt + 1 < len(delays_ms)
                     log_metadata(
-                        "sqlite_busy_retry",
+                        "sqlite_busy_retry_count",
                         operation_name=job.operation_name,
                         attempt=attempt + 1,
                         error_type=type(exc).__name__,
@@ -285,7 +285,7 @@ class SQLiteRuntime:
                 raise
 
         log_metadata(
-            "sqlite_busy_exhausted",
+            "sqlite_busy_exhausted_count",
             operation_name=job.operation_name,
             attempts=len(delays_ms),
             error_type=type(last_exc).__name__ if last_exc else "Unknown",

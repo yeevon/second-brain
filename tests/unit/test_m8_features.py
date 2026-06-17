@@ -241,6 +241,64 @@ def test_migration_schema_assertion_blocks_bad_migration(tmp_path):
     conn.close()
 
 
+def test_schema_assertion_passes_for_existing_index(tmp_path):
+    conn = sqlite3.connect(str(tmp_path / "test.sqlite3"))
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+    conn.execute("CREATE INDEX idx_t_name ON t(name)")
+    assertion = SchemaAssertion(
+        table="t",
+        expected_columns=(ColumnSpec("name", "TEXT"),),
+        expected_indexes=("idx_t_name",),
+    )
+    assertion.verify(conn)  # should not raise
+    conn.close()
+
+
+def test_schema_assertion_fails_for_missing_index(tmp_path):
+    conn = sqlite3.connect(str(tmp_path / "test.sqlite3"))
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+    # No index created — assertion should fail
+    assertion = SchemaAssertion(
+        table="t",
+        expected_columns=(ColumnSpec("name", "TEXT"),),
+        expected_indexes=("idx_t_name",),
+    )
+    with pytest.raises(RuntimeError, match="index 'idx_t_name' missing from 't'"):
+        assertion.verify(conn)
+    conn.close()
+
+
+def test_migration_index_assertion_blocks_recording(tmp_path):
+    """A missing index in expected_indexes must roll back and block migration recording."""
+    conn = sqlite3.connect(str(tmp_path / "test.sqlite3"))
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE schema_migrations (
+            version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL
+        )
+    """)
+    bad = Migration(
+        version=88,
+        name="missing_index",
+        statements=("CREATE TABLE bar (val TEXT)",),
+        assertions=(
+            SchemaAssertion(
+                table="bar",
+                expected_columns=(ColumnSpec("val", "TEXT"),),
+                expected_indexes=("idx_bar_val",),  # index was never created
+            ),
+        ),
+    )
+    with pytest.raises(RuntimeError, match="index 'idx_bar_val' missing from 'bar'"):
+        _apply(conn, bad)
+
+    applied = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
+    assert applied == 0  # rolled back, not recorded
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # SB-133 TD-001: Exception sanitization in last_error
 # ---------------------------------------------------------------------------
@@ -609,6 +667,111 @@ def test_preflight_fails_webhook_url_when_downstream_enabled(tmp_path, monkeypat
     assert any("N8N_INTAKE_WEBHOOK_URL" in c.name and not c.passed for c in checks)
 
 
+def test_preflight_sqlite_openable_passes_when_file_does_not_exist(tmp_path, monkeypatch):
+    """Preflight SQLite check must pass (not create) when the DB file doesn't exist yet."""
+    from secondbrain.preflight import _check_sqlite_openable
+    ledger_path = tmp_path / "nonexistent.sqlite3"
+    assert not ledger_path.exists()
+    check = _check_sqlite_openable(ledger_path)
+    assert check.passed
+    assert not ledger_path.exists()  # must not have been created
+
+
+def test_preflight_sqlite_openable_does_not_create_file(tmp_path, monkeypatch):
+    """_check_sqlite_openable with mode=rw must not create the DB file."""
+    from secondbrain.preflight import _check_sqlite_openable
+    path = tmp_path / "should_not_exist.sqlite3"
+    _check_sqlite_openable(path)
+    assert not path.exists()
+
+
+def test_preflight_sqlite_openable_succeeds_for_existing_db(tmp_path):
+    """_check_sqlite_openable must pass for a real pre-existing SQLite file."""
+    import sqlite3 as _sqlite3
+    from secondbrain.preflight import _check_sqlite_openable
+    db_path = tmp_path / "existing.sqlite3"
+    conn = _sqlite3.connect(str(db_path))
+    conn.close()
+    check = _check_sqlite_openable(db_path)
+    assert check.passed
+
+
+def test_preflight_compose_fails_when_dotenv_missing(tmp_path, monkeypatch):
+    monkeypatch.delenv("N8N_ENV_FILE", raising=False)
+    monkeypatch.delenv("N8N_ENCRYPTION_KEY_FILE", raising=False)
+    monkeypatch.delenv("LOCAL_VAULT_PATH", raising=False)
+    from secondbrain.preflight import run_preflight, format_preflight_results
+    checks = run_preflight(compose=True, compose_dir=tmp_path)
+    _, all_passed = format_preflight_results(checks)
+    assert not all_passed
+    assert any(".env file" in c.name and not c.passed for c in checks)
+
+
+def test_preflight_compose_passes_with_all_files(tmp_path, monkeypatch):
+    monkeypatch.delenv("N8N_ENV_FILE", raising=False)
+    monkeypatch.delenv("N8N_ENCRYPTION_KEY_FILE", raising=False)
+    monkeypatch.delenv("LOCAL_VAULT_PATH", raising=False)
+
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "CAPTURE_SERVICE_INTERNAL_TOKEN=tok1\n"
+        "WRITER_SERVICE_TOKEN=tok2\n"
+        "N8N_INTAKE_WEBHOOK_TOKEN=tok3\n"
+        "GEMINI_API_KEY=key1\n"
+    )
+    (tmp_path / "n8n.local.env").write_text("N8N_HOST=localhost\n")
+    (tmp_path / "n8n-encryption-key.local").write_text("deadbeef\n")
+
+    from secondbrain.preflight import run_preflight, format_preflight_results
+    checks = run_preflight(compose=True, compose_dir=tmp_path)
+    _, all_passed = format_preflight_results(checks)
+    assert all_passed, [c for c in checks if not c.passed]
+
+
+def test_preflight_compose_fails_when_required_key_missing_from_dotenv(tmp_path, monkeypatch):
+    monkeypatch.delenv("N8N_ENV_FILE", raising=False)
+    monkeypatch.delenv("N8N_ENCRYPTION_KEY_FILE", raising=False)
+    monkeypatch.delenv("LOCAL_VAULT_PATH", raising=False)
+
+    dotenv = tmp_path / ".env"
+    # Missing GEMINI_API_KEY
+    dotenv.write_text(
+        "CAPTURE_SERVICE_INTERNAL_TOKEN=tok1\n"
+        "WRITER_SERVICE_TOKEN=tok2\n"
+        "N8N_INTAKE_WEBHOOK_TOKEN=tok3\n"
+    )
+    (tmp_path / "n8n.local.env").write_text("N8N_HOST=localhost\n")
+    (tmp_path / "n8n-encryption-key.local").write_text("deadbeef\n")
+
+    from secondbrain.preflight import run_preflight, format_preflight_results
+    checks = run_preflight(compose=True, compose_dir=tmp_path)
+    _, all_passed = format_preflight_results(checks)
+    assert not all_passed
+    assert any("GEMINI_API_KEY" in c.name and not c.passed for c in checks)
+
+
+def test_preflight_compose_checks_local_vault_path_when_set(tmp_path, monkeypatch):
+    monkeypatch.delenv("N8N_ENV_FILE", raising=False)
+    monkeypatch.delenv("N8N_ENCRYPTION_KEY_FILE", raising=False)
+    monkeypatch.setenv("LOCAL_VAULT_PATH", str(tmp_path / "nonexistent-vault"))
+
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "CAPTURE_SERVICE_INTERNAL_TOKEN=tok1\n"
+        "WRITER_SERVICE_TOKEN=tok2\n"
+        "N8N_INTAKE_WEBHOOK_TOKEN=tok3\n"
+        "GEMINI_API_KEY=key1\n"
+    )
+    (tmp_path / "n8n.local.env").write_text("")
+    (tmp_path / "n8n-encryption-key.local").write_text("")
+
+    from secondbrain.preflight import run_preflight, format_preflight_results
+    checks = run_preflight(compose=True, compose_dir=tmp_path)
+    _, all_passed = format_preflight_results(checks)
+    assert not all_passed
+    assert any("LOCAL_VAULT_PATH" in c.name and not c.passed for c in checks)
+
+
 def test_preflight_command_exit_code_0_on_pass(tmp_path, monkeypatch):
     _make_env(tmp_path, monkeypatch,
         CAPTURE_PROCESSING_MODE="capture-only",
@@ -743,6 +906,77 @@ async def test_acknowledge_delivery_filed_writes_last_vault_write_at(tmp_path):
     after = ledger.get_system_state("last_vault_write_at")
     assert after is not None
     assert datetime.fromisoformat(after)  # valid ISO datetime
+
+    service.close()
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_apply_correction_writes_last_vault_write_at(tmp_path):
+    """apply_correction() must update last_vault_write_at even when a correction is applied."""
+    from unittest.mock import AsyncMock
+    from secondbrain.capture_service import CaptureService
+    from secondbrain.ledger import Ledger
+
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    insert_result = ledger.insert_accepted_capture(
+        discord_message_id="msg-corr-1",
+        discord_channel_id="100",
+        discord_guild_id="200",
+        discord_author_id="300",
+        raw_text="correction vault write test",
+        initial_delivery_status="NOT_APPLICABLE",
+    )
+    capture_id = insert_result.capture.capture_id
+    # Pretend it's already filed so it has a note path
+    ledger.transition_capture(
+        capture_id,
+        from_statuses={"RECEIVED"},
+        to_status="CLASSIFYING",
+        event_type="CAPTURE_CLASSIFYING",
+        event_payload={},
+    )
+    from secondbrain.capture_models import FILED
+    ledger.transition_capture(
+        capture_id,
+        from_statuses={"CLASSIFYING"},
+        to_status=FILED,
+        derived_note_path="00-inbox/original.md",
+        classification_json={"folder": "inbox", "confidence": 0.9, "project": None, "needs_clarification": False},
+        event_type="CAPTURE_FILED",
+        event_payload={"path": "00-inbox/original.md"},
+    )
+
+    settings = SimpleNamespace(
+        capture_processing_mode="capture-only",
+        downstream_delivery_enabled=True,
+        writer_service_url="http://fake",
+        writer_service_token="tok",
+    )
+
+    class _FakeWriterClient:
+        async def move_note(self, *, capture_id, new_folder, new_project, correction_reason):
+            return {
+                "old_note_path": "00-inbox/original.md",
+                "new_note_path": "02-projects/moved.md",
+                "git_commit_hash": "deadbeef",
+            }
+
+    service = CaptureService(settings=settings, ledger=ledger)
+    service._writer_client = _FakeWriterClient()
+
+    before = ledger.get_system_state("last_vault_write_at")
+    assert before is None
+
+    await service.apply_correction(
+        capture_id=capture_id,
+        new_folder="02-projects",
+        correction_reason="move to projects",
+    )
+
+    after = ledger.get_system_state("last_vault_write_at")
+    assert after is not None
+    assert datetime.fromisoformat(after)
 
     service.close()
     ledger.close()

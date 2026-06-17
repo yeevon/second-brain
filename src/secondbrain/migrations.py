@@ -20,6 +20,7 @@ class SchemaAssertion:
     """Read-only schema check run once after a migration is applied."""
     table: str
     expected_columns: tuple[ColumnSpec, ...]
+    expected_indexes: tuple[str, ...] = field(default_factory=tuple)
 
     def verify(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute(f"PRAGMA table_info({self.table})").fetchall()
@@ -44,6 +45,14 @@ class SchemaAssertion:
                     f"Schema assertion failed: column '{self.table}.{spec.name}' "
                     f"must be NOT NULL"
                 )
+        if self.expected_indexes:
+            idx_rows = conn.execute(f"PRAGMA index_list({self.table})").fetchall()
+            idx_names = {r["name"] for r in idx_rows}
+            for idx_name in self.expected_indexes:
+                if idx_name not in idx_names:
+                    raise RuntimeError(
+                        f"Schema assertion failed: index '{idx_name}' missing from '{self.table}'"
+                    )
 
 
 @dataclass(frozen=True)
@@ -125,6 +134,7 @@ _MIGRATIONS: list[Migration] = [
                     ColumnSpec("received_at", "TEXT", not_null=True),
                     ColumnSpec("updated_at", "TEXT", not_null=True),
                 ),
+                expected_indexes=("idx_captures_status",),
             ),
             SchemaAssertion(
                 table="capture_events",
@@ -133,6 +143,7 @@ _MIGRATIONS: list[Migration] = [
                     ColumnSpec("event_type", "TEXT", not_null=True),
                     ColumnSpec("created_at", "TEXT", not_null=True),
                 ),
+                expected_indexes=("idx_capture_events_capture_id",),
             ),
             SchemaAssertion(
                 table="system_state",

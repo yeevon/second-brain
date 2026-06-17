@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
+
+from secondbrain.observability import _LiveStdoutHandler
 
 
 def configure_logging() -> None:
     """Configure application logging from LOG_LEVEL environment variable (default INFO).
 
-    All secondbrain operational events flow through log_metadata() which writes
-    structured JSON to stdout. This function:
+    All secondbrain operational events flow through log_metadata() in observability.py,
+    which routes through logging.getLogger('secondbrain.observability'). This function:
     - Sets the log level for the secondbrain logger tree from LOG_LEVEL.
-    - Adds a stdout StreamHandler if one is not already configured.
+    - Adds a stdout StreamHandler to the root 'secondbrain' logger if not already set.
     - Quiets noisy third-party loggers that default to DEBUG/INFO.
     """
     level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -20,7 +21,7 @@ def configure_logging() -> None:
     logger = logging.getLogger("secondbrain")
     logger.setLevel(level)
     if not logger.handlers:
-        handler = logging.StreamHandler(sys.stdout)
+        handler = _LiveStdoutHandler()
         handler.setFormatter(logging.Formatter("%(message)s"))
         logger.addHandler(handler)
 
