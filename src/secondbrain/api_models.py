@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from typing import Any, Literal
@@ -375,3 +376,73 @@ class WeeklyDigestResponse(BaseModel):
     failures_count: int
     retries_count: int
     sensitive_rejections_count: int
+
+
+# ── Vault update proposal models (SB-136) ─────────────────────────────────────
+
+
+class CreateProposalRequest(BaseModel):
+    source: str = Field(min_length=1, max_length=100)
+    requested_by: str = Field(min_length=1, max_length=200)
+    operation: str = Field(min_length=1, max_length=100)
+    target_note_path: str = Field(min_length=1, max_length=1000)
+    target_anchor_json: str | None = Field(default=None, max_length=2000)
+    change_json: str = Field(min_length=2, max_length=10000)
+    reason: str | None = Field(default=None, max_length=500)
+    requires_approval: bool = True
+
+    @field_validator("change_json")
+    @classmethod
+    def validate_change_json(cls, v: str) -> str:
+        try:
+            parsed = json.loads(v)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"change_json must be valid JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("change_json must be a JSON object, not an array or scalar")
+        return v
+
+    @field_validator("target_anchor_json")
+    @classmethod
+    def validate_target_anchor_json(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        try:
+            parsed = json.loads(v)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"target_anchor_json must be valid JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("target_anchor_json must be a JSON object, not an array or scalar")
+        return v
+
+
+class ProposalResponse(BaseModel):
+    proposal_id: str
+    source: str
+    requested_by: str
+    operation: str
+    target_note_path: str
+    target_anchor_json: str | None
+    change_json: str
+    reason: str | None
+    status: str
+    requires_approval: bool
+    submitted_at: datetime
+    reviewed_at: datetime | None
+    reviewed_by: str | None
+    applied_at: datetime | None
+    rejected_reason: str | None
+    git_commit_hash: str | None
+    last_error: str | None
+    approval_message_id: str | None
+
+
+class UpdateProposalStatusRequest(BaseModel):
+    status: str = Field(min_length=1, max_length=50)
+    reviewed_by: str | None = Field(default=None, max_length=200)
+    reviewed_at: datetime | None = None
+    rejected_reason: str | None = Field(default=None, max_length=500)
+    applied_at: datetime | None = None
+    git_commit_hash: str | None = Field(default=None, max_length=100)
+    last_error: str | None = Field(default=None, max_length=500)
+    approval_message_id: str | None = Field(default=None, max_length=100)

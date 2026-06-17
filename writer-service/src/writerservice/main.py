@@ -10,9 +10,9 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from writerservice.api_models import FileNoteRequest, FileNoteResponse, HealthResponse, MoveNoteRequest, MoveNoteResponse
+from writerservice.api_models import ApplyProposalRequest, ApplyProposalResponse, FileNoteRequest, FileNoteResponse, HealthResponse, MoveNoteRequest, MoveNoteResponse
 from writerservice.config import get_settings
-from writerservice.git_errors import CaptureDuplicateError, WriterError
+from writerservice.git_errors import CaptureDuplicateError, PathTraversalError, WriterError
 from writerservice.vault import check_vault_writable
 from writerservice.writer import DuplicateCaptureError, VaultWriter
 
@@ -255,6 +255,92 @@ def _build_app() -> FastAPI:
             old_note_path=result.old_note_path,
             new_note_path=result.new_note_path,
             git_commit_hash=result.git_commit_hash,
+        )
+
+    @app.post(
+        "/internal/vault/apply-proposal",
+        response_model=ApplyProposalResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def apply_proposal(request: ApplyProposalRequest) -> ApplyProposalResponse:
+        import httpx as _httpx
+        from writerservice.flock import vault_write_lock
+        from writerservice.proposal_ops import apply_proposal as _apply
+
+        settings = get_settings()
+
+        if not settings.capture_service_url or not settings.capture_service_internal_token:
+            raise HTTPException(
+                status_code=503,
+                detail="capture-service not configured; cannot verify proposal state",
+            )
+
+        # Fetch proposal from capture-service and verify it is in APPLYING state
+        proposal_url = (
+            f"{settings.capture_service_url.rstrip('/')}"
+            f"/internal/vault/proposals/{request.proposal_id}"
+        )
+        try:
+            async with _httpx.AsyncClient(timeout=10.0) as http:
+                resp = await http.get(
+                    proposal_url,
+                    headers={"X-Second-Brain-Internal-Token": settings.capture_service_internal_token},
+                )
+        except _httpx.RequestError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"could not reach capture-service: {type(exc).__name__}",
+            ) from exc
+
+        if resp.status_code == 404:
+            raise HTTPException(
+                status_code=404,
+                detail=f"proposal {request.proposal_id} not found in capture-service",
+            )
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"capture-service returned {resp.status_code} for proposal lookup",
+            )
+
+        proposal = resp.json()
+        if proposal.get("status") != "APPLYING":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"proposal {request.proposal_id} is not in APPLYING state "
+                    f"(current status: {proposal.get('status')!r})"
+                ),
+            )
+
+        vault_path = Path(settings.vault_path)
+        audit_log_path = Path(settings.audit_log_path)
+        lock_path = vault_path / ".vault_write.lock"
+
+        try:
+            with vault_write_lock(lock_path):
+                result = _apply(
+                    vault_root=vault_path,
+                    proposal_id=request.proposal_id,
+                    operation=proposal["operation"],
+                    target_note_path=proposal["target_note_path"],
+                    target_anchor_json=proposal.get("target_anchor_json"),
+                    change_json=proposal["change_json"],
+                    audit_log_path=audit_log_path,
+                    git_sync_enabled=settings.git_sync_enabled,
+                )
+        except PathTraversalError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        return ApplyProposalResponse(
+            proposal_id=request.proposal_id,
+            changed_path=result.changed_path,
+            commit_hash=result.commit_hash,
+            audit_record=result.audit_record,
         )
 
     return app

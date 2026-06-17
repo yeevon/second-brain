@@ -6,7 +6,9 @@ Send a message to a designated Discord channel. The bot screens it for secrets, 
 
 ## Release status
 
-V2 is being prepared for production release. The V2 release line includes the EC2 `capture-only` stack, n8n intake orchestration, writer-service-owned vault writes, Daily/Weekly vault-backed briefs, host-visible Obsidian bind-mount support, and a read-only local MCP posture. V3 writable MCP work remains proposal-only and is not part of the V2 production boundary.
+V3 (Milestone 7) is the current development branch. V3 adds a proposal-only vault-write path: an LLM client proposes structured changes via `brain-mcp-propose`, the user approves or rejects via Discord, and `writer-service` applies approved changes under the existing Git lock. The read-only `brain-mcp` profile is unchanged. EC2 production deployment of V3 is deferred to Milestone 9; V3 is built and validated locally in this milestone.
+
+V2 local/full-stack validation work is complete and was released as `v2.0.0`. V2 validated Discord capture, n8n orchestration, writer-service-owned vault writes, Daily/Weekly vault-backed briefs, and host-visible Obsidian bind-mount behavior. EC2 production deployment is intentionally deferred until Milestone 9, after V3 and the post-V3 tech-debt cleanup.
 
 ## Runtime modes
 
@@ -71,6 +73,7 @@ src/secondbrain/
   observability.py    # structured JSON logging to stdout
   audit.py            # append-only audit log
   mcp_server.py       # brain-mcp stdio server — five read-only vault and ledger tools
+  mcp_propose_server.py  # brain-mcp-propose stdio server — eight proposal-only tools (V3)
   vault_pull.py       # vault-pull CLI — pull-only git sync of the Obsidian vault
   digest.py           # open-task vault scanner used by daily/weekly digest endpoints
 
@@ -285,6 +288,8 @@ deploy/test-n8n-error-workflow.sh    # n8n error workflow end-to-end regression
 
 ## Setup — capture-only (EC2)
 
+This EC2 path is documented for staging/non-production validation. Do not treat it as production deployment until Milestone 9 is complete.
+
 See [deploy/README.md](deploy/README.md) for the full EC2 provisioning, deployment, and verification guide.
 
 The short version:
@@ -425,6 +430,66 @@ Available tools: `search_notes`, `read_note`, `list_recent_notes`, `list_open_ta
 `LEDGER_PATH` is optional. When unset, all vault tools work normally and `get_sync_status` reports `ledger_exists: false`. Only set `LEDGER_PATH` if you want `get_sync_status` to include ledger state. `read_note` rejects non-markdown paths and hidden files (paths starting with `.`).
 
 `_vault_preflight()` runs before every tool call: checks that `VAULT_PATH` is configured, exists, and has a clean git worktree. Untracked files (e.g. Obsidian's `.obsidian/` directory) do not trigger the stale-data warning — only modified or staged tracked files do.
+
+### Vault-update proposals (SB-136–SB-140)
+
+V3 adds a proposal-only write path. LLM clients may propose vault changes but may never write vault files directly. All approved changes go through `writer-service` under the existing `flock` Git lock.
+
+**Proposal lifecycle:**
+
+```text
+brain-mcp-propose tool call
+  → POST /internal/vault/proposals (capture-service validates + stores proposal)
+  → Discord approval request message posted (approval_message_id stored)
+  → User replies: approve VUP-YYYYMMDD-NNNN  or  reject VUP-YYYYMMDD-NNNN
+  → On approve: writer-service apply sequence (flock → git fetch → merge → verify → mutate → audit → commit → push)
+  → Proposal updated with APPLIED + git_commit_hash
+  → Discord approval message edited to show outcome
+```
+
+**Allowed operations (initial set):** `mark_task_done`, `mark_task_open`, `set_task_due_date`, `set_task_priority`, `append_task`, `append_note_section`, `move_note_to_folder`, `add_project_tag`, `add_weekly_review_entry`.
+
+**Safety invariants:**
+
+- Path traversal (`../`, absolute paths outside vault root, hidden-file prefixes) rejected at proposal creation.
+- Lifecycle guard: archived or superseded notes cannot be mutated.
+- Stale anchor detection: if `target_anchor_json` is present, the operation verifies the anchor text still matches file content; stale anchor returns failure without touching the vault.
+- `check_working_tree_clean` uses `--untracked-files=normal` so a crashed prior write (untracked file) blocks the next apply. `.obsidian/` is filtered to prevent Obsidian workspace noise from falsely blocking applies.
+- Audit record (`VAULT_UPDATE_APPLIED`) appended to `99_log/events.ndjson` on every successful apply. Commit hash stored on the proposal row.
+- Raw capture ledger is never modified by LLM tooling.
+
+**Capture-service internal API additions:**
+
+```text
+POST /internal/vault/proposals
+GET  /internal/vault/proposals/:proposal_id
+GET  /internal/vault/proposals?status=PENDING
+PATCH /internal/vault/proposals/:proposal_id
+```
+
+**writer-service internal API addition:**
+
+```text
+POST /internal/vault/apply-proposal
+```
+
+### Brain-MCP propose server (SB-139)
+
+`brain-mcp-propose` is a separate MCP stdio server for LLM clients that want to propose vault changes. Register it explicitly to opt in — it is not the default:
+
+```bash
+claude mcp add \
+  -e VAULT_PATH=/home/your-name/prj/my-vault \
+  -e CAPTURE_SERVICE_URL=http://localhost:8000 \
+  -e CAPTURE_SERVICE_INTERNAL_TOKEN=<token> \
+  --scope user \
+  second-brain-propose \
+  -- uv run --project /home/your-name/prj/second-brain brain-mcp-propose
+```
+
+Available tools: `propose_task_completion`, `propose_due_date_change`, `propose_priority_change`, `propose_note_move`, `propose_task_append`, `propose_review_entry`, `list_pending_update_proposals`, `read_update_proposal`.
+
+The following tools are explicitly absent from this profile: `write_note`, `delete_note`, `replace_note`, `move_note_directly`, `git_commit`, `git_push`, `shell`.
 
 ### gembrain CLI (SB-124)
 
