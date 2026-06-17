@@ -119,6 +119,8 @@ class Settings:
         # Heartbeat
         self.capture_service_heartbeat_interval_seconds  = _parse_int_env("CAPTURE_SERVICE_HEARTBEAT_INTERVAL_SECONDS", "15")
         self.capture_service_health_stale_after_seconds  = _parse_int_env("CAPTURE_SERVICE_HEALTH_STALE_AFTER_SECONDS", "60")
+        self.reaper_liveness_threshold_s                 = _parse_int_env("REAPER_LIVENESS_THRESHOLD_S", "300")
+        self.reconcile_liveness_threshold_s              = _parse_int_env("RECONCILE_LIVENESS_THRESHOLD_S", "300")
 
         # Status command
         self.status_timezone = os.getenv("STATUS_TIMEZONE", "UTC")

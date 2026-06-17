@@ -4,6 +4,71 @@ All notable changes to this project are documented here.
 
 ---
 
+## v3.1.0 — Milestone 8: Tech-debt resolution (SB-130 through SB-135)
+
+**Branch:** `milestone_8`
+
+Resolves all twelve open items from `docs/tech_debt_1/`. These were deferred from Milestone 3 and are addressed after V3 (Milestone 7), before EC2 production deployment (Milestone 9).
+
+### Validation status
+
+M8 is unit and integration-contract validated. Full end-to-end validation (live Discord → n8n → writer-service → vault write) is deferred until the complete V3 flow is assembled and clean enough to exercise without noise. Known runtime gaps identified during partial V3 validation will be addressed as follow-up tech-debt fixes in later milestones.
+
+**Merge bar for this branch:**
+
+```bash
+uv run pytest tests/unit/test_m8_features.py
+uv run pytest tests/unit writer-service/tests/unit
+```
+
+Both suites pass. The operational flow is not marked fully validated — see the per-ticket notes below.
+
+---
+
+### SB-130 — SQLite runtime resilience (TD-003, TD-004, TD-007)
+
+Implemented and covered by targeted tests. E2E operational validation deferred.
+
+- **TD-003 phase 1** — `SQLiteRuntime` emits structured log events for queue depth (`sqlite_queue_depth`), job wait time (`sqlite_queue_wait_ms`), job duration (`sqlite_job_duration_ms`), busy retries (`sqlite_busy_retry_count`), and retry exhaustion (`sqlite_busy_exhausted_count`). All fields are numeric metadata; no exception text or SQL appears in log output. TD-003 phase 2 (async adapter) remains deferred pending production measurements.
+- **TD-004** — `SQLiteRuntime.start()` raises within `SQLITE_STARTUP_TIMEOUT_S` (default 10 s) if the worker thread does not become ready. `SQLiteRuntime.stop()` drains pending jobs and shuts down the worker thread within `SQLITE_SHUTDOWN_TIMEOUT_S` (default 10 s); remaining jobs are counted and logged.
+- **TD-007** — `SQLiteRuntime.__init__` raises `ValueError` immediately for empty/None `db_path`, non-positive `queue_maxsize`, and negative `busy_retry_attempts`. Resolved absolute path, queue size, and retry config are logged at INFO during construction.
+
+### SB-131 — Schema migration safety (TD-005)
+
+Implemented and covered by targeted tests. E2E operational validation deferred.
+
+- **TD-005** — `migrations.py` runs a schema assertion for each migration after its SQL executes and before writing the version number to `schema_migrations`. Assertions use `PRAGMA table_info` and `PRAGMA index_list` to verify expected tables, columns, types, and NOT NULL constraints. A failed assertion rolls back version recording and raises a startup error. Assertions are read-only, idempotent, and scoped to the tables changed by each migration. Legacy adoption migrations (tables that pre-date the migration framework) assert the full column set before marking the version applied.
+
+### SB-132 — WAL-aware backup procedure (TD-006)
+
+Implemented and covered by targeted tests. E2E operational validation deferred.
+
+- **TD-006** — `deploy/backup.sh` replaced raw `cp` with Python's `sqlite3.Connection.backup()` (the SQLite backup API). The backup is consistent even while `capture-service` is writing; the WAL and SHM files do not need to be copied separately. `deploy/restore-validate.sh` opens the backup in a temporary directory and runs `PRAGMA integrity_check` without touching the live database. `deploy/README.md` documents why raw `cp` is unsafe for WAL-mode SQLite and when to use each approach. The local staging backup runs against a local database file; a live EC2 backup with a running service is not validated in this milestone.
+
+### SB-133 — Exception sanitization and centralized logging (TD-001, TD-008)
+
+Implemented and covered by targeted tests. E2E operational validation deferred.
+
+- **TD-001** — Raw exception text, stack traces, and SQL strings are stripped before writing to `captures.last_error` or `capture_events.event_payload_json`. Sanitized summaries contain error type, a short human-readable description, and numeric metadata only (e.g. `"SQLiteBusyError: write queue exhausted after 5 retries (job: insert_capture)"`).
+- **TD-008** — All operational log output routes through `log_metadata()` in `observability.py`. No bare `print()` statements remain in production code paths. Log records include `event`, `level`, `logger`, `message`, and `timestamp` fields in every emission, making them filterable by `level` via `jq`. `LOG_LEVEL` environment variable controls verbosity (default `INFO`). Sensitive fields (`raw_text`, `redacted_text`, credentials) are excluded from all log output.
+
+### SB-134 — Shutdown resilience and receipt repair tracking (TD-002, TD-009)
+
+Implemented and covered by targeted tests. E2E operational validation deferred.
+
+- **TD-002** — Shutdown steps are wrapped in independent try/except blocks. A step that raises logs a structured warning (`shutdown_step_failed` with `step` and `error_type`) and does not prevent later steps from running. The top-level shutdown handler does not propagate exceptions to the OS signal handler. Steps still run in dependency order (Discord closed before SQLite).
+- **TD-009** — A receipt-edit failure that triggers a replacement receipt appends a `RECEIPT_REPLACED` event to `capture_events` with `old_receipt_message_id`, `new_receipt_message_id`, and a sanitized `reason`. The `captures.receipt_message_id` column is updated atomically in the same SQLite transaction. `secondbrain status` reports `receipt_repairs_today` (count of `RECEIPT_REPLACED` events in the last 24 hours) in the Note lifecycle section.
+
+### SB-135 — Operations command enhancements (TD-011, TD-012, TD-013)
+
+Implemented and covered by targeted tests. E2E operational validation deferred.
+
+- **TD-011** — `secondbrain preflight` exits 0 when all checks pass and 1 when any check fails. Checks are mode-aware (`local-full`, `capture-only`, compose). The compose check now rejects required `.env` keys that are present but empty, not just absent. The command never starts the Discord Gateway or makes network calls.
+- **TD-012** — Each long-running background task (reaper, reconciliation loop) records a heartbeat timestamp to `system_state` after every successful pass. The service heartbeat loop checks that these timestamps are within configurable thresholds (`REAPER_LIVENESS_THRESHOLD_S`, `RECONCILE_LIVENESS_THRESHOLD_S`). A stale heartbeat emits a structured `background_task_stale` warning and sets a flag readable by `secondbrain status`. Liveness monitoring alerts only — crashed tasks are restarted by the existing dead-task guard in `app.py`.
+- **TD-013** — `capture-service` writes `last_vault_write_at` to `system_state` after every successful vault write callback from `writer-service`. `secondbrain status` displays this timestamp in the Note lifecycle section.
+
+---
+
 ## v3.0.0 — Milestone 7: V3 controlled vault updates (local)
 
 **Release branch:** `milestone_7`

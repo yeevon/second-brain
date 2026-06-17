@@ -399,6 +399,58 @@ N8N_PROXY_HOPS=1
 
 The final proxy must pass `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto`. Do not add these values prematurely in tunnel mode.
 
+## Backup and Restore (WAL-aware)
+
+### Why raw `cp` is unsafe for WAL-mode SQLite
+
+The ledger runs in WAL (Write-Ahead Logging) mode. In WAL mode, committed
+transactions are first written to a `.sqlite3-wal` sidecar file and later
+checkpointed back into the main database file. Copying the main file with
+`cp` or `rsync` while the service is writing may produce an inconsistent
+snapshot — the `.wal` file may contain committed transactions that are not
+yet reflected in the copy.
+
+**Do not use:**
+
+- `cp ledger.sqlite3 /backup/` on a live WAL-mode database.
+- `rsync ledger.sqlite3 /backup/` without stopping all writers first.
+
+### Safe backup method (SQLite backup API)
+
+`deploy/backup.sh` uses the `sqlite3` CLI `.backup` command, which calls
+the SQLite Online Backup API. This API reads a consistent snapshot of the
+database with all committed WAL transactions included, while the service
+continues writing. The `.wal` and `.shm` sidecar files do not need to be
+copied separately.
+
+```bash
+# Manual one-shot backup (WAL-safe):
+sqlite3 /opt/second-brain/data/ledger.sqlite3 \
+    ".backup /tmp/ledger-$(date -u +%Y%m%dT%H%M%SZ).sqlite3"
+```
+
+The automated `deploy/backup.sh` encrypts the output with GPG and writes it
+to `BACKUP_DEST`. It also records `last_successful_backup_at` in
+`system_state`.
+
+### Restore validation
+
+`deploy/restore-validate.sh` decrypts a backup and runs
+`PRAGMA integrity_check` against the restored database in a temporary
+directory. It never touches the live ledger. Run it weekly to confirm
+backups are readable:
+
+```bash
+LEDGER_PATH=/opt/second-brain/data/ledger.sqlite3 \
+BACKUP_DEST=/opt/second-brain/backups \
+./restore-validate.sh
+```
+
+Exit code 0 = backup is consistent. Exit code 1 = integrity failure (check
+log output for the failing check).
+
+---
+
 ### Direct compose operations after deploy.sh
 
 ```bash

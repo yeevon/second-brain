@@ -87,3 +87,20 @@ Covers:
 ## Completion rule
 
 Milestone 8 is done when all twelve open `tech_debt_1` items are resolved and their README entries are moved from Open to Resolved.
+
+---
+
+## Merge notes — staging
+
+**Validation status:** Unit and integration-contract validated. E2E operational validation deferred.
+
+Full end-to-end validation (live Discord → n8n → writer-service → vault write) is deferred until the complete V3 flow is assembled and clean enough to exercise without noise. Known runtime gaps identified during partial V3 validation will be handled as follow-up tech-debt fixes. Each item below is implemented and covered by targeted tests; the operational flow is not marked fully validated.
+
+**Merge bar:**
+
+```bash
+uv run pytest tests/unit/test_m8_features.py
+uv run pytest tests/unit writer-service/tests/unit
+```
+
+Both suites pass on the `milestone_8` branch. No E2E gate is required before merging to staging.

@@ -37,6 +37,10 @@ def make_settings(tmp_path):
         classification_confidence_threshold=0.75,
         ledger_path=tmp_path / "ledger.sqlite3",
         vault_path=tmp_path / "vault",
+        downstream_delivery_enabled=True,
+        capture_processing_mode="local-full",
+        writer_service_url=None,
+        writer_service_token=None,
     )
 
 
@@ -257,7 +261,7 @@ def test_run_discord_listener_handles_keyboard_interrupt_cleanly(monkeypatch, ca
     run_discord_listener()
 
     captured = capsys.readouterr()
-    assert "shutdown complete" in captured.out
+    assert "shutdown_complete" in captured.out
 
 
 @pytest.mark.asyncio

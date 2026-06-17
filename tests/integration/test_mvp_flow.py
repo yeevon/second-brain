@@ -44,6 +44,10 @@ def make_settings(**overrides):
         "gemini_api_key": "fake",
         "gemini_model": "gemini-test",
         "classification_confidence_threshold": 0.75,
+        "downstream_delivery_enabled": True,
+        "capture_processing_mode": "local-full",
+        "writer_service_url": None,
+        "writer_service_token": None,
     }
     data.update(overrides)
     return SimpleNamespace(**data)
