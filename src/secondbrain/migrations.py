@@ -176,6 +176,7 @@ _MIGRATIONS: list[Migration] = [
             "ALTER TABLE vault_update_proposals ADD COLUMN approval_message_id TEXT",
         ),
     ),
+
 ]
 
 

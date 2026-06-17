@@ -206,6 +206,7 @@ class ProposalRecord:
     approval_message_id: str | None = None
 
 
+
 @dataclass(frozen=True)
 class DeliveryMutationResult:
     capture_id: str
