@@ -160,19 +160,20 @@ def _compose_checks(compose_dir: Path) -> list[PreflightCheck]:
         checks.append(PreflightCheck(".env file", False, f"{dotenv_path} does not exist"))
     else:
         checks.append(PreflightCheck(".env file", True, str(dotenv_path)))
-        # Check required keys are present (not necessarily non-empty, just present)
-        env_content = dotenv_path.read_text()
+        env_vars: dict[str, str] = {}
+        for line in dotenv_path.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#") or "=" not in stripped:
+                continue
+            k, _, v = stripped.partition("=")
+            env_vars[k.strip()] = v.strip()
         for key in _COMPOSE_REQUIRED_KEYS:
-            found = any(
-                line.startswith(f"{key}=") or line.startswith(f"{key} =")
-                for line in env_content.splitlines()
-                if not line.strip().startswith("#")
-            )
-            checks.append(PreflightCheck(
-                f".env:{key}",
-                found,
-                "present" if found else f"missing from {dotenv_path}",
-            ))
+            if key not in env_vars:
+                checks.append(PreflightCheck(f".env:{key}", False, f"missing from {dotenv_path}"))
+            elif not env_vars[key]:
+                checks.append(PreflightCheck(f".env:{key}", False, "present but empty"))
+            else:
+                checks.append(PreflightCheck(f".env:{key}", True, "set"))
 
     # n8n env file
     n8n_env = Path(os.environ.get("N8N_ENV_FILE", "") or str(compose_dir / "n8n.local.env"))

@@ -35,6 +35,9 @@ _log.addHandler(_handler)
 def log_metadata(event: str, **fields: Any) -> None:
     payload = {
         "event": event,
+        "level": "INFO",
+        "logger": __name__,
+        "message": event,
         "timestamp": datetime.now(UTC).isoformat(),
     }
     payload.update({key: value for key, value in fields.items() if value is not None})

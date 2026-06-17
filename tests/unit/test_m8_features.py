@@ -750,6 +750,31 @@ def test_preflight_compose_fails_when_required_key_missing_from_dotenv(tmp_path,
     assert any("GEMINI_API_KEY" in c.name and not c.passed for c in checks)
 
 
+def test_preflight_compose_fails_when_required_key_empty_in_dotenv(tmp_path, monkeypatch):
+    monkeypatch.delenv("N8N_ENV_FILE", raising=False)
+    monkeypatch.delenv("N8N_ENCRYPTION_KEY_FILE", raising=False)
+    monkeypatch.delenv("LOCAL_VAULT_PATH", raising=False)
+
+    dotenv = tmp_path / ".env"
+    # GEMINI_API_KEY is present but has an empty value
+    dotenv.write_text(
+        "CAPTURE_SERVICE_INTERNAL_TOKEN=tok1\n"
+        "WRITER_SERVICE_TOKEN=tok2\n"
+        "N8N_INTAKE_WEBHOOK_TOKEN=tok3\n"
+        "GEMINI_API_KEY=\n"
+    )
+    (tmp_path / "n8n.local.env").write_text("N8N_HOST=localhost\n")
+    (tmp_path / "n8n-encryption-key.local").write_text("deadbeef\n")
+
+    from secondbrain.preflight import run_preflight, format_preflight_results
+    checks = run_preflight(compose=True, compose_dir=tmp_path)
+    _, all_passed = format_preflight_results(checks)
+    assert not all_passed
+    gemini_check = next(c for c in checks if "GEMINI_API_KEY" in c.name)
+    assert not gemini_check.passed
+    assert "empty" in gemini_check.detail
+
+
 def test_preflight_compose_checks_local_vault_path_when_set(tmp_path, monkeypatch):
     monkeypatch.delenv("N8N_ENV_FILE", raising=False)
     monkeypatch.delenv("N8N_ENCRYPTION_KEY_FILE", raising=False)
