@@ -646,7 +646,7 @@ def test_run_discord_listener_handles_keyboard_interrupt_cleanly(monkeypatch, ca
     run_discord_listener()
 
     captured = capsys.readouterr()
-    assert "shutdown complete" in captured.out
+    assert "shutdown_complete" in captured.out
 
 
 @pytest.mark.asyncio
