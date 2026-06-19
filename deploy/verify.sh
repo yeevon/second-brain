@@ -183,6 +183,16 @@ if [[ "$writer_health" != "healthy" ]]; then
   exit 1
 fi
 
+writer_port_bindings="$(
+  docker inspect \
+    --format '{{json .HostConfig.PortBindings}}' \
+    "$WRITER_CONTAINER"
+)"
+if [[ "$writer_port_bindings" != "{}" && "$writer_port_bindings" != "null" ]]; then
+  echo "writer-service host ports appear to be published: $writer_port_bindings" >&2
+  exit 1
+fi
+
 if [[ ! -d "$VAULT_DIR" ]]; then
   echo "vault directory missing: $VAULT_DIR" >&2
   exit 1

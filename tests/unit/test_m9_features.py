@@ -127,8 +127,9 @@ def test_operations_md_covers_service_management():
 
 def test_operations_md_covers_health_checks():
     doc = _ops_doc()
-    assert "localhost:8000/health" in doc
-    assert "localhost:8001/health" in doc
+    assert "127.0.0.1:8000/health" in doc
+    assert "127.0.0.1:8001/health" in doc
+    assert "State.Health.Status" in doc
     assert "secondbrain status" in doc
 
 

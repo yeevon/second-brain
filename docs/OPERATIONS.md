@@ -22,13 +22,26 @@ Services: `capture-service`, `writer-service`, `n8n`.
 
 ## Health checks
 
-Run these from the EC2 host:
+Check container health status from the EC2 host:
 
 ```bash
-curl http://localhost:8000/health     # capture-service
-curl http://localhost:8001/health     # writer-service
+docker inspect --format '{{.State.Health.Status}}' second-brain-capture-service
+docker inspect --format '{{.State.Health.Status}}' second-brain-writer-service
+docker inspect --format '{{.State.Health.Status}}' second-brain-n8n
 uv run python -m secondbrain status   # full operational status (requires .env)
 ```
+
+For a direct HTTP probe inside a container (no host port mapping needed):
+
+```bash
+docker exec second-brain-capture-service \
+  /app/.venv/bin/python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"
+
+docker exec second-brain-writer-service \
+  python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')"
+```
+
+Neither capture-service nor writer-service publishes ports to the host. Do not use `curl http://localhost:8000/health` or `curl http://localhost:8001/health` — those will fail.
 
 `secondbrain status` reports:
 - Capture counts (total, today, filed, inbox, failed)
@@ -181,8 +194,8 @@ docker compose up -d --build
 
 # Verify health
 docker compose ps
-curl http://localhost:8000/health
-curl http://localhost:8001/health
+docker inspect --format '{{.State.Health.Status}}' second-brain-capture-service
+docker inspect --format '{{.State.Health.Status}}' second-brain-writer-service
 ```
 
 ---
