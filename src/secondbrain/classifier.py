@@ -244,6 +244,15 @@ def _classifier_failure_reason(exc: Exception, *, api_key: str) -> str:
 
 
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+# Matches key=value / key: value pairs where the key name looks like a credential,
+# and also Bearer <token> scheme values.
+_CREDENTIAL_RE = re.compile(
+    r"(?i)(?:"
+    r"(password|passwd|token|secret|api[_-]?key|authorization|access[_-]?key"
+    r"|private[_-]?key|x-api-key)\s*[=:]\s*\S+"
+    r"|Bearer\s+\S+"
+    r")",
+)
 
 
 def _safe_exception_message(exc: Exception, *, api_key: str) -> str:
@@ -251,6 +260,7 @@ def _safe_exception_message(exc: Exception, *, api_key: str) -> str:
     if api_key:
         message = message.replace(api_key, "[REDACTED_API_KEY]")
     message = _URL_RE.sub("[REDACTED_URL]", message)
+    message = _CREDENTIAL_RE.sub(lambda m: f"{m.group(1)}=[REDACTED]" if m.group(1) else "Bearer [REDACTED]", message)
     if len(message) > 200:
         message = f"{message[:197]}..."
     return message

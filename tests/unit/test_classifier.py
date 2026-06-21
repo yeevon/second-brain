@@ -192,6 +192,24 @@ async def test_classify_capture_redacts_api_key_from_failure_reason():
 
 
 @pytest.mark.asyncio
+async def test_classify_capture_redacts_generic_credential_patterns_from_failure_reason():
+    outcome = await classify_capture(
+        "Review reconnect handling.",
+        api_key="fake",
+        model="gemini-test",
+        confidence_threshold=0.75,
+        client=FakeClient(error=RuntimeError(
+            "call failed: password=hunter2 token=abc123 Bearer supersecrettoken"
+        )),
+    )
+
+    assert "hunter2" not in outcome.inbox_reason
+    assert "abc123" not in outcome.inbox_reason
+    assert "supersecrettoken" not in outcome.inbox_reason
+    assert "[REDACTED]" in outcome.inbox_reason
+
+
+@pytest.mark.asyncio
 async def test_classify_capture_strips_url_from_failure_reason():
     outcome = await classify_capture(
         "Review reconnect handling.",
