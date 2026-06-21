@@ -68,7 +68,7 @@ Deploy with the `vault_deploy_key` secret removed:
 
 ### 6. Local fake-remote mode (no deploy key)
 
-With `GIT_SYNC_ENABLED=false` or using `docker-compose.override.yaml` (local
+With `GIT_SYNC_ENABLED=false` or using `compose.override.yaml` (local
 named-volume mode):
 
 - [ ] Service starts and files notes without requiring `vault_deploy_key`
