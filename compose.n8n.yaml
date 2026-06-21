@@ -59,8 +59,8 @@ services:
       - ${WRITER_VAULT_SOURCE:?WRITER_VAULT_SOURCE must be set}:/opt/vault
     networks:
       - backend
-    cap_drop:
-      - ALL
+    # Writer entrypoint creates a runtime user and copies Git SSH secrets before dropping privileges.
+    # Do not drop all capabilities before entrypoint runs.
     security_opt:
       - no-new-privileges:true
     healthcheck:
