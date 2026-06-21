@@ -8,7 +8,7 @@ Run this checklist before closing SB-135.
 
 ## Prerequisites
 
-- `writer-service` deployed to EC2 via `docker compose -f docker-compose.n8n.yaml`
+- `writer-service` deployed to EC2 via `docker compose -f compose.n8n.yaml`
 - Docker secret `vault_deploy_key` populated with a deploy key that has write
   access to the vault repository
 - Docker secret `github_known_hosts` populated (see `deploy/github_known_hosts`)
@@ -21,7 +21,7 @@ Run this checklist before closing SB-135.
 ### 1. Service health
 
 ```bash
-curl -f http://<ec2-host>:8001/health
+docker exec second-brain-writer-service curl -f http://127.0.0.1:8001/health
 # Expected: {"status":"ok"}
 ```
 
