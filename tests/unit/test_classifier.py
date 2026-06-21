@@ -191,6 +191,67 @@ async def test_classify_capture_redacts_api_key_from_failure_reason():
     assert "[REDACTED_API_KEY]" in outcome.inbox_reason
 
 
+@pytest.mark.asyncio
+async def test_classify_capture_redacts_generic_credential_patterns_from_failure_reason():
+    outcome = await classify_capture(
+        "Review reconnect handling.",
+        api_key="fake",
+        model="gemini-test",
+        confidence_threshold=0.75,
+        client=FakeClient(error=RuntimeError(
+            "call failed: password=hunter2 token=abc123 Bearer supersecrettoken"
+        )),
+    )
+
+    assert "hunter2" not in outcome.inbox_reason
+    assert "abc123" not in outcome.inbox_reason
+    assert "supersecrettoken" not in outcome.inbox_reason
+    assert "[REDACTED]" in outcome.inbox_reason
+
+
+@pytest.mark.asyncio
+async def test_classify_capture_strips_url_from_failure_reason():
+    outcome = await classify_capture(
+        "Review reconnect handling.",
+        api_key="fake",
+        model="gemini-test",
+        confidence_threshold=0.75,
+        client=FakeClient(error=RuntimeError("request failed: https://api.example.com/v1/secret")),
+    )
+
+    assert "https://" not in outcome.inbox_reason
+    assert "[REDACTED_URL]" in outcome.inbox_reason
+
+
+@pytest.mark.asyncio
+async def test_classify_capture_truncates_long_failure_reason():
+    long_message = "x" * 500
+    outcome = await classify_capture(
+        "Review reconnect handling.",
+        api_key="fake",
+        model="gemini-test",
+        confidence_threshold=0.75,
+        client=FakeClient(error=RuntimeError(long_message)),
+    )
+
+    assert len(outcome.inbox_reason) <= 300
+    assert "..." in outcome.inbox_reason
+
+
+@pytest.mark.asyncio
+async def test_classify_capture_failure_reason_contains_only_error_type_and_bounded_summary():
+    outcome = await classify_capture(
+        "Review reconnect handling.",
+        api_key="fake",
+        model="gemini-test",
+        confidence_threshold=0.75,
+        client=FakeClient(error=ValueError("some internal detail")),
+    )
+
+    assert outcome.inbox_reason.startswith("classifier failed: ValueError")
+    assert len(outcome.inbox_reason) <= 300
+
+
 def test_parse_classification_response_accepts_json_text_response():
     response = SimpleNamespace(text="""
     {

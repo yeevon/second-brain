@@ -526,6 +526,7 @@ class Ledger:
         new_note_path: str,
         git_commit_hash: str | None,
         correction_reason: str | None,
+        move_outcome: str = "moved",
     ) -> str:
         return self._write(
             "record_correction",
@@ -536,6 +537,7 @@ class Ledger:
                 new_note_path=new_note_path,
                 git_commit_hash=git_commit_hash,
                 correction_reason=correction_reason,
+                move_outcome=move_outcome,
             ),
         )
 
@@ -2288,6 +2290,7 @@ class Ledger:
         new_note_path: str,
         git_commit_hash: str | None,
         correction_reason: str | None,
+        move_outcome: str = "moved",
     ) -> str:
         now = _iso(_now())
         correction_id = f"COR-{uuid.uuid4().hex}-{capture_id}"
@@ -2301,14 +2304,15 @@ class Ledger:
             (correction_id, capture_id, old_note_path, new_note_path,
              git_commit_hash, correction_reason, now),
         )
-        conn.execute(
-            """
-            UPDATE captures
-            SET derived_note_path = ?, delivery_commit_hash = ?, updated_at = ?
-            WHERE capture_id = ?
-            """,
-            (new_note_path, git_commit_hash, now, capture_id),
-        )
+        if move_outcome != "no_op":
+            conn.execute(
+                """
+                UPDATE captures
+                SET derived_note_path = ?, delivery_commit_hash = ?, updated_at = ?
+                WHERE capture_id = ?
+                """,
+                (new_note_path, git_commit_hash, now, capture_id),
+            )
         self._append_event(
             conn,
             capture_id,
@@ -2319,6 +2323,7 @@ class Ledger:
                 "new_note_path": new_note_path,
                 "git_commit_hash": git_commit_hash,
                 "correction_reason": correction_reason,
+                "move_outcome": move_outcome,
             },
         )
         return correction_id

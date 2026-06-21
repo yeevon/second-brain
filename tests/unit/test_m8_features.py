@@ -1026,3 +1026,331 @@ def test_status_displays_last_vault_write_at(tmp_path):
 
     output = format_operational_status(snapshot)
     assert "last vault write at" in output
+
+
+# ---------------------------------------------------------------------------
+# SB-133: Clarification resolved only after correction succeeds
+# ---------------------------------------------------------------------------
+
+def _make_filed_capture_with_clarification(ledger, *, discord_message_id="msg-133-1"):
+    from secondbrain.capture_models import INBOX
+    insert_result = ledger.insert_accepted_capture(
+        discord_message_id=discord_message_id,
+        discord_channel_id="100",
+        discord_guild_id="200",
+        discord_author_id="300",
+        raw_text="test capture",
+        initial_delivery_status="NOT_APPLICABLE",
+    )
+    capture_id = insert_result.capture.capture_id
+    ledger.transition_capture(
+        capture_id,
+        from_statuses={"RECEIVED"},
+        to_status="CLASSIFYING",
+        event_type="CAPTURE_CLASSIFYING",
+        event_payload={},
+    )
+    ledger.transition_capture(
+        capture_id,
+        from_statuses={"CLASSIFYING"},
+        to_status=INBOX,
+        derived_note_path="00-inbox/original.md",
+        classification_json={"folder": "inbox", "confidence": 0.9, "project": None, "needs_clarification": True},
+        event_type="CAPTURE_INBOX",
+        event_payload={"path": "00-inbox/original.md"},
+    )
+    ledger.record_clarification(capture_id=capture_id, question="Which project?")
+    return capture_id
+
+
+@pytest.mark.asyncio
+async def test_correction_failure_leaves_clarification_unresolved(tmp_path):
+    """A failed correction must not resolve a pending clarification."""
+    from secondbrain.capture_service import CaptureService
+
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture_id = _make_filed_capture_with_clarification(ledger)
+
+    settings = SimpleNamespace(
+        capture_processing_mode="capture-only",
+        downstream_delivery_enabled=True,
+        writer_service_url="http://fake",
+        writer_service_token="tok",
+    )
+
+    class _FailingWriterClient:
+        async def move_note(self, **kwargs):
+            raise RuntimeError("writer unavailable")
+
+    service = CaptureService(settings=settings, ledger=ledger)
+    service._writer_client = _FailingWriterClient()
+
+    capture = ledger.get_capture(capture_id)
+    assert capture.clarification_status == "NEEDS_CLARIFICATION"
+
+    # Simulate gateway correction message referencing the capture
+    class _FakeMessage:
+        content = f"fix SB-99991231-0001: inbox"
+        reference = None
+
+    # Call handle_gateway_correction directly (auth already passed)
+    # Override capture lookup to use the real capture_id
+    original_parse = __import__("secondbrain.capture_service", fromlist=["_parse_fix_command"])._parse_fix_command
+
+    import secondbrain.capture_service as cs_module
+
+    def patched_parse(content, message):
+        return capture_id, "inbox", "fix reason"
+
+    cs_module._parse_fix_command = patched_parse
+    try:
+        await service.handle_gateway_correction(_FakeMessage())
+    finally:
+        cs_module._parse_fix_command = original_parse
+
+    after = ledger.get_capture(capture_id)
+    assert after.clarification_status == "NEEDS_CLARIFICATION"
+
+    service.close()
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_successful_correction_resolves_clarification(tmp_path):
+    """A successful correction must resolve a pending clarification."""
+    from secondbrain.capture_service import CaptureService
+
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture_id = _make_filed_capture_with_clarification(ledger, discord_message_id="msg-133-2")
+
+    settings = SimpleNamespace(
+        capture_processing_mode="capture-only",
+        downstream_delivery_enabled=True,
+        writer_service_url="http://fake",
+        writer_service_token="tok",
+    )
+
+    class _SuccessWriterClient:
+        async def move_note(self, **kwargs):
+            return {
+                "old_note_path": "00-inbox/original.md",
+                "new_note_path": "02-projects/moved.md",
+                "git_commit_hash": "deadbeef",
+                "result": "MOVED",
+            }
+
+    service = CaptureService(settings=settings, ledger=ledger)
+    service._writer_client = _SuccessWriterClient()
+
+    import secondbrain.capture_service as cs_module
+
+    def patched_parse(content, message):
+        return capture_id, "projects", "fix reason"
+
+    original_parse = cs_module._parse_fix_command
+    cs_module._parse_fix_command = patched_parse
+    try:
+        class _FakeMessage:
+            content = "fix: projects"
+            reference = None
+
+        await service.handle_gateway_correction(_FakeMessage())
+    finally:
+        cs_module._parse_fix_command = original_parse
+
+    after = ledger.get_capture(capture_id)
+    assert after.clarification_status == "RESOLVED"
+
+    service.close()
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_network_failure_during_correction_leaves_clarification_unresolved(tmp_path):
+    """A network failure during correction must not resolve clarification."""
+    from secondbrain.capture_service import CaptureService
+
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture_id = _make_filed_capture_with_clarification(ledger, discord_message_id="msg-133-3")
+
+    settings = SimpleNamespace(
+        capture_processing_mode="capture-only",
+        downstream_delivery_enabled=True,
+        writer_service_url="http://fake",
+        writer_service_token="tok",
+    )
+
+    class _TimeoutWriterClient:
+        async def move_note(self, **kwargs):
+            import asyncio
+            raise asyncio.TimeoutError()
+
+    service = CaptureService(settings=settings, ledger=ledger)
+    service._writer_client = _TimeoutWriterClient()
+
+    import secondbrain.capture_service as cs_module
+
+    def patched_parse(content, message):
+        return capture_id, "inbox", "fix reason"
+
+    original_parse = cs_module._parse_fix_command
+    cs_module._parse_fix_command = patched_parse
+    try:
+        class _FakeMessage:
+            content = "fix: inbox"
+            reference = None
+
+        await service.handle_gateway_correction(_FakeMessage())
+    finally:
+        cs_module._parse_fix_command = original_parse
+
+    after = ledger.get_capture(capture_id)
+    assert after.clarification_status == "NEEDS_CLARIFICATION"
+
+    service.close()
+    ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# SB-134: No-op correction move preserves delivery_commit_hash
+# ---------------------------------------------------------------------------
+
+def _make_filed_capture_with_hash(ledger, *, discord_message_id="msg-134-1", original_hash="abc1234"):
+    from secondbrain.capture_models import FILED
+    insert_result = ledger.insert_accepted_capture(
+        discord_message_id=discord_message_id,
+        discord_channel_id="100",
+        discord_guild_id="200",
+        discord_author_id="300",
+        raw_text="test capture for no-op",
+        initial_delivery_status="NOT_APPLICABLE",
+    )
+    capture_id = insert_result.capture.capture_id
+    ledger.transition_capture(
+        capture_id,
+        from_statuses={"RECEIVED"},
+        to_status="CLASSIFYING",
+        event_type="CAPTURE_CLASSIFYING",
+        event_payload={},
+    )
+    ledger.transition_capture(
+        capture_id,
+        from_statuses={"CLASSIFYING"},
+        to_status=FILED,
+        derived_note_path="00-inbox/original.md",
+        classification_json={"folder": "inbox", "confidence": 0.9, "project": None, "needs_clarification": False},
+        event_type="CAPTURE_FILED",
+        event_payload={"path": "00-inbox/original.md"},
+    )
+    ledger._runtime.write(lambda conn: conn.execute(
+        "UPDATE captures SET delivery_commit_hash = ? WHERE capture_id = ?",
+        (original_hash, capture_id),
+    ))
+    return capture_id
+
+
+@pytest.mark.asyncio
+async def test_noop_correction_preserves_delivery_commit_hash(tmp_path):
+    """A same-folder correction (no_op) must not overwrite delivery_commit_hash."""
+    import json
+    from secondbrain.capture_service import CaptureService
+
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture_id = _make_filed_capture_with_hash(ledger, original_hash="abc1234")
+
+    settings = SimpleNamespace(
+        capture_processing_mode="capture-only",
+        downstream_delivery_enabled=True,
+        writer_service_url="http://fake",
+        writer_service_token="tok",
+    )
+
+    class _NoOpWriterClient:
+        async def move_note(self, **kwargs):
+            return {
+                "result": "NO_OP",
+                "old_note_path": "00-inbox/original.md",
+                "new_note_path": "00-inbox/original.md",
+                "git_commit_hash": None,
+            }
+
+    service = CaptureService(settings=settings, ledger=ledger)
+    service._writer_client = _NoOpWriterClient()
+
+    result = await service.apply_correction(
+        capture_id=capture_id,
+        new_folder="inbox",
+        correction_reason="same folder test",
+    )
+
+    assert result is not None
+    assert result["move_outcome"] == "no_op"
+
+    after = ledger.get_capture(capture_id)
+    assert after.delivery_commit_hash == "abc1234"
+    assert after.derived_note_path == "00-inbox/original.md"
+
+    corrections = ledger.corrections_for_capture(capture_id)
+    assert len(corrections) == 1
+    assert corrections[0]["old_note_path"] == "00-inbox/original.md"
+    assert corrections[0]["new_note_path"] == "00-inbox/original.md"
+
+    events = ledger.capture_events(capture_id)
+    correction_event = next(e for e in events if e["event_type"] == "CORRECTION_APPLIED")
+    payload = json.loads(correction_event["event_payload_json"])
+    assert payload["move_outcome"] == "no_op"
+
+    service.close()
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_real_move_updates_delivery_commit_hash(tmp_path):
+    """A real move must update delivery_commit_hash with the new hash."""
+    import json
+    from secondbrain.capture_service import CaptureService
+
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture_id = _make_filed_capture_with_hash(
+        ledger, discord_message_id="msg-134-2", original_hash="original000"
+    )
+
+    settings = SimpleNamespace(
+        capture_processing_mode="capture-only",
+        downstream_delivery_enabled=True,
+        writer_service_url="http://fake",
+        writer_service_token="tok",
+    )
+
+    class _MovedWriterClient:
+        async def move_note(self, **kwargs):
+            return {
+                "result": "MOVED",
+                "old_note_path": "00-inbox/original.md",
+                "new_note_path": "02-projects/moved.md",
+                "git_commit_hash": "newcommit1",
+            }
+
+    service = CaptureService(settings=settings, ledger=ledger)
+    service._writer_client = _MovedWriterClient()
+
+    result = await service.apply_correction(
+        capture_id=capture_id,
+        new_folder="projects",
+        correction_reason="real move test",
+    )
+
+    assert result is not None
+    assert result["move_outcome"] == "moved"
+
+    after = ledger.get_capture(capture_id)
+    assert after.delivery_commit_hash == "newcommit1"
+    assert after.derived_note_path == "02-projects/moved.md"
+
+    events = ledger.capture_events(capture_id)
+    correction_event = next(e for e in events if e["event_type"] == "CORRECTION_APPLIED")
+    payload = json.loads(correction_event["event_payload_json"])
+    assert payload["move_outcome"] == "moved"
+
+    service.close()
+    ledger.close()

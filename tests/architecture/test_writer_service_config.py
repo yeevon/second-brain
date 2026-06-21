@@ -76,9 +76,12 @@ def test_override_defines_second_brain_local_vault_volume():
 # ── Security hardening ────────────────────────────────────────────────────────
 
 
-def test_writer_service_uses_cap_drop_all():
+def test_writer_service_privilege_drop_via_no_new_privileges_and_gosu():
+    """cap_drop: ALL is not used; the entrypoint uses gosu to drop to a runtime user.
+    no-new-privileges:true is the enforced security constraint."""
     svc = _n8n_compose()["services"]["writer-service"]
-    assert svc.get("cap_drop") == ["ALL"]
+    assert "no-new-privileges:true" in svc.get("security_opt", [])
+    assert svc.get("cap_drop") is None
 
 
 def test_writer_service_uses_no_new_privileges():
@@ -706,3 +709,88 @@ def test_local_n8n_init_setup_owner_rejects_404():
     assert "assuming already configured" not in script, (
         "loose 'assuming already configured' fallback must be removed from setup_owner"
     )
+
+
+# ── SB-135: deploy-key handling and both startup modes ───────────────────────
+
+ENTRYPOINT = ROOT / "writer-service" / "docker-entrypoint.sh"
+
+
+def _entrypoint() -> str:
+    return ENTRYPOINT.read_text()
+
+
+def test_entrypoint_fails_fast_when_deploy_key_missing_with_git_sync_enabled():
+    """Entrypoint must exit non-zero with a clear error when GIT_SYNC_ENABLED=true but key absent."""
+    script = _entrypoint()
+    assert 'GIT_SYNC_ENABLED' in script
+    assert 'id_ed25519' in script
+    assert 'exit 1' in script
+    assert 'ERROR' in script
+
+
+def test_entrypoint_fails_fast_when_known_hosts_missing_with_git_sync_enabled():
+    """Entrypoint must exit non-zero with a clear error when GIT_SYNC_ENABLED=true but known_hosts absent."""
+    script = _entrypoint()
+    assert 'known_hosts' in script
+    assert 'exit 1' in script
+
+
+def test_entrypoint_copies_deploy_key_when_present():
+    """Entrypoint must copy vault_deploy_key secret into runtime user .ssh."""
+    script = _entrypoint()
+    assert '/run/secrets/vault_deploy_key' in script
+    assert 'id_ed25519' in script
+    assert 'chmod 600' in script
+
+
+def test_entrypoint_copies_known_hosts_when_present():
+    """Entrypoint must copy github_known_hosts secret into runtime user .ssh."""
+    script = _entrypoint()
+    assert '/run/secrets/github_known_hosts' in script
+    assert 'known_hosts' in script
+
+
+def test_entrypoint_sets_git_ssh_command_with_runtime_user_key():
+    """GIT_SSH_COMMAND must reference the copied key path, not the raw secret."""
+    script = _entrypoint()
+    # The command should use the runtime home path, not /run/secrets/ directly
+    assert 'GIT_SSH_COMMAND=' in script
+    assert 'RUNTIME_HOME' in script or '.ssh/id_ed25519' in script
+
+
+def test_entrypoint_drops_to_runtime_user_via_gosu():
+    """Process must drop privileges to the runtime user before exec."""
+    script = _entrypoint()
+    assert 'gosu' in script
+    assert 'RUNTIME_UID' in script
+
+
+def test_override_writer_service_defines_deploy_key_secret():
+    """Override compose (local mode) must define vault_deploy_key secret."""
+    compose = _override_compose()
+    secrets = compose.get("secrets", {})
+    assert "vault_deploy_key" in secrets
+
+
+def test_override_writer_service_mounts_deploy_key_and_known_hosts():
+    """Writer-service in override compose must have both secrets mounted."""
+    svc = _override_compose()["services"]["writer-service"]
+    service_secrets = svc.get("secrets", [])
+    assert "vault_deploy_key" in service_secrets
+    assert "github_known_hosts" in service_secrets
+
+
+def test_n8n_compose_writer_service_mounts_deploy_key_and_known_hosts():
+    """Writer-service in n8n compose (EC2 mode) must have both secrets mounted."""
+    svc = _n8n_compose()["services"]["writer-service"]
+    service_secrets = svc.get("secrets", [])
+    assert "vault_deploy_key" in service_secrets
+    assert "github_known_hosts" in service_secrets
+
+
+def test_entrypoint_strict_host_checking_prevents_mitm():
+    """SSH must not disable StrictHostKeyChecking (would allow MITM)."""
+    script = _entrypoint()
+    assert 'StrictHostKeyChecking=yes' in script
+    assert 'StrictHostKeyChecking=no' not in script

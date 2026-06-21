@@ -8,7 +8,7 @@ from secondbrain.ledger import Ledger
 from secondbrain.models import Classification
 from secondbrain.reconcile import LAST_RECONCILED_MESSAGE_ID
 
-from tests.fakes.discord import FakeDiscordChannel, FakeDiscordClient, FakeDiscordMessage
+from tests.fakes.discord import FakeDiscordAuthor, FakeDiscordChannel, FakeDiscordClient, FakeDiscordGuild, FakeDiscordMessage
 
 
 def make_settings(tmp_path, **overrides):
@@ -918,3 +918,81 @@ async def test_service_acknowledge_delivery_inbox_rejects_free_form_reason_type_
             reason_type="free form reason with spaces",
         )
     ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# SB-132: Correction commands must pass capture authorization gate
+# ---------------------------------------------------------------------------
+
+def _make_correction_service(tmp_path):
+    settings = make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    channel = FakeDiscordChannel()
+    service = CaptureService(
+        settings=settings,
+        ledger=ledger,
+        receipt_client=FakeDiscordClient(channel),
+    )
+    return service, ledger, channel
+
+
+@pytest.mark.asyncio
+async def test_correction_ignored_from_unauthorized_guild(tmp_path):
+    service, ledger, _ = _make_correction_service(tmp_path)
+    msg = FakeDiscordMessage(
+        content="fix: inbox",
+        guild=FakeDiscordGuild(guild_id=999),
+    )
+    await service.handle_gateway_message(msg)
+    assert ledger.total_captures() == 0
+
+
+@pytest.mark.asyncio
+async def test_correction_ignored_from_unauthorized_channel(tmp_path):
+    service, ledger, _ = _make_correction_service(tmp_path)
+    from tests.fakes.discord import FakeDiscordChannel as Ch
+    msg = FakeDiscordMessage(
+        content="fix: inbox",
+        channel=Ch(channel_id=999),
+    )
+    await service.handle_gateway_message(msg)
+    assert ledger.total_captures() == 0
+
+
+@pytest.mark.asyncio
+async def test_correction_ignored_from_unauthorized_user(tmp_path):
+    service, ledger, _ = _make_correction_service(tmp_path)
+    msg = FakeDiscordMessage(
+        content="fix: inbox",
+        author=FakeDiscordAuthor(author_id=999),
+    )
+    await service.handle_gateway_message(msg)
+    assert ledger.total_captures() == 0
+
+
+@pytest.mark.asyncio
+async def test_correction_ignored_from_bot(tmp_path):
+    service, ledger, _ = _make_correction_service(tmp_path)
+    msg = FakeDiscordMessage(
+        content="fix: inbox",
+        author=FakeDiscordAuthor(author_id=300, bot=True),
+    )
+    await service.handle_gateway_message(msg)
+    assert ledger.total_captures() == 0
+
+
+@pytest.mark.asyncio
+async def test_correction_from_authorized_sender_proceeds(tmp_path):
+    service, ledger, _ = _make_correction_service(tmp_path)
+    corrections_attempted = []
+    original_correction = service.handle_gateway_correction
+
+    async def spy_correction(message):
+        corrections_attempted.append(message)
+        return await original_correction(message)
+
+    service.handle_gateway_correction = spy_correction
+
+    msg = FakeDiscordMessage(content="fix: inbox")
+    await service.handle_gateway_message(msg)
+    assert len(corrections_attempted) == 1

@@ -777,12 +777,14 @@ class CaptureService:
         if writer_result is None:
             return None
 
+        move_outcome = "no_op" if writer_result.get("result") == "NO_OP" else "moved"
         correction_id = self._ledger.record_correction(
             capture_id=capture_id,
             old_note_path=writer_result["old_note_path"],
             new_note_path=writer_result["new_note_path"],
             git_commit_hash=writer_result.get("git_commit_hash"),
             correction_reason=correction_reason,
+            move_outcome=move_outcome,
         )
         self._ledger.set_system_state(
             "last_vault_write_at",
@@ -794,6 +796,7 @@ class CaptureService:
             correction_id=correction_id,
             old_note_path=writer_result["old_note_path"],
             new_note_path=writer_result["new_note_path"],
+            move_outcome=move_outcome,
         )
 
         try:
@@ -812,6 +815,7 @@ class CaptureService:
             "old_note_path": writer_result["old_note_path"],
             "new_note_path": writer_result["new_note_path"],
             "git_commit_hash": writer_result.get("git_commit_hash"),
+            "move_outcome": move_outcome,
         }
 
     async def _call_writer_move(
@@ -883,16 +887,20 @@ class CaptureService:
             log_metadata("correction_capture_not_found", capture_id=capture_id)
             return False
 
-        # Resolve clarification if one was pending
-        if capture.clarification_status == "NEEDS_CLARIFICATION":
-            await self.resolve_clarification(capture_id)
+        needs_clarification_resolve = capture.clarification_status == "NEEDS_CLARIFICATION"
 
         result = await self.apply_correction(
             capture_id=capture_id,
             new_folder=new_folder,
             correction_reason=reason,
         )
-        return result is not None
+        if result is None:
+            return False
+
+        if needs_clarification_resolve:
+            await self.resolve_clarification(capture_id)
+
+        return True
 
     # ------------------------------------------------------------------
     # SB-138: Vault update proposal Discord approval surface
