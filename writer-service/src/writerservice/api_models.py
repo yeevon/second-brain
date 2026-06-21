@@ -87,7 +87,7 @@ class MoveNoteRequest(BaseModel):
 
 
 class MoveNoteResponse(BaseModel):
-    result: Literal["MOVED"]
+    result: Literal["MOVED", "NO_OP"]
     old_note_path: str
     new_note_path: str
     git_commit_hash: str | None

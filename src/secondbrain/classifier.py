@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from google import genai
@@ -242,10 +243,14 @@ def _classifier_failure_reason(exc: Exception, *, api_key: str) -> str:
     return f"classifier failed: {type(exc).__name__}: {message}"
 
 
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+
+
 def _safe_exception_message(exc: Exception, *, api_key: str) -> str:
     message = str(exc).replace("\n", " ").strip()
     if api_key:
         message = message.replace(api_key, "[REDACTED_API_KEY]")
-    if len(message) > 500:
-        message = f"{message[:497]}..."
+    message = _URL_RE.sub("[REDACTED_URL]", message)
+    if len(message) > 200:
+        message = f"{message[:197]}..."
     return message

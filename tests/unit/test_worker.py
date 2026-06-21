@@ -372,6 +372,68 @@ async def test_run_capture_worker_marks_unexpected_errors_failed(tmp_path, monke
 
 
 @pytest.mark.asyncio
+async def test_vault_failure_last_error_does_not_contain_raw_exception_text(tmp_path):
+    """last_error from a vault failure must only contain the error type name, not raw exception text."""
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture = insert_capture(ledger)
+
+    class VaultWriterWithSensitiveError:
+        def write_note(self, **kwargs):
+            raise OSError("vault unavailable: https://internal.corp/secret?token=abc123")
+
+    await process_capture_once(
+        capture_id=capture.capture_id,
+        settings=make_settings(),
+        capture_service=make_capture_service(ledger),
+        vault_writer=VaultWriterWithSensitiveError(),
+        classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
+    )
+
+    updated = ledger.get_capture(capture.capture_id)
+    assert updated.status == FAILED
+    assert updated.last_error == "OSError: vault write failed"
+    assert "https://" not in (updated.last_error or "")
+    assert "token" not in (updated.last_error or "")
+    assert "internal.corp" not in (updated.last_error or "")
+
+
+@pytest.mark.asyncio
+async def test_unexpected_worker_error_last_error_does_not_contain_raw_exception_text(tmp_path, monkeypatch):
+    """last_error from an unexpected worker error must only contain the error type name."""
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    capture = insert_capture(ledger)
+    queue = CaptureQueue()
+
+    async def broken_process_capture_once(**kwargs):
+        raise RuntimeError("token=ghp_supersecrettoken123 at https://api.internal/v1")
+
+    monkeypatch.setattr(worker_module, "process_capture_once", broken_process_capture_once)
+    worker = asyncio.create_task(
+        run_capture_worker(
+            settings=make_settings(),
+            capture_service=make_capture_service(ledger),
+            queue=queue,
+            vault_writer=VaultWriter(tmp_path / "vault"),
+            classifier_client=FakeClient(parsed=VALID_CLASSIFICATION),
+        )
+    )
+
+    try:
+        await queue.enqueue(capture.capture_id)
+        await wait_for_status(ledger, capture.capture_id, FAILED)
+    finally:
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+    updated = ledger.get_capture(capture.capture_id)
+    assert updated.status == FAILED
+    assert updated.last_error == "RuntimeError: worker error"
+    assert "ghp_supersecrettoken123" not in (updated.last_error or "")
+    assert "https://" not in (updated.last_error or "")
+
+
+@pytest.mark.asyncio
 async def test_service_enqueue_unfinished_captures_resets_classifying_and_returns_work(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     queue = CaptureQueue()

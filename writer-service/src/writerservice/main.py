@@ -251,7 +251,7 @@ def _build_app() -> FastAPI:
             raise HTTPException(status_code=422, detail="invalid request") from exc
 
         return MoveNoteResponse(
-            result="MOVED",
+            result="MOVED" if result.moved else "NO_OP",
             old_note_path=result.old_note_path,
             new_note_path=result.new_note_path,
             git_commit_hash=result.git_commit_hash,
