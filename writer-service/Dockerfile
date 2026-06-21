@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir \
     fastapi==0.136.3 \
     uvicorn==0.34.3 \
-    pydantic==2.13.4
+    pydantic==2.13.4 \
+    httpx>=0.28.1
 
 WORKDIR /app
 
