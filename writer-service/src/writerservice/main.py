@@ -193,6 +193,8 @@ def _build_app() -> FastAPI:
 
         writer = VaultWriter(vault_path, audit_log_path=settings.audit_log_path)
 
+        from writerservice.writer import RawHashMismatchError
+
         try:
             result = writer.write_note(
                 capture_id=request.capture_id,
@@ -203,8 +205,16 @@ def _build_app() -> FastAPI:
                 prompt_version=request.prompt_version,
                 delivery_attempt=request.delivery_attempt,
                 inbox_reason=request.inbox_reason,
+                raw_text=request.raw_text,
+                attachments=list(request.attachments),
                 git_sync_enabled=settings.git_sync_enabled,
             )
+        except RawHashMismatchError as exc:
+            logger.error("raw hash mismatch: %s", exc)
+            raise HTTPException(
+                status_code=409,
+                detail={"error_type": "raw_hash_mismatch"},
+            ) from exc
         except CaptureDuplicateError as exc:
             raise exc from exc
         except DuplicateCaptureError as exc:
@@ -222,6 +232,8 @@ def _build_app() -> FastAPI:
             note_path=result.note_path,
             git_commit_hash=result.git_commit_hash,
             idempotent=not result.created,
+            raw_capture_path=result.raw_capture_path,
+            raw_sha256=result.raw_sha256,
         )
 
     @app.post(
