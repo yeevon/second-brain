@@ -431,7 +431,7 @@
           }
         },
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ capture_id: $('Intake Webhook').first().json.body.capture_id, delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, classification: $('Parse Gemini Response').first().json.classification, inbox_reason: null, source_message_id: $('Get Capture').first().json.source_message_id, created_at: $('Get Capture').first().json.created_at, model: \"gemini-3.5-flash\", prompt_version: \"classifier-v1\", raw_text: $('Get Capture').first().json.raw_text ?? \"\", attachments: $('Get Capture').first().json.attachment_metadata ?? [] }) }}",
+        "jsonBody": "={{ JSON.stringify({ capture_id: $('Intake Webhook').first().json.body.capture_id, delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, classification: $('Parse Gemini Response').first().json.classification, inbox_reason: null, source_message_id: $('Get Capture').first().json.source_message_id, created_at: $('Get Capture').first().json.created_at, model: \"gemini-3.5-flash\", prompt_version: \"classifier-v1\", raw_text: $('Get Capture').first().json.raw_text, attachments: $('Get Capture').first().json.attachment_metadata ?? [] }) }}",
         "sendBody": true
       },
       "id": "a1b2c3d4-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
@@ -465,7 +465,7 @@
           }
         },
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ capture_id: $('Intake Webhook').first().json.body.capture_id, delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, classification: $('Parse Gemini Response').first().json.classification, inbox_reason: $('Validate Classification').first().json.inbox_reason, source_message_id: $('Get Capture').first().json.source_message_id, created_at: $('Get Capture').first().json.created_at, model: \"gemini-3.5-flash\", prompt_version: \"classifier-v1\", raw_text: $('Get Capture').first().json.raw_text ?? \"\", attachments: $('Get Capture').first().json.attachment_metadata ?? [] }) }}",
+        "jsonBody": "={{ JSON.stringify({ capture_id: $('Intake Webhook').first().json.body.capture_id, delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, classification: $('Parse Gemini Response').first().json.classification, inbox_reason: $('Validate Classification').first().json.inbox_reason, source_message_id: $('Get Capture').first().json.source_message_id, created_at: $('Get Capture').first().json.created_at, model: \"gemini-3.5-flash\", prompt_version: \"classifier-v1\", raw_text: $('Get Capture').first().json.raw_text, attachments: $('Get Capture').first().json.attachment_metadata ?? [] }) }}",
         "sendBody": true
       },
       "id": "a1b2c3d4-cccc-cccc-cccc-cccccccccccc",

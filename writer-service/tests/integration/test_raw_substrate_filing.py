@@ -274,6 +274,52 @@ def test_hash_mismatch_returns_409_when_sanitized_note_already_exists(tmp_path, 
     assert resp2.json()["detail"]["error_type"] == "raw_hash_mismatch"
 
 
+def test_missing_raw_file_is_created_on_idempotent_replay(tmp_path, monkeypatch):
+    # Sanitized note exists but raw file was somehow deleted.
+    # Replay must recreate the raw file rather than silently returning success.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("VAULT_PATH", str(vault))
+
+    CLIENT.post("/internal/notes/file", json=_payload(raw_text="original"), headers=_HEADERS)
+
+    raw_file = vault / "00_raw" / "2026" / "06" / "SB-20260621-0003.md"
+    raw_file.unlink()
+    assert not raw_file.exists()
+
+    resp2 = CLIENT.post(
+        "/internal/notes/file",
+        json=_payload(raw_text="original", delivery_attempt=2),
+        headers=_HEADERS,
+    )
+    assert resp2.status_code == 200
+    assert raw_file.exists()
+
+
+def test_corrupted_raw_body_returns_409_when_sanitized_note_exists(tmp_path, monkeypatch):
+    # Sanitized note exists, raw file exists, but body was corrupted (stored hash no
+    # longer matches body). write_or_verify_raw_capture detects recomputed != stored.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("VAULT_PATH", str(vault))
+
+    CLIENT.post("/internal/notes/file", json=_payload(raw_text="original"), headers=_HEADERS)
+
+    raw_file = vault / "00_raw" / "2026" / "06" / "SB-20260621-0003.md"
+    text = raw_file.read_text(encoding="utf-8")
+    # Corrupt the body while leaving frontmatter (and stored hash) intact.
+    corrupted = text.replace("original", "CORRUPTED")
+    raw_file.write_text(corrupted, encoding="utf-8")
+
+    resp2 = CLIENT.post(
+        "/internal/notes/file",
+        json=_payload(raw_text="original", delivery_attempt=2),
+        headers=_HEADERS,
+    )
+    assert resp2.status_code == 409
+    assert resp2.json()["detail"]["error_type"] == "raw_hash_mismatch"
+
+
 # ── Audit log raw linkage ─────────────────────────────────────────────────────
 
 
