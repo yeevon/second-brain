@@ -180,26 +180,43 @@ class SQLiteRuntime:
             if self._closed:
                 raise RuntimeError("SQLite runtime is closed")
             queue_depth = self._queue.qsize()
-            self._queue.put(job)
+            # SB-136: bounded queue enqueue — raises queue.Full if queue is full
+            try:
+                self._queue.put_nowait(job)
+            except queue.Full:
+                log_metadata(
+                    "sqlite_queue_full",
+                    operation_name=operation_name,
+                    depth=queue_depth,
+                )
+                raise RuntimeError(
+                    f"SQLite job queue is full ({queue_depth} items); operation rejected"
+                )
         log_metadata(
             "sqlite_queue_depth",
             operation_name=operation_name,
             depth=queue_depth,
         )
-        wait_start = time.monotonic()
+        # SB-136: wait only for the job to be picked up from the queue
+        enqueue_time = time.monotonic()
+        total_timeout = self._queue_wait_timeout_s + self._job_completion_timeout_s
         try:
-            return future.result(timeout=self._queue_wait_timeout_s)
+            return future.result(timeout=total_timeout)
         except TimeoutError:
-            elapsed_s = time.monotonic() - wait_start
+            elapsed_s = time.monotonic() - enqueue_time
+            # Determine which phase timed out for the log event
             log_metadata(
                 "sqlite_queue_wait_timeout",
-                step="queue_wait",
+                step="queue_or_job",
                 operation_name=operation_name,
-                timeout_s=self._queue_wait_timeout_s,
+                queue_wait_timeout_s=self._queue_wait_timeout_s,
+                job_completion_timeout_s=self._job_completion_timeout_s,
                 elapsed_s=int(elapsed_s),
             )
             raise RuntimeError(
-                f"SQLite operation timed out after {self._queue_wait_timeout_s}s waiting for queue"
+                f"SQLite operation timed out after {elapsed_s:.1f}s "
+                f"(queue_wait_limit={self._queue_wait_timeout_s}s, "
+                f"job_completion_limit={self._job_completion_timeout_s}s)"
             )
 
     def _worker(self) -> None:
@@ -265,11 +282,12 @@ class SQLiteRuntime:
                     duration_ms=duration_ms,
                 )
                 if duration_ms >= self._job_completion_timeout_s * 1000:
+                    # SB-136: caller already timed out via future.result(); log
+                    # slow execution for observability even if future was abandoned.
                     log_metadata(
-                        "sqlite_job_completion_timeout",
-                        step="job_completion",
+                        "sqlite_job_slow",
                         operation_name=job.operation_name,
-                        timeout_s=self._job_completion_timeout_s,
+                        job_completion_timeout_s=self._job_completion_timeout_s,
                         elapsed_s=duration_ms // 1000,
                     )
 

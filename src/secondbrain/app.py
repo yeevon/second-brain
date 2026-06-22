@@ -151,6 +151,14 @@ def ensure_stale_lease_reaper_task(
     )
 
 
+_STARTUP_TASK_ATTR_TO_KEY = {
+    "reaper_task": "reaper",
+    "periodic_task": "reconcile",
+    "delivery_task": "delivery",
+    "worker_task": "classifier",
+}
+
+
 def ensure_heartbeat_task(
     *,
     startup,
@@ -162,6 +170,17 @@ def ensure_heartbeat_task(
 ) -> None:
     if startup.heartbeat_task is not None:
         return
+
+    def _get_task_handles() -> dict:
+        # SB-137: resolved each heartbeat tick so tasks started after the
+        # heartbeat coroutine is created are still visible.
+        handles = {}
+        for attr, key in _STARTUP_TASK_ATTR_TO_KEY.items():
+            t = getattr(startup, attr, None)
+            if t is not None:
+                handles[key] = t
+        return handles
+
     startup.heartbeat_task = asyncio.create_task(
         run_capture_service_heartbeat(
             ledger=capture_service,
@@ -169,6 +188,7 @@ def ensure_heartbeat_task(
             interval_seconds=interval_seconds,
             reaper_liveness_threshold_s=reaper_liveness_threshold_s,
             reconcile_liveness_threshold_s=reconcile_liveness_threshold_s,
+            get_task_handles=_get_task_handles,
         )
     )
 

@@ -43,6 +43,18 @@ async def run_delivery_dispatcher(
 ) -> None:
     while True:
         await asyncio.sleep(settings.delivery_dispatch_interval_seconds)
+        # SB-137: write delivery heartbeat before each pass so liveness checks
+        # can distinguish a running dispatcher from one that has crashed.
+        try:
+            ledger.set_system_state(
+                "delivery_last_heartbeat_at",
+                datetime.now(UTC).isoformat(),
+            )
+        except Exception as exc:
+            log_metadata(
+                "delivery_heartbeat_write_failed",
+                error_type=type(exc).__name__,
+            )
         try:
             await _run_one_dispatch_pass(
                 settings=settings,

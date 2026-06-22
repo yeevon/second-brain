@@ -115,6 +115,16 @@ async def run_capture_worker(
     classifier_client: Any | None = None,
 ) -> None:
     while True:
+        # SB-137: write classifier heartbeat each iteration so liveness checks
+        # can detect a crashed worker distinct from one that is idle.
+        try:
+            from datetime import UTC, datetime
+            capture_service.set_system_state(
+                "classifier_last_heartbeat_at",
+                datetime.now(UTC).isoformat(),
+            )
+        except Exception:
+            pass
         capture_id = await queue.get()
         try:
             await process_capture_once(

@@ -524,18 +524,63 @@ def test_submit_after_close_raises(tmp_path):
 # SB-136: timeout env vars — queue_wait_timeout_s
 # ---------------------------------------------------------------------------
 
-def test_queue_wait_timeout_raises_and_logs_on_stuck_job(tmp_path, capsys):
-    """A job that never completes must raise RuntimeError within queue_wait_timeout_s."""
-    release = threading.Event()
+def test_queue_full_raises_immediately(tmp_path, capsys):
+    """Submitting to a full queue must raise RuntimeError without blocking."""
+    # Pause the worker so we can fill the queue without it draining entries.
+    pause = threading.Event()
+    resumed = threading.Event()
+    filler_queued = threading.Event()
 
-    def blocking_op(conn):
-        release.wait(timeout=10)
-        return 42
+    def pausing_op(conn):
+        resumed.set()
+        pause.wait(timeout=10)
+        return 1
 
     rt = SQLiteRuntime(
         tmp_path / "test.sqlite3",
-        queue_wait_timeout_s=1,
-        job_completion_timeout_s=60,
+        job_queue_maxsize=1,
+        queue_wait_timeout_s=30,
+        job_completion_timeout_s=30,
+    )
+    try:
+        # Thread 1: submit pausing_op; worker picks it up, signals resumed, then blocks.
+        t1 = threading.Thread(target=rt.read, kwargs={"operation": pausing_op, "operation_name": "pauser"})
+        t1.start()
+        resumed.wait(timeout=5)  # worker is now inside pausing_op, queue is empty
+
+        # Thread 2: fill the single queue slot while the worker is blocked.
+        def _enqueue_filler():
+            rt.read(lambda conn: None, operation_name="filler")
+        t2 = threading.Thread(target=_enqueue_filler)
+        t2.start()
+        import time; time.sleep(0.05)  # let t2 put job into queue
+
+        # Queue is now full — this must raise immediately.
+        with pytest.raises(RuntimeError, match="queue is full"):
+            rt.read(lambda conn: None, operation_name="overflow_op")
+        output = capsys.readouterr().out
+        assert "sqlite_queue_full" in output
+    finally:
+        pause.set()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+        rt.close()
+
+
+def test_stuck_job_times_out_via_job_completion_timeout(tmp_path, capsys):
+    """A job executing past job_completion_timeout_s must cause the caller to raise RuntimeError."""
+    release = threading.Event()
+
+    def blocking_op(conn):
+        # blocks indefinitely until released
+        release.wait()
+        return 42
+
+    # total caller timeout = queue_wait(0s) + job_completion(1s) = 1s
+    rt = SQLiteRuntime(
+        tmp_path / "test.sqlite3",
+        queue_wait_timeout_s=0,
+        job_completion_timeout_s=1,
     )
     try:
         with pytest.raises(RuntimeError, match="timed out"):
@@ -558,7 +603,7 @@ def test_job_completion_timeout_logs_slow_job(tmp_path, capsys):
     try:
         rt.read(lambda conn: None, operation_name="slow_op")
         output = capsys.readouterr().out
-        assert "sqlite_job_completion_timeout" in output
+        assert "sqlite_job_slow" in output
     finally:
         rt.close()
 

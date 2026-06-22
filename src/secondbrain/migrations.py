@@ -394,6 +394,29 @@ def run_migrations(connection: sqlite3.Connection) -> None:
         _apply(connection, migration)
 
 
+import re as _re
+
+_CREATE_TABLE_IF_NOT_EXISTS_RE = _re.compile(
+    r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+(\w+)", _re.IGNORECASE
+)
+
+
+def _tables_created_by_migration(migration: Migration) -> set[str]:
+    """Return table names this migration would create with CREATE TABLE IF NOT EXISTS."""
+    tables: set[str] = set()
+    for stmt in migration.statements:
+        for m in _CREATE_TABLE_IF_NOT_EXISTS_RE.finditer(stmt):
+            tables.add(m.group(1).lower())
+    return tables
+
+
+def _existing_table_names(connection: sqlite3.Connection) -> set[str]:
+    rows = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+    ).fetchall()
+    return {row[0].lower() for row in rows}
+
+
 def _apply(connection: sqlite3.Connection, migration: Migration) -> None:
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -405,10 +428,20 @@ def _apply(connection: sqlite3.Connection, migration: Migration) -> None:
             connection.commit()
             return
 
+        # SB-140: if this migration uses CREATE TABLE IF NOT EXISTS for tables
+        # that already exist, validate those tables BEFORE executing statements.
+        # This prevents IF NOT EXISTS clauses from silently patching a legacy DB
+        # whose schema does not meet expectations.
+        tables_this_migration_creates = _tables_created_by_migration(migration)
+        already_existing = tables_this_migration_creates & _existing_table_names(connection)
+        if already_existing:
+            for assertion in migration.assertions:
+                if assertion.table.lower() in already_existing:
+                    assertion.verify(connection)
+
         for statement in migration.statements:
             connection.execute(statement)
 
-        # TD-005: run schema assertions before recording the migration version
         for assertion in migration.assertions:
             assertion.verify(connection)
 

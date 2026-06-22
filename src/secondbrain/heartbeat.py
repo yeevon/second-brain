@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Callable, Literal
 
 from secondbrain.observability import log_metadata
 
@@ -38,6 +38,9 @@ async def run_capture_service_heartbeat(
     reconcile_liveness_threshold_s: int = 300,
     delivery_liveness_threshold_s: int = 300,
     classifier_liveness_threshold_s: int = 300,
+    # SB-137: callable so handles are resolved dynamically each tick, picking up
+    # tasks that are started after the heartbeat coroutine is created.
+    get_task_handles: "Callable[[], dict[str, asyncio.Task]] | None" = None,
 ) -> None:
     while True:
         try:
@@ -51,12 +54,14 @@ async def run_capture_service_heartbeat(
                     instance_id=instance_id,
                 )
                 return
+            handles = get_task_handles() if get_task_handles is not None else None
             _check_background_task_liveness(
                 ledger=ledger,
                 reaper_liveness_threshold_s=reaper_liveness_threshold_s,
                 reconcile_liveness_threshold_s=reconcile_liveness_threshold_s,
                 delivery_liveness_threshold_s=delivery_liveness_threshold_s,
                 classifier_liveness_threshold_s=classifier_liveness_threshold_s,
+                task_handles=handles,
             )
         except Exception as exc:
             log_metadata(
@@ -89,9 +94,11 @@ def _check_background_task_liveness(
     reconcile_liveness_threshold_s: int,
     delivery_liveness_threshold_s: int = 300,
     classifier_liveness_threshold_s: int = 300,
+    task_handles: dict[str, asyncio.Task] | None = None,
 ) -> None:
     now = datetime.now(UTC)
     background_task_stale = False
+    handles = task_handles or {}
 
     thresholds = {
         "reaper": reaper_liveness_threshold_s,
@@ -104,6 +111,20 @@ def _check_background_task_liveness(
         keys = _TASK_KEYS[task]
         status_val = ledger.get_system_state(keys["status"])
         if status_val == "not_applicable":
+            continue
+
+        # SB-137: check asyncio task handle for unexpected completion first
+        handle = handles.get(task)
+        if handle is not None and handle.done():
+            exc = handle.exception() if not handle.cancelled() else None
+            log_metadata(
+                "background_task_completed_unexpectedly",
+                task=task,
+                cancelled=handle.cancelled(),
+                error_type=type(exc).__name__ if exc else None,
+            )
+            _safe_set(ledger, keys["status"], "completed_unexpectedly")
+            background_task_stale = True
             continue
 
         heartbeat_str = ledger.get_system_state(keys["heartbeat"])

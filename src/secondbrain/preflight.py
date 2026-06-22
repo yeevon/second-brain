@@ -42,6 +42,30 @@ def run_preflight(*, compose: bool = False, compose_dir: Path | None = None) -> 
     if ledger_path is not None:
         checks.append(_check_sqlite_openable(ledger_path))
 
+    # SB-139: shared required runtime config (both modes)
+    for var in (
+        "DISCORD_GUILD_ID",
+        "DISCORD_CAPTURE_CHANNEL_ID",
+        "DISCORD_ALLOWED_USER_ID",
+        "STARTUP_RECONCILE_LIMIT",
+        "CAPTURE_API_HOST",
+    ):
+        checks.append(_check_present(var, (os.environ.get(var) or "").strip()))
+
+    internal_token_common = (os.environ.get("CAPTURE_SERVICE_INTERNAL_TOKEN") or "").strip()
+    checks.append(_check_token_min_length(
+        "CAPTURE_SERVICE_INTERNAL_TOKEN", internal_token_common,
+        min_len=32, template="deploy/capture-service.env.example",
+    ))
+
+    port_raw = (os.environ.get("CAPTURE_API_PORT") or "").strip()
+    port_check = _check_int_range("CAPTURE_API_PORT", port_raw, min_val=1, max_val=65535,
+                                  template="deploy/capture-service.env.example")
+    if port_check is not None:
+        checks.append(port_check)
+    elif not port_raw:
+        checks.append(PreflightCheck("CAPTURE_API_PORT", False, "missing"))
+
     # Mode-specific checks
     if mode == "local-full":
         checks.extend(_local_full_checks())
@@ -150,12 +174,6 @@ def _check_int_range(name: str, raw: str, *, min_val: int | None = None, max_val
 def _capture_only_checks() -> list[PreflightCheck]:
     checks: list[PreflightCheck] = []
 
-    internal_token = (os.environ.get("CAPTURE_SERVICE_INTERNAL_TOKEN") or "").strip()
-    checks.append(_check_token_min_length(
-        "CAPTURE_SERVICE_INTERNAL_TOKEN", internal_token,
-        min_len=32, template="deploy/capture-service.env.example",
-    ))
-
     downstream_enabled = (os.environ.get("DOWNSTREAM_DELIVERY_ENABLED") or "").strip().lower() == "true"
     if downstream_enabled:
         webhook_url = (os.environ.get("N8N_INTAKE_WEBHOOK_URL") or "").strip()
@@ -172,9 +190,8 @@ def _capture_only_checks() -> list[PreflightCheck]:
             min_len=32, template="deploy/capture-service.env.example",
         ))
 
-    # Numeric ranges for common tunable vars
+    # Numeric ranges for tunable vars specific to capture-only mode
     numeric_checks = [
-        ("CAPTURE_API_PORT",                        1,    65535, "deploy/capture-service.env.example"),
         ("PERIODIC_RECONCILE_INTERVAL_SECONDS",     1,    None,  "deploy/capture-service.env.example"),
         ("PERIODIC_RECONCILE_LIMIT",                1,    None,  "deploy/capture-service.env.example"),
         ("DELIVERY_RETRY_MAX_ATTEMPTS",             1,    None,  "deploy/capture-service.env.example"),
