@@ -415,3 +415,34 @@ def test_acknowledge_inbox_sends_classification():
     assert "classification" in body, (
         "Acknowledge Inbox must include classification field so note_type is stored in ledger"
     )
+
+
+def test_writer_service_nodes_send_raw_text_without_null_fallback():
+    """TD-03: writer-service nodes must pass raw_text directly — no ?? \"\" fallback.
+
+    A fallback silently turns a missing or null raw_text into an empty raw artifact,
+    defeating the immutability guarantee. The required field on writer-service will
+    reject the request with 422 if capture-service fails to provide it.
+    """
+    wf = _fixture()
+    nodes = _writer_service_nodes(wf)
+    assert len(nodes) == 2
+    for node in nodes:
+        body = node["parameters"].get("jsonBody", "")
+        assert "raw_text" in body, f"Node {node['name']!r} must include raw_text"
+        assert 'raw_text ?? ""' not in body, (
+            f"Node {node['name']!r} must not fall back ?? \"\" for raw_text — "
+            "missing raw_text must propagate as a 422 from writer-service, not silently become empty"
+        )
+
+
+def test_writer_service_nodes_send_attachment_metadata():
+    """TD-03: writer-service nodes must forward attachment_metadata from Get Capture."""
+    wf = _fixture()
+    nodes = _writer_service_nodes(wf)
+    assert len(nodes) == 2
+    for node in nodes:
+        body = node["parameters"].get("jsonBody", "")
+        assert "attachment_metadata" in body, (
+            f"Node {node['name']!r} must include attachment_metadata from Get Capture"
+        )

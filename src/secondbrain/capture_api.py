@@ -178,6 +178,7 @@ def create_capture_api(*, capture_service: CaptureService, internal_token: str) 
             raw_text=None if capture.is_sensitive else capture.raw_text,
             is_sensitive=capture.is_sensitive,
             has_attachments=capture.has_attachments,
+            attachment_metadata=capture.attachment_metadata,
             delivery_attempt=capture.delivery_attempts,
             status=capture.status,
             delivery_status=capture.delivery_status,

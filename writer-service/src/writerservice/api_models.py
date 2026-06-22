@@ -39,6 +39,13 @@ class Classification(BaseModel):
         return [tag.strip().lower() for tag in tags if tag.strip()]
 
 
+class AttachmentMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str
+    content_type: str | None = None
+
+
 class FileNoteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -50,6 +57,8 @@ class FileNoteRequest(BaseModel):
     prompt_version: str = Field(min_length=1)
     classification: Classification
     inbox_reason: str | None = None
+    raw_text: str
+    attachments: list[AttachmentMetadata] = []
 
     @field_validator("capture_id")
     @classmethod
@@ -64,6 +73,8 @@ class FileNoteResponse(BaseModel):
     note_path: str
     git_commit_hash: str | None
     idempotent: bool
+    raw_capture_path: str
+    raw_sha256: str
 
 
 class HealthResponse(BaseModel):

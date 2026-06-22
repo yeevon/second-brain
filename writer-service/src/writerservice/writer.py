@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import re
 import subprocess
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from writerservice.api_models import Classification
+from writerservice.api_models import AttachmentMetadata, Classification
 from writerservice.git_errors import CaptureDuplicateError, PathTraversalError
 
 logger = logging.getLogger(__name__)
@@ -32,12 +35,18 @@ FOLDER_MAPPING = {
 _TRAVERSAL_RE = re.compile(r"\.\.|/|\\|\x00")
 
 
+class RawHashMismatchError(Exception):
+    """Raised when an existing raw file has a different hash than the incoming raw body."""
+
+
 @dataclass(frozen=True)
 class WriteResult:
     note_path: str
     absolute_path: Path
     created: bool
     git_commit_hash: str | None = None
+    raw_capture_path: str = ""
+    raw_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -70,6 +79,8 @@ class VaultWriter:
         prompt_version: str,
         delivery_attempt: int,
         inbox_reason: str | None,
+        raw_text: str = "",
+        attachments: list[AttachmentMetadata] | None = None,
         git_sync_enabled: bool = False,
     ) -> WriteResult:
         from writerservice.flock import vault_write_lock
@@ -85,6 +96,8 @@ class VaultWriter:
                 prompt_version=prompt_version,
                 delivery_attempt=delivery_attempt,
                 inbox_reason=inbox_reason,
+                raw_text=raw_text,
+                attachments=attachments or [],
                 git_sync_enabled=git_sync_enabled,
             )
 
@@ -99,6 +112,8 @@ class VaultWriter:
         prompt_version: str,
         delivery_attempt: int,
         inbox_reason: str | None,
+        raw_text: str,
+        attachments: list[AttachmentMetadata],
         git_sync_enabled: bool,
     ) -> WriteResult:
         from writerservice.git_ops import (
@@ -113,6 +128,8 @@ class VaultWriter:
             git_rev_parse_head,
         )
 
+        created_at = created_at.astimezone(UTC)
+
         if git_sync_enabled:
             check_index_lock(self.vault_path)
             git_fetch(self.vault_path)
@@ -123,11 +140,58 @@ class VaultWriter:
             commit_hash: str | None = None
             if git_sync_enabled:
                 commit_hash = git_log_hash_for_path(self.vault_path, existing_path)
+                check_working_tree_clean(self.vault_path)
+            # Always write/verify raw even on idempotent replay — ensures the raw file
+            # exists and its body hash matches incoming (detects missing or corrupted raw).
+            raw_body = build_raw_body(raw_text, attachments)
+            raw_hash = compute_raw_sha256(raw_body)
+            rel_raw = raw_capture_path(capture_id, created_at)
+            raw_abs = self.vault_path / rel_raw
+            pre_recovery_head: str | None = None
+            if git_sync_enabled:
+                pre_recovery_head = git_rev_parse_head(self.vault_path)
+            raw_created = False
+            try:
+                raw_created = write_or_verify_raw_capture(
+                    raw_abs=raw_abs,
+                    capture_id=capture_id,
+                    source_message_id=source_message_id,
+                    created_at=created_at,
+                    raw_body=raw_body,
+                    raw_hash=raw_hash,
+                )
+                if raw_created and git_sync_enabled:
+                    git_add(self.vault_path, rel_raw)
+                    git_commit(
+                        self.vault_path,
+                        f"raw: recover missing raw file for {capture_id}",
+                    )
+                    commit_hash = git_rev_parse_head(self.vault_path)
+                    git_push(self.vault_path)
+            except Exception:
+                if git_sync_enabled and raw_created and pre_recovery_head is not None:
+                    subprocess.run(
+                        ["git", "reset", "--hard", pre_recovery_head],
+                        cwd=self.vault_path,
+                        check=False,
+                        capture_output=True,
+                        timeout=15,
+                    )
+                    subprocess.run(
+                        ["git", "clean", "-f", rel_raw],
+                        cwd=self.vault_path,
+                        check=False,
+                        capture_output=True,
+                        timeout=15,
+                    )
+                raise
             return WriteResult(
                 note_path=_relative_posix(existing_path, self.vault_path),
                 absolute_path=existing_path,
                 created=False,
                 git_commit_hash=commit_hash,
+                raw_capture_path=rel_raw,
+                raw_sha256=raw_hash,
             )
 
         if git_sync_enabled:
@@ -144,6 +208,22 @@ class VaultWriter:
         if note_path.exists():
             raise FileExistsError(f"refusing to overwrite unrelated note: {note_path}")
 
+        # --- raw substrate ---
+        raw_body = build_raw_body(raw_text, attachments)
+        raw_hash = compute_raw_sha256(raw_body)
+        rel_raw = raw_capture_path(capture_id, created_at)
+        raw_abs = self.vault_path / rel_raw
+
+        # write_or_verify raises RawHashMismatchError on hash collision
+        raw_created = write_or_verify_raw_capture(
+            raw_abs=raw_abs,
+            capture_id=capture_id,
+            source_message_id=source_message_id,
+            created_at=created_at,
+            raw_body=raw_body,
+            raw_hash=raw_hash,
+        )
+
         pre_write_head: str | None = None
         audit_log_existed = self.audit_log_path.exists()
         if git_sync_enabled:
@@ -157,6 +237,8 @@ class VaultWriter:
                 classification=classification,
                 model=model,
                 prompt_version=prompt_version,
+                raw_capture_path=rel_raw,
+                raw_sha256=raw_hash,
             )
             note_path.write_text(markdown, encoding="utf-8")
 
@@ -164,13 +246,15 @@ class VaultWriter:
             self._append_audit_event(
                 capture_id=capture_id,
                 note_path=relative_path,
+                raw_capture_path=rel_raw,
+                raw_sha256=raw_hash,
                 delivery_attempt=delivery_attempt,
                 idempotent=False,
             )
 
             git_hash: str | None = None
             if git_sync_enabled:
-                git_add(self.vault_path, relative_path, "99_log/events.ndjson")
+                git_add(self.vault_path, relative_path, rel_raw, "99_log/events.ndjson")
                 git_commit(
                     self.vault_path,
                     f"note: {capture_id} via writer-service",
@@ -184,6 +268,7 @@ class VaultWriter:
                     self.vault_path,
                     pre_write_head,
                     note_path,
+                    raw_abs if raw_created else None,
                     audit_log_existed,
                     self.audit_log_path,
                 )
@@ -194,6 +279,8 @@ class VaultWriter:
             absolute_path=note_path,
             created=True,
             git_commit_hash=git_hash,
+            raw_capture_path=rel_raw,
+            raw_sha256=raw_hash,
         )
 
     def move_note(
@@ -342,10 +429,17 @@ class VaultWriter:
     def _find_all_notes_by_capture_id(self, capture_id: str) -> list[Path]:
         if not self.vault_path.exists():
             return []
+        raw_dir = self.vault_path / "00_raw"
         found: list[Path] = []
         for path in self.vault_path.rglob("*.md"):
             if not path.is_file():
                 continue
+            # Skip raw substrate files — they are not sanitized notes
+            try:
+                path.relative_to(raw_dir)
+                continue
+            except ValueError:
+                pass
             text = path.read_text(encoding="utf-8")
             if _frontmatter_capture_id(text) == capture_id:
                 found.append(path)
@@ -392,6 +486,8 @@ class VaultWriter:
         *,
         capture_id: str,
         note_path: str,
+        raw_capture_path: str = "",
+        raw_sha256: str = "",
         delivery_attempt: int,
         idempotent: bool,
     ) -> None:
@@ -401,6 +497,8 @@ class VaultWriter:
             log_path=self.audit_log_path,
             capture_id=capture_id,
             note_path=note_path,
+            raw_capture_path=raw_capture_path,
+            raw_sha256=raw_sha256,
             delivery_attempt=delivery_attempt,
             idempotent=idempotent,
         )
@@ -434,6 +532,7 @@ def _rollback_to_head(
     vault_path: Path,
     pre_write_head: str,
     written_note: Path,
+    written_raw: Path | None,
     audit_log_existed: bool,
     audit_log_path: Path,
 ) -> None:
@@ -445,8 +544,11 @@ def _rollback_to_head(
         capture_output=True,
         timeout=15,
     )
+    files_to_clean = [rel_note]
+    if written_raw is not None:
+        files_to_clean.append(str(written_raw.relative_to(vault_path)))
     clean_result = subprocess.run(
-        ["git", "clean", "-f", rel_note],
+        ["git", "clean", "-f", *files_to_clean],
         cwd=vault_path,
         check=False,
         capture_output=True,
@@ -472,6 +574,8 @@ def render_markdown(
     classification: Classification,
     model: str,
     prompt_version: str,
+    raw_capture_path: str = "",
+    raw_sha256: str = "",
 ) -> str:
     lines = [
         "---",
@@ -509,6 +613,18 @@ def render_markdown(
             f"model: {yaml_scalar(model)}",
             f"prompt_version: {yaml_scalar(prompt_version)}",
             "schema_version: 1",
+        ]
+    )
+
+    if raw_capture_path:
+        lines.append(f"raw_capture_path: {yaml_scalar(raw_capture_path)}")
+    if raw_sha256:
+        lines.append(f"raw_sha256: {yaml_scalar(raw_sha256)}")
+    if raw_capture_path:
+        lines.append(f"derived_from_capture_id: {yaml_scalar(capture_id)}")
+
+    lines.extend(
+        [
             "---",
             "",
             f"# {classification.title}",
@@ -526,6 +642,145 @@ def render_markdown(
         )
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def build_raw_body(raw_text: str, attachments: list[AttachmentMetadata]) -> str:
+    has_text = bool(raw_text)
+    has_attachments = bool(attachments)
+
+    parts: list[str] = []
+    if has_text:
+        parts.append(raw_text)
+
+    if has_attachments:
+        att_lines = ["## Attachments", ""]
+        for att in attachments:
+            if att.content_type is not None:
+                att_lines.append(f'- filename: "{att.filename}", content_type: "{att.content_type}"')
+            else:
+                att_lines.append(f'- filename: "{att.filename}", content_type: null')
+        att_block = "\n".join(att_lines)
+        if has_text:
+            parts.append("\n\n" + att_block)
+        else:
+            parts.append(att_block)
+
+    return "".join(parts)
+
+
+def raw_capture_path(capture_id: str, created_at: datetime) -> str:
+    """Return the deterministic vault-relative posix path for a raw capture file."""
+    return f"00_raw/{created_at.strftime('%Y/%m')}/{capture_id}.md"
+
+
+def compute_raw_sha256(raw_body: str) -> str:
+    return hashlib.sha256(raw_body.encode("utf-8")).hexdigest()
+
+
+def render_raw_markdown(
+    *,
+    capture_id: str,
+    source_message_id: str,
+    created_at: datetime,
+    raw_body: str,
+    raw_hash: str,
+) -> str:
+    frontmatter = "\n".join([
+        "---",
+        f"capture_id: {yaml_scalar(capture_id)}",
+        f"created_at: {yaml_scalar(_iso(created_at))}",
+        f"source_message_id: {json.dumps(source_message_id)}",
+        f"raw_sha256: {yaml_scalar(raw_hash)}",
+        "schema_version: 1",
+        "---",
+    ])
+    # Preserve raw_body verbatim — no rstrip, no normalization.
+    return frontmatter + "\n\n" + raw_body + "\n"
+
+
+def parse_raw_file(path: Path) -> tuple[str, str]:
+    """Return (raw_body, raw_sha256) parsed from an existing raw file.
+
+    The raw file format is:
+        ---
+        <frontmatter>
+        ---
+
+        <raw_body>
+    render_raw_markdown appends a trailing newline via .rstrip() + "\n".
+    parse_raw_file reverses that by stripping the exact leading blank line and
+    trailing newline that render_raw_markdown adds.
+    """
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        return text, ""
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return text, ""
+    raw_sha256 = ""
+    for line in text[4:end].splitlines():
+        if line.startswith("raw_sha256:"):
+            raw_sha256 = line[len("raw_sha256:"):].strip().strip('"')
+            break
+    # After "\n---\n" there is a blank line ("\n") before the body.
+    after_fence = text[end + 5:]  # skip "\n---\n"
+    if after_fence.startswith("\n"):
+        after_fence = after_fence[1:]  # skip the blank separator line
+    # render_raw_markdown ends with ".rstrip() + '\n'" so we strip that trailing newline
+    if after_fence.endswith("\n"):
+        after_fence = after_fence[:-1]
+    return after_fence, raw_sha256
+
+
+def write_or_verify_raw_capture(
+    *,
+    raw_abs: Path,
+    capture_id: str,
+    source_message_id: str,
+    created_at: datetime,
+    raw_body: str,
+    raw_hash: str,
+) -> bool:
+    """Write raw capture file atomically, or verify existing file hash matches.
+
+    Returns True if a new file was created, False if idempotent (already exists with matching hash).
+    Raises RawHashMismatchError if the file exists with a different hash.
+    """
+    if raw_abs.exists():
+        existing_body, existing_hash = parse_raw_file(raw_abs)
+        recomputed = compute_raw_sha256(existing_body)
+        incoming_hash = raw_hash
+        if existing_hash == incoming_hash and recomputed == incoming_hash:
+            return False
+        raise RawHashMismatchError(
+            f"raw file hash mismatch for {capture_id}: "
+            f"existing={existing_hash!r} recomputed={recomputed!r} incoming={incoming_hash!r}"
+        )
+
+    raw_abs.parent.mkdir(parents=True, exist_ok=True)
+    content = render_raw_markdown(
+        capture_id=capture_id,
+        source_message_id=source_message_id,
+        created_at=created_at,
+        raw_body=raw_body,
+        raw_hash=raw_hash,
+    )
+    # Atomic write: temp file + rename
+    dir_ = raw_abs.parent
+    fd, tmp_path = tempfile.mkstemp(dir=dir_, prefix=".raw_tmp_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp_path, raw_abs)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return True
 
 
 def sanitize_slug(value: str) -> str:

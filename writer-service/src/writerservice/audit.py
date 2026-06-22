@@ -10,11 +10,13 @@ def append_audit_event(
     log_path: Path,
     capture_id: str,
     note_path: str,
+    raw_capture_path: str = "",
+    raw_sha256: str = "",
     delivery_attempt: int,
     idempotent: bool,
 ) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    event = {
+    event: dict = {
         "event": "NOTE_FILED",
         "capture_id": capture_id,
         "note_path": note_path,
@@ -22,6 +24,10 @@ def append_audit_event(
         "idempotent": idempotent,
         "timestamp": _now_iso(),
     }
+    if raw_capture_path:
+        event["raw_capture_path"] = raw_capture_path
+    if raw_sha256:
+        event["raw_sha256"] = raw_sha256
     with log_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(event, separators=(",", ":")) + "\n")
 

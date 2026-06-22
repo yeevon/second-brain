@@ -28,6 +28,7 @@ _VALID_PAYLOAD = {
         "confidence": 0.9,
     },
     "inbox_reason": None,
+    "raw_text": "",
 }
 
 

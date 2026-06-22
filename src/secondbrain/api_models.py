@@ -196,12 +196,13 @@ class WorkflowErrorResponse(BaseModel):
 
 
 class DownstreamCaptureResponse(BaseModel):
-    """Minimal capture envelope exposed to n8n — no raw secrets, no audit fields."""
+    """Minimal capture envelope exposed to n8n. Omits audit fields; raw_text is null for sensitive captures."""
 
     capture_id: str
     raw_text: str | None  # null when is_sensitive=True
     is_sensitive: bool
     has_attachments: bool
+    attachment_metadata: list[dict[str, Any]]
     delivery_attempt: int
     status: str
     delivery_status: str
