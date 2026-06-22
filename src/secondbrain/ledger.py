@@ -182,6 +182,38 @@ class Ledger:
             event_payload={"receipt_message_id": receipt_message_id},
         )
 
+    _VALID_RECEIPT_SYNC_STATUSES = frozenset({"clean", "failed", "pending_repair", "not_applicable"})
+
+    def set_receipt_sync_status(
+        self,
+        capture_id: str,
+        *,
+        status: str,
+        last_attempt_at: str | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        if status not in self._VALID_RECEIPT_SYNC_STATUSES:
+            raise ValueError(
+                f"Invalid receipt_sync_status {status!r}; "
+                f"must be one of {sorted(self._VALID_RECEIPT_SYNC_STATUSES)}"
+            )
+        self._write(
+            "set_receipt_sync_status",
+            lambda conn: self._set_receipt_sync_status(
+                conn,
+                capture_id=capture_id,
+                status=status,
+                last_attempt_at=last_attempt_at,
+                error_type=error_type,
+            ),
+        )
+
+    def get_out_of_sync_receipts(self) -> list[CaptureRecord]:
+        return self._read(
+            "get_out_of_sync_receipts",
+            self._get_out_of_sync_receipts,
+        )
+
     def mark_classifying(self, capture_id: str) -> bool:
         return self._write(
             "mark_classifying",
@@ -2277,6 +2309,42 @@ class Ledger:
         return int(row["c"])
 
     # ------------------------------------------------------------------
+    # SB-142: Receipt sync tracking private implementations
+    # ------------------------------------------------------------------
+
+    def _set_receipt_sync_status(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        capture_id: str,
+        status: str,
+        last_attempt_at: str | None,
+        error_type: str | None,
+    ) -> None:
+        now = _iso(_now())
+        conn.execute(
+            """
+            UPDATE captures
+            SET receipt_sync_status = ?,
+                receipt_sync_last_attempt_at = ?,
+                receipt_sync_last_error_type = ?,
+                updated_at = ?
+            WHERE capture_id = ?
+            """,
+            (status, last_attempt_at, error_type, now, capture_id),
+        )
+
+    def _get_out_of_sync_receipts(self, conn: sqlite3.Connection) -> list[CaptureRecord]:
+        rows = conn.execute(
+            """
+            SELECT * FROM captures
+            WHERE receipt_sync_status NOT IN ('clean', 'not_applicable')
+            ORDER BY id
+            """
+        ).fetchall()
+        return [_record_from_row(row) for row in rows]
+
+    # ------------------------------------------------------------------
     # SB-118: Correction private implementations
     # ------------------------------------------------------------------
 
@@ -2668,6 +2736,9 @@ def _record_from_row(row: sqlite3.Row) -> CaptureRecord:
         delivery_reason_type=row["delivery_reason_type"],
         clarification_status=row["clarification_status"] if "clarification_status" in keys else None,
         clarification_question=row["clarification_question"] if "clarification_question" in keys else None,
+        receipt_sync_status=row["receipt_sync_status"] if "receipt_sync_status" in keys else "clean",
+        receipt_sync_last_attempt_at=row["receipt_sync_last_attempt_at"] if "receipt_sync_last_attempt_at" in keys else None,
+        receipt_sync_last_error_type=row["receipt_sync_last_error_type"] if "receipt_sync_last_error_type" in keys else None,
     )
 
 

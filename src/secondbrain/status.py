@@ -109,6 +109,9 @@ class OperationalStatusSnapshot:
     delivery_last_error_type: str | None
     classifier_last_error_type: str | None
 
+    # SB-142: out-of-sync receipts
+    out_of_sync_receipts: list[dict]
+
 
 def calculate_capture_service_health(
     *,
@@ -302,6 +305,28 @@ def _query_snapshot(
     except Exception:
         receipt_repairs_today = 0
 
+    # SB-142: out-of-sync receipts
+    try:
+        osr_rows = conn.execute(
+            """
+            SELECT capture_id, receipt_sync_status, receipt_sync_last_attempt_at, receipt_sync_last_error_type
+            FROM captures
+            WHERE receipt_sync_status NOT IN ('clean', 'not_applicable')
+            ORDER BY id
+            """
+        ).fetchall()
+        out_of_sync_receipts = [
+            {
+                "capture_id": r["capture_id"],
+                "receipt_sync_status": r["receipt_sync_status"],
+                "receipt_sync_last_attempt_at": r["receipt_sync_last_attempt_at"],
+                "receipt_sync_last_error_type": r["receipt_sync_last_error_type"],
+            }
+            for r in osr_rows
+        ]
+    except Exception:
+        out_of_sync_receipts = []
+
     return OperationalStatusSnapshot(
         generated_at=now,
         timezone_name=settings.status_timezone,
@@ -343,6 +368,7 @@ def _query_snapshot(
         reconcile_last_error_type=get_state("reconcile_last_error_type"),
         delivery_last_error_type=get_state("delivery_last_error_type"),
         classifier_last_error_type=get_state("classifier_last_error_type"),
+        out_of_sync_receipts=out_of_sync_receipts,
     )
 
 
@@ -404,4 +430,12 @@ def format_operational_status(snapshot: OperationalStatusSnapshot) -> str:
         f"  last successful backup: {_fmt(snapshot.last_successful_backup_at)}",
         f"  last successful restore validation: {_fmt(snapshot.last_successful_restore_validation_at)}",
     ]
+    if snapshot.out_of_sync_receipts:
+        lines += ["", "Out-of-sync receipts"]
+        for r in snapshot.out_of_sync_receipts:
+            lines.append(
+                f"  {r['capture_id']}: status={r['receipt_sync_status']}"
+                f" last_attempt={_fmt(r['receipt_sync_last_attempt_at'])}"
+                f" error={_fmt(r['receipt_sync_last_error_type'])}"
+            )
     return "\n".join(lines)

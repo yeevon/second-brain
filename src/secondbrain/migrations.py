@@ -384,6 +384,25 @@ _MIGRATIONS: list[Migration] = [
             ),
         ),
     ),
+    Migration(
+        version=8,
+        name="receipt_sync_tracking",
+        statements=(
+            "ALTER TABLE captures ADD COLUMN receipt_sync_status TEXT NOT NULL DEFAULT 'clean'",
+            "ALTER TABLE captures ADD COLUMN receipt_sync_last_attempt_at TEXT",
+            "ALTER TABLE captures ADD COLUMN receipt_sync_last_error_type TEXT",
+        ),
+        assertions=(
+            SchemaAssertion(
+                table="captures",
+                expected_columns=(
+                    ColumnSpec("receipt_sync_status", "TEXT", not_null=True),
+                    ColumnSpec("receipt_sync_last_attempt_at", "TEXT"),
+                    ColumnSpec("receipt_sync_last_error_type", "TEXT"),
+                ),
+            ),
+        ),
+    ),
 
 ]
 

@@ -159,6 +159,10 @@ def test_minimal_schema_tables_columns_and_indexes_match_mvp(tmp_path):
         # Added by migration 005
         "clarification_status",
         "clarification_question",
+        # Added by migration 008
+        "receipt_sync_status",
+        "receipt_sync_last_attempt_at",
+        "receipt_sync_last_error_type",
     ]
     assert table_columns(ledger, "capture_events") == [
         "id",
@@ -335,7 +339,7 @@ def test_existing_mvp_database_is_adopted_without_data_loss(tmp_path):
     migration_count = ledger._runtime.read(
         lambda conn: conn.execute("SELECT COUNT(*) AS c FROM schema_migrations").fetchone()["c"]
     )
-    assert migration_count == 7  # 001–005 original + 006 vault_update_proposals + 007 approval_message
+    assert migration_count == 8  # 001–005 original + 006 vault_update_proposals + 007 approval_message + 008 receipt_sync
     # Verify delivery columns were added and existing row has correct default
     capture = ledger.get_capture("SB-20260607-0001")
     assert capture.delivery_status == "PENDING_FORWARD"

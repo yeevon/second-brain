@@ -82,6 +82,9 @@ class CaptureRecord:
     delivery_reason_type: str | None = None
     clarification_status: str | None = None
     clarification_question: str | None = None
+    receipt_sync_status: str = "clean"
+    receipt_sync_last_attempt_at: str | None = None
+    receipt_sync_last_error_type: str | None = None
 
 
 @dataclass(frozen=True)
