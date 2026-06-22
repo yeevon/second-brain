@@ -47,10 +47,18 @@ def run_preflight(*, compose: bool = False, compose_dir: Path | None = None) -> 
         "DISCORD_GUILD_ID",
         "DISCORD_CAPTURE_CHANNEL_ID",
         "DISCORD_ALLOWED_USER_ID",
-        "STARTUP_RECONCILE_LIMIT",
         "CAPTURE_API_HOST",
     ):
         checks.append(_check_present(var, (os.environ.get(var) or "").strip()))
+
+    # STARTUP_RECONCILE_LIMIT: required presence + integer >= 1 (both modes)
+    reconcile_limit_raw = (os.environ.get("STARTUP_RECONCILE_LIMIT") or "").strip()
+    if not reconcile_limit_raw:
+        checks.append(PreflightCheck("STARTUP_RECONCILE_LIMIT", False, "missing"))
+    else:
+        result = _check_int_range("STARTUP_RECONCILE_LIMIT", reconcile_limit_raw, min_val=1,
+                                  template="deploy/capture-service.env.example")
+        checks.append(result if result is not None else PreflightCheck("STARTUP_RECONCILE_LIMIT", True, reconcile_limit_raw))
 
     internal_token_common = (os.environ.get("CAPTURE_SERVICE_INTERNAL_TOKEN") or "").strip()
     checks.append(_check_token_min_length(
@@ -141,27 +149,23 @@ def _local_full_checks() -> list[PreflightCheck]:
         else:
             checks.append(PreflightCheck("VAULT_PATH", False, f"{vault_path} does not exist or is not a directory"))
 
-    # SB-139: numeric/range validation for local-full runtime vars
-    local_full_numeric = [
-        ("CLASSIFIER_WORKER_COUNT",             1, None, "deploy/capture-service.env.example"),
-        ("CLASSIFIER_QUEUE_MAXSIZE",            1, None, "deploy/capture-service.env.example"),
-        ("STARTUP_RECONCILE_LIMIT",             1, None, "deploy/capture-service.env.example"),
-        ("PERIODIC_RECONCILE_INTERVAL_SECONDS", 1, None, "deploy/capture-service.env.example"),
-        ("PERIODIC_RECONCILE_LIMIT",            1, None, "deploy/capture-service.env.example"),
-        ("SQLITE_STARTUP_TIMEOUT_S",            1, None, "deploy/capture-service.env.example"),
-        ("SQLITE_QUEUE_WAIT_TIMEOUT_S",         1, None, "deploy/capture-service.env.example"),
-        ("SQLITE_JOB_COMPLETION_TIMEOUT_S",     1, None, "deploy/capture-service.env.example"),
-        ("SQLITE_SHUTDOWN_DRAIN_TIMEOUT_S",     1, None, "deploy/capture-service.env.example"),
-    ]
-    for var, lo, hi, tmpl in local_full_numeric:
+    # SB-139: required integer vars for local-full (missing = fail, not silent skip)
+    for var, lo, tmpl in (
+        ("CLASSIFIER_WORKER_COUNT",  1, "deploy/capture-service.env.example"),
+        ("CLASSIFIER_QUEUE_MAXSIZE", 1, "deploy/capture-service.env.example"),
+    ):
         raw = (os.environ.get(var) or "").strip()
-        result = _check_int_range(var, raw, min_val=lo, max_val=hi, template=tmpl)
-        if result is not None:
-            checks.append(result)
+        if not raw:
+            checks.append(PreflightCheck(var, False, f"missing — see {tmpl}"))
+        else:
+            result = _check_int_range(var, raw, min_val=lo, template=tmpl)
+            checks.append(result if result is not None else PreflightCheck(var, True, raw))
 
-    # CLASSIFICATION_CONFIDENCE_THRESHOLD must be a float in [0.0, 1.0]
+    # CLASSIFICATION_CONFIDENCE_THRESHOLD: required, float in [0.0, 1.0]
     conf_raw = (os.environ.get("CLASSIFICATION_CONFIDENCE_THRESHOLD") or "").strip()
-    if conf_raw:
+    if not conf_raw:
+        checks.append(PreflightCheck("CLASSIFICATION_CONFIDENCE_THRESHOLD", False, "missing"))
+    else:
         try:
             conf = float(conf_raw)
             if not (0.0 <= conf <= 1.0):
@@ -169,11 +173,27 @@ def _local_full_checks() -> list[PreflightCheck]:
                     "CLASSIFICATION_CONFIDENCE_THRESHOLD", False,
                     f"must be between 0.0 and 1.0, got {conf}",
                 ))
+            else:
+                checks.append(PreflightCheck("CLASSIFICATION_CONFIDENCE_THRESHOLD", True, conf_raw))
         except (ValueError, TypeError):
             checks.append(PreflightCheck(
                 "CLASSIFICATION_CONFIDENCE_THRESHOLD", False,
                 f"must be a float, got {conf_raw!r}",
             ))
+
+    # Optional numeric tunables — only checked if set
+    for var, lo, hi, tmpl in (
+        ("PERIODIC_RECONCILE_INTERVAL_SECONDS", 1, None, "deploy/capture-service.env.example"),
+        ("PERIODIC_RECONCILE_LIMIT",            1, None, "deploy/capture-service.env.example"),
+        ("SQLITE_STARTUP_TIMEOUT_S",            1, None, "deploy/capture-service.env.example"),
+        ("SQLITE_QUEUE_WAIT_TIMEOUT_S",         1, None, "deploy/capture-service.env.example"),
+        ("SQLITE_JOB_COMPLETION_TIMEOUT_S",     1, None, "deploy/capture-service.env.example"),
+        ("SQLITE_SHUTDOWN_DRAIN_TIMEOUT_S",     1, None, "deploy/capture-service.env.example"),
+    ):
+        raw = (os.environ.get(var) or "").strip()
+        result = _check_int_range(var, raw, min_val=lo, max_val=hi, template=tmpl)
+        if result is not None:
+            checks.append(result)
 
     return checks
 

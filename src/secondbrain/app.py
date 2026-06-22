@@ -256,6 +256,7 @@ async def run_local_full_runtime(settings: Settings) -> None:
         vault_writer=vault_writer,
     )
     mark_task_not_applicable(capture_service, "delivery")
+    mark_task_not_applicable(capture_service, "reaper")
     instance_id = initialize_capture_service_lifecycle(
         startup=startup,
         capture_service=capture_service,
