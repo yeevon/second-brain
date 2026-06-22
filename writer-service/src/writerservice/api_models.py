@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 AllowedFolder = Literal["people", "projects", "ideas", "learning", "admin", "inbox"]
 ActionStatus = Literal["open", "done"]
+ActionPriority = Literal["high", "medium", "low"]
 
 _CAPTURE_ID_RE = re.compile(r"^SB-\d{8}-\d{4}$")
 
@@ -17,6 +18,9 @@ class ClassifiedAction(BaseModel):
 
     text: str = Field(min_length=1)
     status: ActionStatus
+    due: str | None = None
+    priority: ActionPriority | None = None
+    project: str | None = None
 
 
 class Classification(BaseModel):
@@ -32,6 +36,7 @@ class Classification(BaseModel):
     needs_clarification: bool
     clarifying_question: str | None
     confidence: float = Field(ge=0.0, le=1.0)
+    note_date: str | None = None
 
     @field_validator("tags")
     @classmethod

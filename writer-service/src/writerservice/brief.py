@@ -269,7 +269,7 @@ def scan_weekly_brief(
         actions = _parse_actions(frontmatter)
         for action in actions:
             action_project = action.get("project") or note_project
-            if action.get("status") in ("done", "completed") and created_this_week:
+            if action.get("status") == "done" and created_this_week:
                 completed_tasks.append({
                     "title": action["text"],
                     "project": action_project,

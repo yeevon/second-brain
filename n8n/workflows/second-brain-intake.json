@@ -274,7 +274,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Build Gemini generateContent request — ask for full Classification matching models.py\nconst captureText = $('Get Capture').first().json.raw_text ?? '';\nconst prompt = [\n  'Classify the following personal note into a structured knowledge item.',\n  '',\n  'Allowed folder values: inbox, people, projects, ideas, learning, admin',\n  'Allowed action status values: open, done',\n  '',\n  'Capture:',\n  captureText,\n  '',\n  'Return compact JSON only. No explanation. No markdown. Body under 80 words. At most one action.',\n  'Respond with a single JSON object only (no markdown fences, no other text):',\n  '{',\n  '  \"folder\": \"inbox\",',\n  '  \"project\": null,',\n  '  \"note_type\": \"general\",',\n  '  \"title\": \"concise title\",',\n  '  \"tags\": [\"tag1\"],',\n  '  \"body\": \"brief note body\",',\n  '  \"actions\": [{\"text\": \"example action\", \"status\": \"open\"}],',\n  '  \"needs_clarification\": false,',\n  '  \"clarifying_question\": null,',\n  '  \"confidence\": 0.9',\n  '}',\n].join('\\n');\n\nreturn [{\n  json: {\n    contents: [{ parts: [{ text: prompt }] }],\n    generationConfig: { temperature: 0, maxOutputTokens: 2048 },\n  }\n}];"
+        "jsCode": "// Build Gemini generateContent request \u2014 ask for full Classification matching models.py\nconst captureText = $('Get Capture').first().json.raw_text ?? '';\nconst prompt = [\n  'Classify the following personal note into a structured knowledge item.',\n  '',\n  'Allowed folder values: inbox, people, projects, ideas, learning, admin',\n  'Allowed action status values: open, done',\n  '',\n  'Capture:',\n  captureText,\n  '',\n  'Return compact JSON only. No explanation. No markdown. Body under 80 words. At most one action.',\n  'Respond with a single JSON object only (no markdown fences, no other text):',\n  '{',\n  '  \"folder\": \"inbox\",',\n  '  \"project\": null,',\n  '  \"note_type\": \"general\",',\n  '  \"title\": \"concise title\",',\n  '  \"tags\": [\"tag1\"],',\n  '  \"body\": \"brief note body\",',\n  '  \"actions\": [{\"text\": \"example action\", \"status\": \"open\"}],',\n  '  \"needs_clarification\": false,',\n  '  \"clarifying_question\": null,',\n  '  \"confidence\": 0.9',\n  '}',\n].join('\\n');\n\nreturn [{\n  json: {\n    contents: [{ parts: [{ text: prompt }] }],\n    generationConfig: { temperature: 0, maxOutputTokens: 2048 },\n  }\n}];"
       },
       "id": "a1b2c3d4-6666-6666-6666-666666666666",
       "name": "Prepare Gemini Prompt",
@@ -314,7 +314,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Extract Classification — join all text parts in case Gemini splits output\nconst body = $input.first().json;\nconst parts = body?.candidates?.[0]?.content?.parts ?? [];\nconst rawText = parts.map(p => p.text ?? '').join('').trim();\n\nlet classification = {};\nlet parse_error = false;\n\ntry {\n  const cleaned = rawText\n    .replace(/^```(?:json)?\\n?/, '')\n    .replace(/\\n?```$/, '')\n    .trim();\n  classification = JSON.parse(cleaned);\n} catch (_) {\n  parse_error = true;\n}\n\nreturn [{\n  json: {\n    classification,\n    parse_error,\n    finish_reason: body?.candidates?.[0]?.finishReason ?? null,\n    raw_preview: rawText.slice(0, 500)\n  }\n}];"
+        "jsCode": "// Extract Classification \u2014 join all text parts in case Gemini splits output\nconst body = $input.first().json;\nconst parts = body?.candidates?.[0]?.content?.parts ?? [];\nconst rawText = parts.map(p => p.text ?? '').join('').trim();\n\nlet classification = {};\nlet parse_error = false;\n\ntry {\n  const cleaned = rawText\n    .replace(/^```(?:json)?\\n?/, '')\n    .replace(/\\n?```$/, '')\n    .trim();\n  classification = JSON.parse(cleaned);\n} catch (_) {\n  parse_error = true;\n}\n\nreturn [{\n  json: {\n    classification,\n    parse_error,\n    finish_reason: body?.candidates?.[0]?.finishReason ?? null,\n    raw_preview: rawText.slice(0, 500)\n  }\n}];"
       },
       "id": "a1b2c3d4-8888-8888-8888-888888888888",
       "name": "Parse Gemini Response",
@@ -656,7 +656,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Normalize writer-service response. On 2xx, unwrap body for downstream nodes.\n// On error, map writer error_type → capture-service taxonomy and use the\n// writer-service's own retryable flag to determine routing.\nconst resp = $input.first().json;\nconst statusCode = resp.statusCode ?? 200;\nconst body = resp.body ?? resp;\n\nconst ERROR_MAP = {\n  'git_fetch_error':        'writer_git_fetch_error',\n  'git_add_error':          'writer_git_add_error',\n  'git_commit_error':       'writer_git_commit_error',\n  'git_push_error':         'writer_git_push_error',\n  'git_push_rejected':      'writer_git_push_rejected',\n  'git_index_locked':       'writer_git_index_locked',\n  'git_merge_conflict':     'writer_git_conflict',\n  'git_worktree_dirty':     'writer_git_worktree_dirty',\n  'path_traversal_attempt': 'writer_path_traversal',\n  'capture_id_duplicate':   'writer_capture_duplicate',\n};\n\nif (statusCode >= 200 && statusCode < 300) {\n  return [{ json: { ...body, _writer_ok: true } }];\n}\n\nconst writerErrorType = body.error_type ?? 'unknown';\nconst mappedErrorType = ERROR_MAP[writerErrorType] ?? 'writer_service_unavailable';\nreturn [{\n  json: {\n    _writer_ok: false,\n    _retryable: body.retryable === true,\n    _error_type: mappedErrorType,\n    _reason_type: 'writer_service_error',\n  }\n}];"
+        "jsCode": "// Normalize writer-service response. On 2xx, unwrap body for downstream nodes.\n// On error, map writer error_type \u2192 capture-service taxonomy and use the\n// writer-service's own retryable flag to determine routing.\nconst resp = $input.first().json;\nconst statusCode = resp.statusCode ?? 200;\nconst body = resp.body ?? resp;\n\nconst ERROR_MAP = {\n  'git_fetch_error':        'writer_git_fetch_error',\n  'git_add_error':          'writer_git_add_error',\n  'git_commit_error':       'writer_git_commit_error',\n  'git_push_error':         'writer_git_push_error',\n  'git_push_rejected':      'writer_git_push_rejected',\n  'git_index_locked':       'writer_git_index_locked',\n  'git_merge_conflict':     'writer_git_conflict',\n  'git_worktree_dirty':     'writer_git_worktree_dirty',\n  'path_traversal_attempt': 'writer_path_traversal',\n  'capture_id_duplicate':   'writer_capture_duplicate',\n};\n\nif (statusCode >= 200 && statusCode < 300) {\n  return [{ json: { ...body, _writer_ok: true } }];\n}\n\nconst writerErrorType = body.error_type ?? 'unknown';\nconst mappedErrorType = ERROR_MAP[writerErrorType] ?? 'writer_service_unavailable';\nreturn [{\n  json: {\n    _writer_ok: false,\n    _retryable: body.retryable === true,\n    _error_type: mappedErrorType,\n    _reason_type: 'writer_service_error',\n  }\n}];"
       },
       "id": "eval-writer-file",
       "name": "Evaluate Writer Response",
@@ -773,7 +773,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Normalize writer-service response. On 2xx, unwrap body for downstream nodes.\n// On error, map writer error_type → capture-service taxonomy and use the\n// writer-service's own retryable flag to determine routing.\nconst resp = $input.first().json;\nconst statusCode = resp.statusCode ?? 200;\nconst body = resp.body ?? resp;\n\nconst ERROR_MAP = {\n  'git_fetch_error':        'writer_git_fetch_error',\n  'git_add_error':          'writer_git_add_error',\n  'git_commit_error':       'writer_git_commit_error',\n  'git_push_error':         'writer_git_push_error',\n  'git_push_rejected':      'writer_git_push_rejected',\n  'git_index_locked':       'writer_git_index_locked',\n  'git_merge_conflict':     'writer_git_conflict',\n  'git_worktree_dirty':     'writer_git_worktree_dirty',\n  'path_traversal_attempt': 'writer_path_traversal',\n  'capture_id_duplicate':   'writer_capture_duplicate',\n};\n\nif (statusCode >= 200 && statusCode < 300) {\n  return [{ json: { ...body, _writer_ok: true } }];\n}\n\nconst writerErrorType = body.error_type ?? 'unknown';\nconst mappedErrorType = ERROR_MAP[writerErrorType] ?? 'writer_service_unavailable';\nreturn [{\n  json: {\n    _writer_ok: false,\n    _retryable: body.retryable === true,\n    _error_type: mappedErrorType,\n    _reason_type: 'writer_service_error',\n  }\n}];"
+        "jsCode": "// Normalize writer-service response. On 2xx, unwrap body for downstream nodes.\n// On error, map writer error_type \u2192 capture-service taxonomy and use the\n// writer-service's own retryable flag to determine routing.\nconst resp = $input.first().json;\nconst statusCode = resp.statusCode ?? 200;\nconst body = resp.body ?? resp;\n\nconst ERROR_MAP = {\n  'git_fetch_error':        'writer_git_fetch_error',\n  'git_add_error':          'writer_git_add_error',\n  'git_commit_error':       'writer_git_commit_error',\n  'git_push_error':         'writer_git_push_error',\n  'git_push_rejected':      'writer_git_push_rejected',\n  'git_index_locked':       'writer_git_index_locked',\n  'git_merge_conflict':     'writer_git_conflict',\n  'git_worktree_dirty':     'writer_git_worktree_dirty',\n  'path_traversal_attempt': 'writer_path_traversal',\n  'capture_id_duplicate':   'writer_capture_duplicate',\n};\n\nif (statusCode >= 200 && statusCode < 300) {\n  return [{ json: { ...body, _writer_ok: true } }];\n}\n\nconst writerErrorType = body.error_type ?? 'unknown';\nconst mappedErrorType = ERROR_MAP[writerErrorType] ?? 'writer_service_unavailable';\nreturn [{\n  json: {\n    _writer_ok: false,\n    _retryable: body.retryable === true,\n    _error_type: mappedErrorType,\n    _reason_type: 'writer_service_error',\n  }\n}];"
       },
       "id": "eval-writer-inbox",
       "name": "Evaluate Writer Response (inbox)",
@@ -927,39 +927,13 @@
       }
     },
     {
-      "id": "schedule-retry-classifier",
-      "name": "Schedule Retry (classifier)",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        1600,
-        500
-      ],
-      "parameters": {
-        "method": "POST",
-        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/schedule-retry",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, error_type: \"invalid_classifier_output\", reason_type: \"classifier_invalid_json\" }) }}",
-        "options": {}
-      },
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
-          "name": "Capture Service Token"
-        }
-      }
-    },
-    {
-      "id": "if-gemini-ok",
-      "name": "Gemini OK?",
+      "id": "if-attachment-only",
+      "name": "Attachment Only?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        2900,
-        60
+        520,
+        300
       ],
       "parameters": {
         "conditions": {
@@ -968,12 +942,21 @@
           },
           "conditions": [
             {
-              "id": "check-no-error",
-              "leftValue": "={{ $json.error }}",
+              "id": "check-empty-text",
+              "leftValue": "={{ $json.raw_text }}",
               "rightValue": "",
               "operator": {
                 "type": "string",
-                "operation": "notExists"
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "check-has-attachments",
+              "leftValue": "={{ $json.has_attachments }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
               }
             }
           ],
@@ -982,14 +965,20 @@
       }
     },
     {
-      "id": "schedule-retry-gemini",
-      "name": "Schedule Retry (Gemini error)",
+      "id": "http-schedule-retry-rate-limited",
+      "name": "Schedule Retry (Gemini rate limited)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        3100,
-        260
+        3140,
+        -80
       ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      },
       "parameters": {
         "method": "POST",
         "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/schedule-retry",
@@ -997,13 +986,230 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, error_type: \"gemini_http_error\", reason_type: \"gemini_unavailable\" }) }}",
+        "jsonBody": "={{ JSON.stringify({ delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, error_type: \"gemini_http_error\", reason_type: \"gemini_rate_limited\" }) }}",
         "options": {}
-      },
+      }
+    },
+    {
+      "id": "http-schedule-retry-server-error",
+      "name": "Schedule Retry (Gemini server error)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3140,
+        60
+      ],
       "credentials": {
         "httpHeaderAuth": {
           "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
           "name": "Capture Service Token"
+        }
+      },
+      "parameters": {
+        "method": "POST",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/schedule-retry",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, error_type: \"gemini_http_error\", reason_type: \"gemini_server_or_timeout\" }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-ack-failed-gemini-auth",
+      "name": "Acknowledge Failed (Gemini auth)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3140,
+        200
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      },
+      "parameters": {
+        "method": "POST",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/acknowledge-failed",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, reason_type: \"gemini_auth_failed\" }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "switch-gemini-error",
+      "name": "Gemini Error Switch",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        2900,
+        60
+      ],
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "id": "check-status-429",
+                    "leftValue": "={{ $json.statusCode }}",
+                    "rightValue": 429,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "rate_limited"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "id": "check-no-error",
+                    "leftValue": "={{ $json.error }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notExists"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "ok"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "id": "check-status-401",
+                    "leftValue": "={{ $json.statusCode }}",
+                    "rightValue": 401,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "auth_failed_401"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "id": "check-status-403",
+                    "leftValue": "={{ $json.statusCode }}",
+                    "rightValue": 403,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "auth_failed_403"
+            }
+          ]
+        },
+        "fallbackOutput": "extra"
+      }
+    },
+    {
+      "id": "http-schedule-retry-invalid-output",
+      "name": "Schedule Retry (invalid classifier output)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3800,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      },
+      "parameters": {
+        "method": "POST",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/schedule-retry",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, error_type: \"invalid_classifier_output\", reason_type: \"invalid_classifier_output\" }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-schedule-retry-malformed",
+      "name": "Schedule Retry (malformed classifier output)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3800,
+        440
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CAPTURE_SERVICE_TOKEN",
+          "name": "Capture Service Token"
+        }
+      },
+      "parameters": {
+        "method": "POST",
+        "url": "=http://capture-service:8000/internal/captures/{{ $('Intake Webhook').first().json.body.capture_id }}/delivery/schedule-retry",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ delivery_attempt: $('Intake Webhook').first().json.body.delivery_attempt, error_type: \"malformed_gemini_output\", reason_type: \"malformed_gemini_output\" }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "if-invalid-output-type",
+      "name": "Invalid Output Type?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3580,
+        380
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "id": "check-valid-exists",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists"
+              }
+            }
+          ],
+          "combinator": "and"
         }
       }
     }
@@ -1025,7 +1231,7 @@
       "main": [
         [
           {
-            "node": "Screen for Sensitive",
+            "node": "Attachment Only?",
             "type": "main",
             "index": 0
           }
@@ -1149,7 +1355,7 @@
       "main": [
         [
           {
-            "node": "Gemini OK?",
+            "node": "Gemini Error Switch",
             "type": "main",
             "index": 0
           }
@@ -1345,15 +1551,40 @@
         ],
         [
           {
-            "node": "Schedule Retry (classifier)",
+            "node": "Invalid Output Type?",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Gemini OK?": {
+    "Attachment Only?": {
       "main": [
+        [
+          {
+            "node": "Claim Attempt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Screen for Sensitive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Error Switch": {
+      "main": [
+        [
+          {
+            "node": "Schedule Retry (Gemini rate limited)",
+            "type": "main",
+            "index": 0
+          }
+        ],
         [
           {
             "node": "Parse Gemini Response",
@@ -1363,7 +1594,39 @@
         ],
         [
           {
-            "node": "Schedule Retry (Gemini error)",
+            "node": "Acknowledge Failed (Gemini auth)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Acknowledge Failed (Gemini auth)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Schedule Retry (Gemini server error)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Invalid Output Type?": {
+      "main": [
+        [
+          {
+            "node": "Schedule Retry (invalid classifier output)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Schedule Retry (malformed classifier output)",
             "type": "main",
             "index": 0
           }

@@ -243,8 +243,13 @@ class CaptureService:
                         has_attachments=capture.has_attachments,
                     ),
                 )
-            except ReceiptDeliveryError:
-                pass
+            except ReceiptDeliveryError as exc:
+                self._ledger.set_receipt_sync_status(
+                    updated.capture_id,
+                    status="failed",
+                    last_attempt_at=datetime.now(UTC).isoformat(),
+                    error_type=type(exc).__name__,
+                )
 
     async def complete_inbox(
         self,
@@ -283,8 +288,13 @@ class CaptureService:
                         has_attachments=capture.has_attachments,
                     ),
                 )
-            except ReceiptDeliveryError:
-                pass
+            except ReceiptDeliveryError as exc:
+                self._ledger.set_receipt_sync_status(
+                    updated.capture_id,
+                    status="failed",
+                    last_attempt_at=datetime.now(UTC).isoformat(),
+                    error_type=type(exc).__name__,
+                )
 
     async def complete_failed(
         self,
@@ -317,8 +327,13 @@ class CaptureService:
                         has_attachments=capture.has_attachments,
                     ),
                 )
-            except ReceiptDeliveryError:
-                pass
+            except ReceiptDeliveryError as exc:
+                self._ledger.set_receipt_sync_status(
+                    updated.capture_id,
+                    status="failed",
+                    last_attempt_at=datetime.now(UTC).isoformat(),
+                    error_type=type(exc).__name__,
+                )
 
     def get_capture(self, capture_id: str) -> CaptureRecord:
         try:
@@ -450,6 +465,7 @@ class CaptureService:
         delivery = await self._deliver_final_receipt(capture, content)
         if not delivery.delivered:
             raise ReceiptDeliveryError("receipt delivery failed")
+        self._ledger.set_receipt_sync_status(capture_id, status="clean", error_type=None)
         return ReceiptDeliveryResult(
             delivered=delivery.delivered,
             replaced=delivery.replaced,
@@ -559,10 +575,16 @@ class CaptureService:
                         has_attachments=capture.has_attachments,
                     ),
                 )
-            except ReceiptDeliveryError:
+            except ReceiptDeliveryError as exc:
                 log_metadata(
                     "downstream_filed_receipt_failed",
                     capture_id=capture_id,
+                )
+                self._ledger.set_receipt_sync_status(
+                    capture_id,
+                    status="failed",
+                    last_attempt_at=datetime.now(UTC).isoformat(),
+                    error_type=type(exc).__name__,
                 )
         return result
 
@@ -600,10 +622,16 @@ class CaptureService:
                         has_attachments=capture.has_attachments,
                     ),
                 )
-            except ReceiptDeliveryError:
+            except ReceiptDeliveryError as exc:
                 log_metadata(
                     "downstream_inbox_receipt_failed",
                     capture_id=capture_id,
+                )
+                self._ledger.set_receipt_sync_status(
+                    capture_id,
+                    status="failed",
+                    last_attempt_at=datetime.now(UTC).isoformat(),
+                    error_type=type(exc).__name__,
                 )
         return result
 
