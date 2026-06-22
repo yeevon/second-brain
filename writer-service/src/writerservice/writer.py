@@ -146,7 +146,7 @@ class VaultWriter:
             raw_hash = compute_raw_sha256(raw_body)
             rel_raw = raw_capture_path(capture_id, created_at)
             raw_abs = self.vault_path / rel_raw
-            write_or_verify_raw_capture(
+            raw_created = write_or_verify_raw_capture(
                 raw_abs=raw_abs,
                 capture_id=capture_id,
                 source_message_id=source_message_id,
@@ -154,6 +154,14 @@ class VaultWriter:
                 raw_body=raw_body,
                 raw_hash=raw_hash,
             )
+            if raw_created and git_sync_enabled:
+                git_add(self.vault_path, rel_raw)
+                git_commit(
+                    self.vault_path,
+                    f"raw: recover missing raw file for {capture_id}",
+                )
+                commit_hash = git_rev_parse_head(self.vault_path)
+                git_push(self.vault_path)
             return WriteResult(
                 note_path=_relative_posix(existing_path, self.vault_path),
                 absolute_path=existing_path,

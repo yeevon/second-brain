@@ -186,3 +186,76 @@ def test_git_sync_fetches_before_write(tmp_path, monkeypatch):
     )
     assert "remote advance" in log.stdout
     assert "SB-20260612-0005" in log.stdout
+
+
+# ── Idempotent replay with missing raw file ───────────────────────────────────
+
+def test_git_sync_commits_recreated_raw_file_on_idempotent_replay(tmp_path, monkeypatch):
+    # Setup: sanitized note exists in git (committed + pushed) but raw file was never
+    # written or committed. This simulates a partial first delivery that crashed after
+    # writing the note but before writing the raw file.
+    from writerservice.writer import VaultWriter
+    from writerservice.api_models import Classification as WsClassification
+
+    bare, vault = _init_bare_repo(tmp_path)
+    monkeypatch.setenv("VAULT_PATH", str(vault))
+    monkeypatch.setenv("GIT_SYNC_ENABLED", "true")
+
+    # Plant a sanitized note directly in git, no raw file.
+    note_folder = vault / "20_projects" / "second-brain"
+    note_folder.mkdir(parents=True, exist_ok=True)
+    note_content = (
+        "---\n"
+        "capture_id: \"SB-20260612-0009\"\n"
+        "source_message_id: \"111222333444555666\"\n"
+        "created_at: \"2026-06-12T18:00:00+00:00\"\n"
+        "area: \"projects\"\n"
+        "project: \"second-brain\"\n"
+        "note_type: \"note\"\n"
+        "tags:\n  - \"test\"\n"
+        "actions:\n  []\n"
+        "lifecycle_status: active\n"
+        "model: \"gemini-3.5-flash\"\n"
+        "prompt_version: \"classifier-v1\"\n"
+        "schema_version: 1\n"
+        "---\n\n# Test note\n\nIntegration test body.\n"
+    )
+    note_file = note_folder / "2026-06-12--SB-20260612-0009--test-note.md"
+    note_file.write_text(note_content, encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=vault, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "note: SB-20260612-0009 (no raw file)"],
+        cwd=vault, check=True, capture_output=True,
+    )
+    subprocess.run(["git", "push", "origin", "main"], cwd=vault, check=True, capture_output=True)
+    first_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=vault, capture_output=True, text=True
+    ).stdout.strip()
+
+    raw_abs = vault / "00_raw" / "2026" / "06" / "SB-20260612-0009.md"
+    assert not raw_abs.exists(), "raw file must not exist before the replay"
+
+    # Idempotent replay with git sync: sanitized note exists, raw file missing.
+    # Must create the raw file and commit + push it.
+    resp = CLIENT.post(
+        "/internal/notes/file",
+        json=_base_payload("SB-20260612-0009", delivery_attempt=2),
+        headers=_HEADERS,
+    )
+    assert resp.status_code == 200
+    assert raw_abs.exists(), "raw file must be created on idempotent replay"
+
+    recovery_commit = resp.json()["git_commit_hash"]
+    assert recovery_commit is not None
+    assert recovery_commit != first_commit, "recovery must produce a new commit"
+
+    log = subprocess.run(
+        ["git", "log", "--oneline"], cwd=vault, capture_output=True, text=True
+    )
+    assert "recover missing raw file" in log.stdout
+
+    # Verify the recovery commit was pushed to the bare remote.
+    remote_log = subprocess.run(
+        ["git", "log", "--oneline", "origin/main"], cwd=vault, capture_output=True, text=True
+    )
+    assert "recover missing raw file" in remote_log.stdout
