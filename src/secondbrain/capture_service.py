@@ -1099,30 +1099,31 @@ class CaptureService:
         if not should_capture_message(message, self.settings):
             return None
 
-        raw_text = message.content.strip() if message.content else ""
+        original_text = message.content or ""
+        content_for_commands = original_text.strip()
 
         # Correction and proposal commands are handled by the gateway path.
         # Reconciliation must not persist them as normal captures.
-        if _FIX_REPLY_RE.match(raw_text) or _FIX_EXPLICIT_RE.match(raw_text):
+        if _FIX_REPLY_RE.match(content_for_commands) or _FIX_EXPLICIT_RE.match(content_for_commands):
             log_metadata(
                 "correction_command_skipped_for_capture",
                 discord_message_id=str(message.id),
             )
             return None
-        if _APPROVE_VUP_RE.match(raw_text) or _REJECT_VUP_RE.match(raw_text):
+        if _APPROVE_VUP_RE.match(content_for_commands) or _REJECT_VUP_RE.match(content_for_commands):
             log_metadata(
                 "proposal_command_skipped_for_capture",
                 discord_message_id=str(message.id),
             )
             return None
 
-        secret_result = screen_text(raw_text)
+        secret_result = screen_text(content_for_commands)
         if secret_result.is_sensitive:
             return await self._persist_sensitive_rejection(message, secret_result)
 
         return await self._persist_accepted_capture(
             message,
-            raw_text=raw_text,
+            raw_text=original_text,
             notify_downstream=notify_downstream,
         )
 

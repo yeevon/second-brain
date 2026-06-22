@@ -34,6 +34,7 @@ def _payload(capture_id: str = "SB-20260612-0001"):
             "confidence": 0.9,
         },
         "inbox_reason": None,
+        "raw_text": "",
     }
 
 

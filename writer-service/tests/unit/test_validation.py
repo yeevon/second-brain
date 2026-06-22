@@ -32,6 +32,7 @@ def _base_payload(**overrides):
             "confidence": 0.9,
         },
         "inbox_reason": None,
+        "raw_text": "",
     }
     payload.update(overrides)
     return payload

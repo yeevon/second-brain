@@ -39,6 +39,7 @@ def _base_payload(capture_id: str, title: str = "Test note", **overrides) -> dic
             "confidence": 0.95,
         },
         "inbox_reason": None,
+        "raw_text": "",
     }
     payload.update(overrides)
     return payload

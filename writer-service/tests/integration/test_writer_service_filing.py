@@ -38,6 +38,7 @@ def _filing_payload(
             "confidence": 0.92,
         },
         "inbox_reason": inbox_reason,
+        "raw_text": "",
     }
 
 

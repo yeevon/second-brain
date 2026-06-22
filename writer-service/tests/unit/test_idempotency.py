@@ -37,6 +37,7 @@ def _payload(capture_id: str = "SB-20260612-0001", **overrides):
             "confidence": 0.9,
         },
         "inbox_reason": None,
+        "raw_text": "",
     }
     p.update(overrides)
     return p

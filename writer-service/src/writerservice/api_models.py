@@ -57,7 +57,7 @@ class FileNoteRequest(BaseModel):
     prompt_version: str = Field(min_length=1)
     classification: Classification
     inbox_reason: str | None = None
-    raw_text: str = ""
+    raw_text: str
     attachments: list[AttachmentMetadata] = []
 
     @field_validator("capture_id")

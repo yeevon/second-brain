@@ -128,6 +128,8 @@ class VaultWriter:
             git_rev_parse_head,
         )
 
+        created_at = created_at.astimezone(UTC)
+
         if git_sync_enabled:
             check_index_lock(self.vault_path)
             git_fetch(self.vault_path)
@@ -138,12 +140,19 @@ class VaultWriter:
             commit_hash: str | None = None
             if git_sync_enabled:
                 commit_hash = git_log_hash_for_path(self.vault_path, existing_path)
-            # Resolve raw linkage from existing raw file for idempotent response
-            raw_abs = self.vault_path / raw_capture_path(capture_id, created_at)
+            # Compute incoming hash and verify raw file integrity even on idempotent replay
+            incoming_raw_body = build_raw_body(raw_text, attachments)
+            incoming_raw_hash = compute_raw_sha256(incoming_raw_body)
             rel_raw = raw_capture_path(capture_id, created_at)
-            raw_hash = ""
+            raw_abs = self.vault_path / rel_raw
+            raw_hash = incoming_raw_hash
             if raw_abs.exists():
-                _, raw_hash = parse_raw_file(raw_abs)
+                _, existing_hash = parse_raw_file(raw_abs)
+                if existing_hash != incoming_raw_hash:
+                    raise RawHashMismatchError(
+                        f"raw file hash mismatch for {capture_id}: "
+                        f"existing={existing_hash!r} incoming={incoming_raw_hash!r}"
+                    )
             return WriteResult(
                 note_path=_relative_posix(existing_path, self.vault_path),
                 absolute_path=existing_path,

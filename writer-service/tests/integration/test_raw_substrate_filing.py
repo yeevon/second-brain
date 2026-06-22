@@ -256,6 +256,24 @@ def test_hash_mismatch_does_not_overwrite_raw_file(tmp_path, monkeypatch):
     assert raw_file.read_text(encoding="utf-8") == content_before
 
 
+def test_hash_mismatch_returns_409_when_sanitized_note_already_exists(tmp_path, monkeypatch):
+    # Sanitized note AND raw file both exist (first delivery succeeded).
+    # A replay arrives with different raw_text — must fail with 409.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("VAULT_PATH", str(vault))
+
+    CLIENT.post("/internal/notes/file", json=_payload(raw_text="original"), headers=_HEADERS)
+
+    resp2 = CLIENT.post(
+        "/internal/notes/file",
+        json=_payload(raw_text="DIFFERENT content", delivery_attempt=2),
+        headers=_HEADERS,
+    )
+    assert resp2.status_code == 409
+    assert resp2.json()["detail"]["error_type"] == "raw_hash_mismatch"
+
+
 # ── Audit log raw linkage ─────────────────────────────────────────────────────
 
 
