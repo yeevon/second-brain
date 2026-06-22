@@ -98,6 +98,7 @@ Key files: `writer.py` (Markdown generation + idempotency by `capture_id`), `git
 `tests/conftest.py` provides `test_settings` (a `SimpleNamespace` with `tmp_path`-based paths), `ledger`, `queue`, `vault_writer`, `fake_discord`, `capture_service`, and `capture_handler` fixtures.
 
 `tests/support.py` provides:
+
 - `make_app()` — assembles a `SimpleNamespace` test subject with all components wired together.
 - `drain_worker()` — runs the capture worker in a task and waits for the queue to empty.
 - `note_files()`, `audit_events()`, `ledger_rows()`, `event_types()` — test inspection helpers.
