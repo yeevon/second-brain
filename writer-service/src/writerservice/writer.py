@@ -140,28 +140,51 @@ class VaultWriter:
             commit_hash: str | None = None
             if git_sync_enabled:
                 commit_hash = git_log_hash_for_path(self.vault_path, existing_path)
+                check_working_tree_clean(self.vault_path)
             # Always write/verify raw even on idempotent replay — ensures the raw file
             # exists and its body hash matches incoming (detects missing or corrupted raw).
             raw_body = build_raw_body(raw_text, attachments)
             raw_hash = compute_raw_sha256(raw_body)
             rel_raw = raw_capture_path(capture_id, created_at)
             raw_abs = self.vault_path / rel_raw
-            raw_created = write_or_verify_raw_capture(
-                raw_abs=raw_abs,
-                capture_id=capture_id,
-                source_message_id=source_message_id,
-                created_at=created_at,
-                raw_body=raw_body,
-                raw_hash=raw_hash,
-            )
-            if raw_created and git_sync_enabled:
-                git_add(self.vault_path, rel_raw)
-                git_commit(
-                    self.vault_path,
-                    f"raw: recover missing raw file for {capture_id}",
+            pre_recovery_head: str | None = None
+            if git_sync_enabled:
+                pre_recovery_head = git_rev_parse_head(self.vault_path)
+            raw_created = False
+            try:
+                raw_created = write_or_verify_raw_capture(
+                    raw_abs=raw_abs,
+                    capture_id=capture_id,
+                    source_message_id=source_message_id,
+                    created_at=created_at,
+                    raw_body=raw_body,
+                    raw_hash=raw_hash,
                 )
-                commit_hash = git_rev_parse_head(self.vault_path)
-                git_push(self.vault_path)
+                if raw_created and git_sync_enabled:
+                    git_add(self.vault_path, rel_raw)
+                    git_commit(
+                        self.vault_path,
+                        f"raw: recover missing raw file for {capture_id}",
+                    )
+                    commit_hash = git_rev_parse_head(self.vault_path)
+                    git_push(self.vault_path)
+            except Exception:
+                if git_sync_enabled and raw_created and pre_recovery_head is not None:
+                    subprocess.run(
+                        ["git", "reset", "--hard", pre_recovery_head],
+                        cwd=self.vault_path,
+                        check=False,
+                        capture_output=True,
+                        timeout=15,
+                    )
+                    subprocess.run(
+                        ["git", "clean", "-f", rel_raw],
+                        cwd=self.vault_path,
+                        check=False,
+                        capture_output=True,
+                        timeout=15,
+                    )
+                raise
             return WriteResult(
                 note_path=_relative_posix(existing_path, self.vault_path),
                 absolute_path=existing_path,

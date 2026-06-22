@@ -296,3 +296,79 @@ def test_path_traversal_in_project_rejected(tmp_path, monkeypatch):
     assert resp.json()["error_type"] == "path_traversal_attempt"
     assert resp.json()["retryable"] is False
     assert not any(vault.rglob("*.md"))
+
+
+# ── Idempotent recovery push failure (rollback) ───────────────────────────────
+
+def test_recovery_push_failure_rolls_back_raw_file_and_commit(tmp_path, monkeypatch):
+    # Setup: sanitized note in git, raw file missing (never committed).
+    # Recovery creates raw + commits locally, then push fails.
+    # Rollback must reset to pre-recovery HEAD and remove the raw file from disk.
+    from unittest.mock import patch
+    import writerservice.git_ops as git_ops_mod
+
+    bare, vault = _init_bare_repo(tmp_path)
+    monkeypatch.setenv("VAULT_PATH", str(vault))
+    monkeypatch.setenv("GIT_SYNC_ENABLED", "true")
+
+    # Plant sanitized note directly in git with no raw file.
+    note_folder = vault / "20_projects" / "second-brain"
+    note_folder.mkdir(parents=True, exist_ok=True)
+    note_content = (
+        "---\n"
+        "capture_id: \"SB-20260612-0120\"\n"
+        "source_message_id: \"111222333444555666\"\n"
+        "created_at: \"2026-06-12T18:00:00+00:00\"\n"
+        "area: \"projects\"\n"
+        "project: \"second-brain\"\n"
+        "note_type: \"note\"\n"
+        "title: \"Test note\"\n"
+        "tags:\n  - \"test\"\n"
+        "actions:\n  []\n"
+        "lifecycle_status: active\n"
+        "model: \"gemini-3.5-flash\"\n"
+        "prompt_version: \"classifier-v1\"\n"
+        "schema_version: 1\n"
+        "---\n\n# Test note\n\nIntegration test body.\n"
+    )
+    note_file = note_folder / "2026-06-12--SB-20260612-0120--test-note.md"
+    note_file.write_text(note_content, encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=vault, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "note: SB-20260612-0120 (no raw)"],
+        cwd=vault, check=True, capture_output=True,
+    )
+    subprocess.run(["git", "push", "origin", "main"], cwd=vault, check=True, capture_output=True)
+    pre_recovery_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=vault, capture_output=True, text=True
+    ).stdout.strip()
+
+    raw_abs = vault / "00_raw" / "2026" / "06" / "SB-20260612-0120.md"
+    assert not raw_abs.exists()
+
+    def push_that_fails(vault_path: Path) -> None:
+        raise git_ops_mod.GitPushRejectedError("rejected")
+
+    with patch.object(git_ops_mod, "git_push", side_effect=push_that_fails):
+        resp = CLIENT.post(
+            "/internal/notes/file",
+            json=_base_payload("SB-20260612-0120", delivery_attempt=2),
+            headers=_HEADERS,
+        )
+
+    assert resp.status_code == 409
+
+    # Raw file must be gone after rollback.
+    assert not raw_abs.exists(), "raw file must be removed on push failure rollback"
+
+    # Local HEAD must be back at pre-recovery commit.
+    head_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=vault, capture_output=True, text=True
+    ).stdout.strip()
+    assert head_after == pre_recovery_head, "HEAD must be reset to pre-recovery commit after rollback"
+
+    # Working tree must be clean.
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=vault, capture_output=True, text=True
+    )
+    assert status.stdout.strip() == "", "working tree must be clean after rollback"
