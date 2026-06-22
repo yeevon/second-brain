@@ -316,6 +316,62 @@ def test_stale_task_shows_degraded_status():
     assert stub.get_system_state("reaper_task_status") == "degraded"
 
 
+def _run_task_to_done(coro) -> asyncio.Task:
+    """Run an async coroutine to completion in a fresh loop and return the done Task."""
+    loop = asyncio.new_event_loop()
+    task = loop.create_task(coro)
+    try:
+        loop.run_until_complete(task)
+    except (Exception, asyncio.CancelledError):
+        pass
+    finally:
+        loop.close()
+    return task
+
+
+def test_done_task_handle_sets_completed_unexpectedly():
+    """A task handle that has exited with an exception sets status to completed_unexpectedly."""
+    async def _crash():
+        raise RuntimeError("boom")
+
+    task = _run_task_to_done(_crash())
+    stub = _StateLedger()
+    _check_background_task_liveness(
+        ledger=stub,
+        reaper_liveness_threshold_s=300,
+        reconcile_liveness_threshold_s=300,
+        task_handles={"reaper": task},
+    )
+    assert stub.get_system_state("reaper_task_status") == "completed_unexpectedly"
+    assert stub.get_system_state("reaper_last_error_type") == "RuntimeError"
+
+
+def test_cancelled_task_handle_sets_completed_unexpectedly():
+    """A cancelled task handle sets status to completed_unexpectedly."""
+    async def _forever():
+        await asyncio.sleep(9999)
+
+    loop = asyncio.new_event_loop()
+    try:
+        task = loop.create_task(_forever())
+        task.cancel()
+        try:
+            loop.run_until_complete(task)
+        except asyncio.CancelledError:
+            pass
+    finally:
+        loop.close()
+
+    stub = _StateLedger()
+    _check_background_task_liveness(
+        ledger=stub,
+        reaper_liveness_threshold_s=300,
+        reconcile_liveness_threshold_s=300,
+        task_handles={"reaper": task},
+    )
+    assert stub.get_system_state("reaper_task_status") == "completed_unexpectedly"
+
+
 @pytest.mark.asyncio
 async def test_heartbeat_loop_respects_not_applicable_task():
     """not_applicable tasks must not be overwritten to running/degraded by the heartbeat loop."""

@@ -428,16 +428,17 @@ def _apply(connection: sqlite3.Connection, migration: Migration) -> None:
             connection.commit()
             return
 
-        # SB-140: if this migration uses CREATE TABLE IF NOT EXISTS for tables
-        # that already exist, validate those tables BEFORE executing statements.
-        # This prevents IF NOT EXISTS clauses from silently patching a legacy DB
-        # whose schema does not meet expectations.
+        # SB-140: if *any* table this migration would CREATE IF NOT EXISTS already
+        # exists, treat the entire migration as a legacy-DB adoption and validate
+        # ALL of its asserted tables before executing any statements.  This
+        # prevents IF NOT EXISTS clauses from silently creating or repairing
+        # missing tables/indexes on a legacy DB whose schema doesn't match.
+        # Fresh empty databases have none of these tables yet, so they fall
+        # through to the normal CREATE path.
         tables_this_migration_creates = _tables_created_by_migration(migration)
-        already_existing = tables_this_migration_creates & _existing_table_names(connection)
-        if already_existing:
+        if tables_this_migration_creates & _existing_table_names(connection):
             for assertion in migration.assertions:
-                if assertion.table.lower() in already_existing:
-                    assertion.verify(connection)
+                assertion.verify(connection)
 
         for statement in migration.statements:
             connection.execute(statement)

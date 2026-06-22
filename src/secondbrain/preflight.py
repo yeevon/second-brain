@@ -141,6 +141,40 @@ def _local_full_checks() -> list[PreflightCheck]:
         else:
             checks.append(PreflightCheck("VAULT_PATH", False, f"{vault_path} does not exist or is not a directory"))
 
+    # SB-139: numeric/range validation for local-full runtime vars
+    local_full_numeric = [
+        ("CLASSIFIER_WORKER_COUNT",             1, None, "deploy/capture-service.env.example"),
+        ("CLASSIFIER_QUEUE_MAXSIZE",            1, None, "deploy/capture-service.env.example"),
+        ("STARTUP_RECONCILE_LIMIT",             1, None, "deploy/capture-service.env.example"),
+        ("PERIODIC_RECONCILE_INTERVAL_SECONDS", 1, None, "deploy/capture-service.env.example"),
+        ("PERIODIC_RECONCILE_LIMIT",            1, None, "deploy/capture-service.env.example"),
+        ("SQLITE_STARTUP_TIMEOUT_S",            1, None, "deploy/capture-service.env.example"),
+        ("SQLITE_QUEUE_WAIT_TIMEOUT_S",         1, None, "deploy/capture-service.env.example"),
+        ("SQLITE_JOB_COMPLETION_TIMEOUT_S",     1, None, "deploy/capture-service.env.example"),
+        ("SQLITE_SHUTDOWN_DRAIN_TIMEOUT_S",     1, None, "deploy/capture-service.env.example"),
+    ]
+    for var, lo, hi, tmpl in local_full_numeric:
+        raw = (os.environ.get(var) or "").strip()
+        result = _check_int_range(var, raw, min_val=lo, max_val=hi, template=tmpl)
+        if result is not None:
+            checks.append(result)
+
+    # CLASSIFICATION_CONFIDENCE_THRESHOLD must be a float in [0.0, 1.0]
+    conf_raw = (os.environ.get("CLASSIFICATION_CONFIDENCE_THRESHOLD") or "").strip()
+    if conf_raw:
+        try:
+            conf = float(conf_raw)
+            if not (0.0 <= conf <= 1.0):
+                checks.append(PreflightCheck(
+                    "CLASSIFICATION_CONFIDENCE_THRESHOLD", False,
+                    f"must be between 0.0 and 1.0, got {conf}",
+                ))
+        except (ValueError, TypeError):
+            checks.append(PreflightCheck(
+                "CLASSIFICATION_CONFIDENCE_THRESHOLD", False,
+                f"must be a float, got {conf_raw!r}",
+            ))
+
     return checks
 
 

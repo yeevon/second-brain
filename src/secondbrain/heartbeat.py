@@ -13,18 +13,22 @@ _TASK_KEYS = {
     "reaper": {
         "heartbeat": "reaper_last_heartbeat_at",
         "status": "reaper_task_status",
+        "last_error": "reaper_last_error_type",
     },
     "reconcile": {
         "heartbeat": "reconcile_last_heartbeat_at",
         "status": "reconcile_task_status",
+        "last_error": "reconcile_last_error_type",
     },
     "delivery": {
         "heartbeat": "delivery_last_heartbeat_at",
         "status": "delivery_task_status",
+        "last_error": "delivery_last_error_type",
     },
     "classifier": {
         "heartbeat": "classifier_last_heartbeat_at",
         "status": "classifier_task_status",
+        "last_error": "classifier_last_error_type",
     },
 }
 
@@ -117,13 +121,16 @@ def _check_background_task_liveness(
         handle = handles.get(task)
         if handle is not None and handle.done():
             exc = handle.exception() if not handle.cancelled() else None
+            error_type = type(exc).__name__ if exc else ("CancelledError" if handle.cancelled() else None)
             log_metadata(
                 "background_task_completed_unexpectedly",
                 task=task,
                 cancelled=handle.cancelled(),
-                error_type=type(exc).__name__ if exc else None,
+                error_type=error_type,
             )
             _safe_set(ledger, keys["status"], "completed_unexpectedly")
+            if error_type is not None:
+                _safe_set(ledger, keys["last_error"], error_type)
             background_task_stale = True
             continue
 
