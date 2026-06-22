@@ -72,6 +72,8 @@ def _set_wal_mode(
 
 DEFAULT_STARTUP_TIMEOUT_S = 10
 DEFAULT_SHUTDOWN_TIMEOUT_S = 10
+DEFAULT_QUEUE_WAIT_TIMEOUT_S = 30
+DEFAULT_JOB_COMPLETION_TIMEOUT_S = 60
 
 
 class SQLiteRuntime:
@@ -85,6 +87,8 @@ class SQLiteRuntime:
         job_queue_maxsize: int = 10000,
         startup_timeout_s: int = DEFAULT_STARTUP_TIMEOUT_S,
         shutdown_timeout_s: int = DEFAULT_SHUTDOWN_TIMEOUT_S,
+        queue_wait_timeout_s: int = DEFAULT_QUEUE_WAIT_TIMEOUT_S,
+        job_completion_timeout_s: int = DEFAULT_JOB_COMPLETION_TIMEOUT_S,
     ) -> None:
         # TD-007: defensive constructor validation
         if database_path is None or str(database_path).strip() == "":
@@ -106,6 +110,8 @@ class SQLiteRuntime:
         self._retry_base_delay_ms = retry_base_delay_ms
         self._startup_timeout_s = startup_timeout_s
         self._shutdown_timeout_s = shutdown_timeout_s
+        self._queue_wait_timeout_s = queue_wait_timeout_s
+        self._job_completion_timeout_s = job_completion_timeout_s
         self._closed = False
         self._close_lock = threading.Lock()
         self._queue: queue.Queue[_DatabaseJob | object] = queue.Queue(maxsize=job_queue_maxsize)
@@ -180,7 +186,21 @@ class SQLiteRuntime:
             operation_name=operation_name,
             depth=queue_depth,
         )
-        return future.result()
+        wait_start = time.monotonic()
+        try:
+            return future.result(timeout=self._queue_wait_timeout_s)
+        except TimeoutError:
+            elapsed_s = time.monotonic() - wait_start
+            log_metadata(
+                "sqlite_queue_wait_timeout",
+                step="queue_wait",
+                operation_name=operation_name,
+                timeout_s=self._queue_wait_timeout_s,
+                elapsed_s=int(elapsed_s),
+            )
+            raise RuntimeError(
+                f"SQLite operation timed out after {self._queue_wait_timeout_s}s waiting for queue"
+            )
 
     def _worker(self) -> None:
         conn: sqlite3.Connection | None = None
@@ -244,6 +264,14 @@ class SQLiteRuntime:
                     operation_name=job.operation_name,
                     duration_ms=duration_ms,
                 )
+                if duration_ms >= self._job_completion_timeout_s * 1000:
+                    log_metadata(
+                        "sqlite_job_completion_timeout",
+                        step="job_completion",
+                        operation_name=job.operation_name,
+                        timeout_s=self._job_completion_timeout_s,
+                        elapsed_s=duration_ms // 1000,
+                    )
 
         conn.close()
         log_metadata("sqlite_runtime_stopped", path=self._database_path)

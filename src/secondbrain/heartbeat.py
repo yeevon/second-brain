@@ -2,8 +2,31 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import Literal
 
 from secondbrain.observability import log_metadata
+
+
+TaskStatus = Literal["running", "completed_unexpectedly", "degraded", "not_applicable"]
+
+_TASK_KEYS = {
+    "reaper": {
+        "heartbeat": "reaper_last_heartbeat_at",
+        "status": "reaper_task_status",
+    },
+    "reconcile": {
+        "heartbeat": "reconcile_last_heartbeat_at",
+        "status": "reconcile_task_status",
+    },
+    "delivery": {
+        "heartbeat": "delivery_last_heartbeat_at",
+        "status": "delivery_task_status",
+    },
+    "classifier": {
+        "heartbeat": "classifier_last_heartbeat_at",
+        "status": "classifier_task_status",
+    },
+}
 
 
 async def run_capture_service_heartbeat(
@@ -13,6 +36,8 @@ async def run_capture_service_heartbeat(
     interval_seconds: int,
     reaper_liveness_threshold_s: int = 300,
     reconcile_liveness_threshold_s: int = 300,
+    delivery_liveness_threshold_s: int = 300,
+    classifier_liveness_threshold_s: int = 300,
 ) -> None:
     while True:
         try:
@@ -30,6 +55,8 @@ async def run_capture_service_heartbeat(
                 ledger=ledger,
                 reaper_liveness_threshold_s=reaper_liveness_threshold_s,
                 reconcile_liveness_threshold_s=reconcile_liveness_threshold_s,
+                delivery_liveness_threshold_s=delivery_liveness_threshold_s,
+                classifier_liveness_threshold_s=classifier_liveness_threshold_s,
             )
         except Exception as exc:
             log_metadata(
@@ -40,41 +67,74 @@ async def run_capture_service_heartbeat(
         await asyncio.sleep(interval_seconds)
 
 
+def mark_task_not_applicable(ledger, task: str) -> None:
+    """Call once at startup for tasks that are deliberately not started in this mode."""
+    keys = _TASK_KEYS.get(task)
+    if keys is None:
+        return
+    try:
+        ledger.set_system_state(keys["status"], "not_applicable")
+    except Exception as exc:
+        log_metadata(
+            "background_task_liveness_write_failed",
+            task=task,
+            error_type=type(exc).__name__,
+        )
+
+
 def _check_background_task_liveness(
     *,
     ledger,
     reaper_liveness_threshold_s: int,
     reconcile_liveness_threshold_s: int,
+    delivery_liveness_threshold_s: int = 300,
+    classifier_liveness_threshold_s: int = 300,
 ) -> None:
     now = datetime.now(UTC)
     background_task_stale = False
 
-    reaper_heartbeat_str = ledger.get_system_state("reaper_last_heartbeat_at")
-    if reaper_heartbeat_str:
-        reaper_age = (now - datetime.fromisoformat(reaper_heartbeat_str)).total_seconds()
-        if reaper_age > reaper_liveness_threshold_s:
-            background_task_stale = True
-            log_metadata(
-                "background_task_stale",
-                task="reaper",
-                age_seconds=int(reaper_age),
-                threshold_seconds=reaper_liveness_threshold_s,
-            )
+    thresholds = {
+        "reaper": reaper_liveness_threshold_s,
+        "reconcile": reconcile_liveness_threshold_s,
+        "delivery": delivery_liveness_threshold_s,
+        "classifier": classifier_liveness_threshold_s,
+    }
 
-    reconcile_heartbeat_str = ledger.get_system_state("reconcile_last_heartbeat_at")
-    if reconcile_heartbeat_str:
-        reconcile_age = (now - datetime.fromisoformat(reconcile_heartbeat_str)).total_seconds()
-        if reconcile_age > reconcile_liveness_threshold_s:
+    for task, threshold_s in thresholds.items():
+        keys = _TASK_KEYS[task]
+        status_val = ledger.get_system_state(keys["status"])
+        if status_val == "not_applicable":
+            continue
+
+        heartbeat_str = ledger.get_system_state(keys["heartbeat"])
+        if not heartbeat_str:
+            continue
+
+        age = (now - datetime.fromisoformat(heartbeat_str)).total_seconds()
+        if age > threshold_s:
             background_task_stale = True
             log_metadata(
                 "background_task_stale",
-                task="reconcile",
-                age_seconds=int(reconcile_age),
-                threshold_seconds=reconcile_liveness_threshold_s,
+                task=task,
+                age_seconds=int(age),
+                threshold_seconds=threshold_s,
             )
+            _safe_set(ledger, keys["status"], "degraded")
+        else:
+            _safe_set(ledger, keys["status"], "running")
 
     try:
         ledger.set_system_state("background_task_stale", "true" if background_task_stale else "false")
+    except Exception as exc:
+        log_metadata(
+            "background_task_liveness_write_failed",
+            error_type=type(exc).__name__,
+        )
+
+
+def _safe_set(ledger, key: str, value: str) -> None:
+    try:
+        ledger.set_system_state(key, value)
     except Exception as exc:
         log_metadata(
             "background_task_liveness_write_failed",

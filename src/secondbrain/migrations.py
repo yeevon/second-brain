@@ -16,11 +16,21 @@ class ColumnSpec:
 
 
 @dataclass(frozen=True)
+class ForeignKeySpec:
+    from_column: str
+    to_table: str
+    to_column: str
+
+
+@dataclass(frozen=True)
 class SchemaAssertion:
     """Read-only schema check run once after a migration is applied."""
     table: str
     expected_columns: tuple[ColumnSpec, ...]
     expected_indexes: tuple[str, ...] = field(default_factory=tuple)
+    expected_foreign_keys: tuple[ForeignKeySpec, ...] = field(default_factory=tuple)
+    allow_triggers: bool = False
+    allow_views: bool = False
 
     def verify(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute(f"PRAGMA table_info({self.table})").fetchall()
@@ -53,6 +63,39 @@ class SchemaAssertion:
                     raise RuntimeError(
                         f"Schema assertion failed: index '{idx_name}' missing from '{self.table}'"
                     )
+        if self.expected_foreign_keys:
+            fk_rows = conn.execute(f"PRAGMA foreign_key_list({self.table})").fetchall()
+            # Build set of (from_col, to_table, to_col) from actual FK constraints
+            actual_fks = {
+                (r["from"], r["table"], r["to"])
+                for r in fk_rows
+            }
+            for fk in self.expected_foreign_keys:
+                key = (fk.from_column, fk.to_table, fk.to_column)
+                if key not in actual_fks:
+                    raise RuntimeError(
+                        f"Schema assertion failed: foreign key "
+                        f"'{self.table}.{fk.from_column}' -> '{fk.to_table}.{fk.to_column}' missing"
+                    )
+        if not self.allow_triggers:
+            trigger_rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?",
+                (self.table,),
+            ).fetchall()
+            if trigger_rows:
+                names = ", ".join(r["name"] for r in trigger_rows)
+                raise RuntimeError(
+                    f"Schema assertion failed: unexpected trigger(s) on '{self.table}': {names}"
+                )
+        if not self.allow_views:
+            view_rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'view'",
+            ).fetchall()
+            if view_rows:
+                names = ", ".join(r["name"] for r in view_rows)
+                raise RuntimeError(
+                    f"Schema assertion failed: unexpected view(s) in schema: {names}"
+                )
 
 
 @dataclass(frozen=True)
@@ -144,6 +187,9 @@ _MIGRATIONS: list[Migration] = [
                     ColumnSpec("created_at", "TEXT", not_null=True),
                 ),
                 expected_indexes=("idx_capture_events_capture_id",),
+                expected_foreign_keys=(
+                    ForeignKeySpec("capture_id", "captures", "capture_id"),
+                ),
             ),
             SchemaAssertion(
                 table="system_state",
@@ -259,6 +305,9 @@ _MIGRATIONS: list[Migration] = [
                     ColumnSpec("capture_id", "TEXT", not_null=True),
                     ColumnSpec("old_note_path", "TEXT", not_null=True),
                     ColumnSpec("new_note_path", "TEXT", not_null=True),
+                ),
+                expected_foreign_keys=(
+                    ForeignKeySpec("capture_id", "captures", "capture_id"),
                 ),
             ),
         ),

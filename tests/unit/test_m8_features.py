@@ -13,6 +13,7 @@ import pytest
 from secondbrain.ledger import Ledger
 from secondbrain.migrations import (
     ColumnSpec,
+    ForeignKeySpec,
     Migration,
     SchemaAssertion,
     _apply,
@@ -296,6 +297,110 @@ def test_migration_index_assertion_blocks_recording(tmp_path):
 
     applied = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
     assert applied == 0  # rolled back, not recorded
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# SB-140: SchemaAssertion — FK, trigger, view validation
+# ---------------------------------------------------------------------------
+
+
+def _make_conn(tmp_path, name="test.sqlite3") -> sqlite3.Connection:
+    conn = sqlite3.connect(str(tmp_path / name))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def test_schema_assertion_passes_with_correct_foreign_key(tmp_path):
+    conn = _make_conn(tmp_path)
+    conn.executescript("""
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE parents (id INTEGER PRIMARY KEY);
+        CREATE TABLE children (
+            id INTEGER PRIMARY KEY,
+            parent_id INTEGER NOT NULL,
+            FOREIGN KEY (parent_id) REFERENCES parents(id)
+        );
+    """)
+    assertion = SchemaAssertion(
+        table="children",
+        expected_columns=(ColumnSpec("parent_id", "INTEGER", not_null=True),),
+        expected_foreign_keys=(ForeignKeySpec("parent_id", "parents", "id"),),
+    )
+    assertion.verify(conn)  # must not raise
+    conn.close()
+
+
+def test_schema_assertion_fails_for_missing_foreign_key(tmp_path):
+    conn = _make_conn(tmp_path)
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, ref INTEGER)")
+    assertion = SchemaAssertion(
+        table="t",
+        expected_columns=(ColumnSpec("ref", "INTEGER"),),
+        expected_foreign_keys=(ForeignKeySpec("ref", "other_table", "id"),),
+    )
+    with pytest.raises(RuntimeError, match="foreign key"):
+        assertion.verify(conn)
+    conn.close()
+
+
+def test_schema_assertion_fails_for_unexpected_trigger(tmp_path):
+    conn = _make_conn(tmp_path)
+    conn.executescript("""
+        CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT);
+        CREATE TRIGGER t_after_insert AFTER INSERT ON t BEGIN SELECT 1; END;
+    """)
+    assertion = SchemaAssertion(
+        table="t",
+        expected_columns=(ColumnSpec("val", "TEXT"),),
+    )
+    with pytest.raises(RuntimeError, match="trigger"):
+        assertion.verify(conn)
+    conn.close()
+
+
+def test_schema_assertion_allows_trigger_when_flag_set(tmp_path):
+    conn = _make_conn(tmp_path)
+    conn.executescript("""
+        CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT);
+        CREATE TRIGGER t_after_insert AFTER INSERT ON t BEGIN SELECT 1; END;
+    """)
+    assertion = SchemaAssertion(
+        table="t",
+        expected_columns=(ColumnSpec("val", "TEXT"),),
+        allow_triggers=True,
+    )
+    assertion.verify(conn)  # must not raise
+    conn.close()
+
+
+def test_schema_assertion_fails_for_unexpected_view(tmp_path):
+    conn = _make_conn(tmp_path)
+    conn.executescript("""
+        CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT);
+        CREATE VIEW v_t AS SELECT * FROM t;
+    """)
+    assertion = SchemaAssertion(
+        table="t",
+        expected_columns=(ColumnSpec("val", "TEXT"),),
+    )
+    with pytest.raises(RuntimeError, match="view"):
+        assertion.verify(conn)
+    conn.close()
+
+
+def test_schema_assertion_allows_view_when_flag_set(tmp_path):
+    conn = _make_conn(tmp_path)
+    conn.executescript("""
+        CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT);
+        CREATE VIEW v_t AS SELECT * FROM t;
+    """)
+    assertion = SchemaAssertion(
+        table="t",
+        expected_columns=(ColumnSpec("val", "TEXT"),),
+        allow_views=True,
+    )
+    assertion.verify(conn)  # must not raise
     conn.close()
 
 
@@ -597,7 +702,7 @@ def test_preflight_passes_for_capture_only_mode(tmp_path, monkeypatch):
         CAPTURE_PROCESSING_MODE="capture-only",
         DISCORD_BOT_TOKEN="Bot.fake.token",
         LEDGER_PATH=str(tmp_path / "ledger.sqlite3"),
-        CAPTURE_SERVICE_INTERNAL_TOKEN="secret-tok",
+        CAPTURE_SERVICE_INTERNAL_TOKEN="a" * 32,
         DOWNSTREAM_DELIVERY_ENABLED="false",
     )
     from secondbrain.preflight import run_preflight, format_preflight_results
@@ -802,7 +907,7 @@ def test_preflight_command_exit_code_0_on_pass(tmp_path, monkeypatch):
         CAPTURE_PROCESSING_MODE="capture-only",
         DISCORD_BOT_TOKEN="Bot.fake.token",
         LEDGER_PATH=str(tmp_path / "ledger.sqlite3"),
-        CAPTURE_SERVICE_INTERNAL_TOKEN="tok",
+        CAPTURE_SERVICE_INTERNAL_TOKEN="a" * 32,
         DOWNSTREAM_DELIVERY_ENABLED="false",
     )
     from secondbrain.app import main
@@ -815,6 +920,77 @@ def test_preflight_command_exit_code_1_on_failure(tmp_path, monkeypatch):
     from secondbrain.app import main
     result = main(["preflight"])
     assert result == 1
+
+
+# ---------------------------------------------------------------------------
+# SB-139: preflight — token length + numeric range checks
+# ---------------------------------------------------------------------------
+
+def test_preflight_fails_token_too_short_without_printing_value(tmp_path, monkeypatch, capsys):
+    secret_value = "xk9mQzR2"  # short but distinctive — must never appear in output
+    _make_env(tmp_path, monkeypatch,
+        CAPTURE_PROCESSING_MODE="capture-only",
+        DISCORD_BOT_TOKEN="Bot.fake.token",
+        LEDGER_PATH=str(tmp_path / "ledger.sqlite3"),
+        CAPTURE_SERVICE_INTERNAL_TOKEN=secret_value,
+        DOWNSTREAM_DELIVERY_ENABLED="false",
+    )
+    from secondbrain.preflight import run_preflight, format_preflight_results
+    checks = run_preflight()
+    output, all_passed = format_preflight_results(checks)
+    assert not all_passed
+    token_check = next(c for c in checks if "CAPTURE_SERVICE_INTERNAL_TOKEN" in c.name)
+    assert not token_check.passed
+    # Secret value must not appear anywhere in the output
+    assert secret_value not in output
+
+
+def test_preflight_fails_numeric_out_of_range(tmp_path, monkeypatch):
+    _make_env(tmp_path, monkeypatch,
+        CAPTURE_PROCESSING_MODE="capture-only",
+        DISCORD_BOT_TOKEN="Bot.fake.token",
+        LEDGER_PATH=str(tmp_path / "ledger.sqlite3"),
+        CAPTURE_SERVICE_INTERNAL_TOKEN="a" * 32,
+        DOWNSTREAM_DELIVERY_ENABLED="false",
+        CAPTURE_API_PORT="99999",  # > 65535
+    )
+    from secondbrain.preflight import run_preflight, format_preflight_results
+    checks = run_preflight()
+    _, all_passed = format_preflight_results(checks)
+    assert not all_passed
+    assert any("CAPTURE_API_PORT" in c.name and not c.passed for c in checks)
+
+
+def test_preflight_missing_required_var_prints_name_not_value(tmp_path, monkeypatch, capsys):
+    _make_env(tmp_path, monkeypatch,
+        CAPTURE_PROCESSING_MODE="capture-only",
+        LEDGER_PATH=str(tmp_path / "ledger.sqlite3"),
+        CAPTURE_SERVICE_INTERNAL_TOKEN="a" * 32,
+        DOWNSTREAM_DELIVERY_ENABLED="false",
+        # DISCORD_BOT_TOKEN omitted
+    )
+    from secondbrain.preflight import run_preflight, format_preflight_results
+    checks = run_preflight()
+    output, all_passed = format_preflight_results(checks)
+    assert not all_passed
+    assert "DISCORD_BOT_TOKEN" in output
+    # No token value printed (it's missing, but even if set it must not appear)
+    assert "secret" not in output.lower()
+
+
+def test_preflight_check_includes_template_hint(tmp_path, monkeypatch):
+    _make_env(tmp_path, monkeypatch,
+        CAPTURE_PROCESSING_MODE="capture-only",
+        DISCORD_BOT_TOKEN="Bot.fake.token",
+        LEDGER_PATH=str(tmp_path / "ledger.sqlite3"),
+        CAPTURE_SERVICE_INTERNAL_TOKEN="short",
+        DOWNSTREAM_DELIVERY_ENABLED="false",
+    )
+    from secondbrain.preflight import run_preflight, format_preflight_results
+    checks = run_preflight()
+    output, _ = format_preflight_results(checks)
+    # The failing token check must reference the env template
+    assert "capture-service.env.example" in output
 
 
 # ---------------------------------------------------------------------------

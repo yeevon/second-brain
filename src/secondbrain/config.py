@@ -60,6 +60,10 @@ class Settings:
         self.sqlite_busy_retry_attempts = _parse_int_env("SQLITE_BUSY_RETRY_ATTEMPTS", "5")
         self.sqlite_busy_retry_base_delay_ms = _parse_int_env("SQLITE_BUSY_RETRY_BASE_DELAY_MS", "25")
         self.sqlite_job_queue_maxsize = _parse_int_env("SQLITE_JOB_QUEUE_MAXSIZE", "10000")
+        self.sqlite_startup_timeout_s = _parse_int_env("SQLITE_STARTUP_TIMEOUT_S", "10")
+        self.sqlite_queue_wait_timeout_s = _parse_int_env("SQLITE_QUEUE_WAIT_TIMEOUT_S", "30")
+        self.sqlite_job_completion_timeout_s = _parse_int_env("SQLITE_JOB_COMPLETION_TIMEOUT_S", "60")
+        self.sqlite_shutdown_drain_timeout_s = _parse_int_env("SQLITE_SHUTDOWN_DRAIN_TIMEOUT_S", "10")
 
         # Prompt version
         # self.prompt_version = os.getenv("PROMPT_VERSION")
@@ -189,6 +193,14 @@ class Settings:
             raise RuntimeError("SQLITE_BUSY_RETRY_BASE_DELAY_MS must be >= 0")
         if self.sqlite_job_queue_maxsize < 1:
             raise RuntimeError("SQLITE_JOB_QUEUE_MAXSIZE must be >= 1")
+        if self.sqlite_startup_timeout_s < 1:
+            raise RuntimeError("SQLITE_STARTUP_TIMEOUT_S must be >= 1")
+        if self.sqlite_queue_wait_timeout_s < 1:
+            raise RuntimeError("SQLITE_QUEUE_WAIT_TIMEOUT_S must be >= 1")
+        if self.sqlite_job_completion_timeout_s < 1:
+            raise RuntimeError("SQLITE_JOB_COMPLETION_TIMEOUT_S must be >= 1")
+        if self.sqlite_shutdown_drain_timeout_s < 1:
+            raise RuntimeError("SQLITE_SHUTDOWN_DRAIN_TIMEOUT_S must be >= 1")
 
         # Downstream delivery validation
         if self.downstream_delivery_enabled:

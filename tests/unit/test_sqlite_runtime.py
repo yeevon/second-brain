@@ -518,3 +518,75 @@ def test_submit_after_close_raises(tmp_path):
 
     with pytest.raises(RuntimeError, match="closed"):
         rt.read(lambda conn: None)
+
+
+# ---------------------------------------------------------------------------
+# SB-136: timeout env vars — queue_wait_timeout_s
+# ---------------------------------------------------------------------------
+
+def test_queue_wait_timeout_raises_and_logs_on_stuck_job(tmp_path, capsys):
+    """A job that never completes must raise RuntimeError within queue_wait_timeout_s."""
+    release = threading.Event()
+
+    def blocking_op(conn):
+        release.wait(timeout=10)
+        return 42
+
+    rt = SQLiteRuntime(
+        tmp_path / "test.sqlite3",
+        queue_wait_timeout_s=1,
+        job_completion_timeout_s=60,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="timed out"):
+            rt.read(blocking_op, operation_name="stuck_op")
+        output = capsys.readouterr().out
+        assert "sqlite_queue_wait_timeout" in output
+        assert "stuck_op" in output
+    finally:
+        release.set()
+        rt.close()
+
+
+def test_job_completion_timeout_logs_slow_job(tmp_path, capsys):
+    """A job that takes longer than job_completion_timeout_s must emit a log event."""
+    rt = SQLiteRuntime(
+        tmp_path / "test.sqlite3",
+        queue_wait_timeout_s=30,
+        job_completion_timeout_s=0,  # threshold of 0s — any job triggers it
+    )
+    try:
+        rt.read(lambda conn: None, operation_name="slow_op")
+        output = capsys.readouterr().out
+        assert "sqlite_job_completion_timeout" in output
+    finally:
+        rt.close()
+
+
+def test_startup_timeout_env_var_is_wired(tmp_path):
+    """startup_timeout_s custom value propagates to the runtime (existing startup test covers the timeout path)."""
+    rt = SQLiteRuntime(tmp_path / "test.sqlite3", startup_timeout_s=5)
+    assert rt._startup_timeout_s == 5
+    rt.close()
+
+
+def test_shutdown_drain_timeout_logs_when_worker_hangs(tmp_path, capsys):
+    """shutdown_timeout_s (drain) must log when the worker thread does not exit."""
+    release = threading.Event()
+
+    def blocking_op(conn):
+        release.wait(timeout=10)
+
+    rt = SQLiteRuntime(
+        tmp_path / "test.sqlite3",
+        shutdown_timeout_s=1,
+        queue_wait_timeout_s=30,
+    )
+    threading.Thread(target=lambda: rt.read(blocking_op), daemon=True).start()
+    time.sleep(0.05)  # let the job start
+
+    rt.close()  # must return despite the hung job
+    release.set()
+
+    output = capsys.readouterr().out
+    assert "sqlite_runtime_shutdown_timeout" in output

@@ -120,11 +120,41 @@ def _local_full_checks() -> list[PreflightCheck]:
     return checks
 
 
+def _check_token_min_length(name: str, value: str, min_len: int, template: str) -> PreflightCheck:
+    if not value:
+        return PreflightCheck(name, False, f"missing — see {template}")
+    if len(value) < min_len:
+        return PreflightCheck(name, False, f"too short (must be at least {min_len} characters) — see {template}")
+    return PreflightCheck(name, True, f"set (length ok) — see {template}")
+
+
+def _check_int_range(name: str, raw: str, *, min_val: int | None = None, max_val: int | None = None, template: str = "") -> PreflightCheck | None:
+    if not raw:
+        return None
+    try:
+        val = int(raw)
+    except (ValueError, TypeError):
+        suffix = f" — see {template}" if template else ""
+        return PreflightCheck(name, False, f"must be an integer, got {raw!r}{suffix}")
+    parts = []
+    if min_val is not None and val < min_val:
+        parts.append(f"must be >= {min_val}")
+    if max_val is not None and val > max_val:
+        parts.append(f"must be <= {max_val}")
+    if parts:
+        suffix = f" — see {template}" if template else ""
+        return PreflightCheck(name, False, f"{'; '.join(parts)}, got {val}{suffix}")
+    return None
+
+
 def _capture_only_checks() -> list[PreflightCheck]:
     checks: list[PreflightCheck] = []
 
     internal_token = (os.environ.get("CAPTURE_SERVICE_INTERNAL_TOKEN") or "").strip()
-    checks.append(_check_present("CAPTURE_SERVICE_INTERNAL_TOKEN", internal_token))
+    checks.append(_check_token_min_length(
+        "CAPTURE_SERVICE_INTERNAL_TOKEN", internal_token,
+        min_len=32, template="deploy/capture-service.env.example",
+    ))
 
     downstream_enabled = (os.environ.get("DOWNSTREAM_DELIVERY_ENABLED") or "").strip().lower() == "true"
     if downstream_enabled:
@@ -137,7 +167,29 @@ def _capture_only_checks() -> list[PreflightCheck]:
             checks.append(PreflightCheck("N8N_INTAKE_WEBHOOK_URL", True, "set"))
 
         webhook_token = (os.environ.get("N8N_INTAKE_WEBHOOK_TOKEN") or "").strip()
-        checks.append(_check_present("N8N_INTAKE_WEBHOOK_TOKEN", webhook_token))
+        checks.append(_check_token_min_length(
+            "N8N_INTAKE_WEBHOOK_TOKEN", webhook_token,
+            min_len=32, template="deploy/capture-service.env.example",
+        ))
+
+    # Numeric ranges for common tunable vars
+    numeric_checks = [
+        ("CAPTURE_API_PORT",                        1,    65535, "deploy/capture-service.env.example"),
+        ("PERIODIC_RECONCILE_INTERVAL_SECONDS",     1,    None,  "deploy/capture-service.env.example"),
+        ("PERIODIC_RECONCILE_LIMIT",                1,    None,  "deploy/capture-service.env.example"),
+        ("DELIVERY_RETRY_MAX_ATTEMPTS",             1,    None,  "deploy/capture-service.env.example"),
+        ("DELIVERY_RETRY_BASE_DELAY_SECONDS",       1,    None,  "deploy/capture-service.env.example"),
+        ("DELIVERY_WEBHOOK_TIMEOUT_SECONDS",        1,    None,  "deploy/capture-service.env.example"),
+        ("SQLITE_STARTUP_TIMEOUT_S",                1,    None,  "deploy/capture-service.env.example"),
+        ("SQLITE_QUEUE_WAIT_TIMEOUT_S",             1,    None,  "deploy/capture-service.env.example"),
+        ("SQLITE_JOB_COMPLETION_TIMEOUT_S",         1,    None,  "deploy/capture-service.env.example"),
+        ("SQLITE_SHUTDOWN_DRAIN_TIMEOUT_S",         1,    None,  "deploy/capture-service.env.example"),
+    ]
+    for var, lo, hi, tmpl in numeric_checks:
+        raw = (os.environ.get(var) or "").strip()
+        result = _check_int_range(var, raw, min_val=lo, max_val=hi, template=tmpl)
+        if result is not None:
+            checks.append(result)
 
     return checks
 

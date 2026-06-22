@@ -1893,13 +1893,16 @@ def _seed_mvp_db(db_path, *, status):
             capture_id TEXT NOT NULL,
             event_type TEXT NOT NULL,
             event_payload_json TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (capture_id) REFERENCES captures(capture_id)
         );
         CREATE TABLE system_state (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS idx_captures_status ON captures(status);
+        CREATE INDEX IF NOT EXISTS idx_capture_events_capture_id ON capture_events(capture_id);
     """)
     raw.execute(
         """
@@ -1948,13 +1951,16 @@ def _seed_mvp_db_sensitive(db_path):
             capture_id TEXT NOT NULL,
             event_type TEXT NOT NULL,
             event_payload_json TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (capture_id) REFERENCES captures(capture_id)
         );
         CREATE TABLE system_state (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS idx_captures_status ON captures(status);
+        CREATE INDEX IF NOT EXISTS idx_capture_events_capture_id ON capture_events(capture_id);
     """)
     raw.execute(
         """

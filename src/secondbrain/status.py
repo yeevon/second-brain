@@ -97,6 +97,12 @@ class OperationalStatusSnapshot:
     reconcile_last_heartbeat_at: datetime | None
     background_task_stale: bool
 
+    # SB-137: per-task status
+    reaper_task_status: str | None
+    reconcile_task_status: str | None
+    delivery_task_status: str | None
+    classifier_task_status: str | None
+
 
 def calculate_capture_service_health(
     *,
@@ -321,6 +327,10 @@ def _query_snapshot(
         reaper_last_heartbeat_at=parse_dt(get_state("reaper_last_heartbeat_at")),
         reconcile_last_heartbeat_at=parse_dt(get_state("reconcile_last_heartbeat_at")),
         background_task_stale=get_state("background_task_stale") == "true",
+        reaper_task_status=get_state("reaper_task_status"),
+        reconcile_task_status=get_state("reconcile_task_status"),
+        delivery_task_status=get_state("delivery_task_status"),
+        classifier_task_status=get_state("classifier_task_status"),
     )
 
 
@@ -372,8 +382,10 @@ def format_operational_status(snapshot: OperationalStatusSnapshot) -> str:
         f"  capture-service stopped at: {_fmt(snapshot.capture_service_stopped_at)}",
         "",
         "Background tasks",
-        f"  reaper last heartbeat: {_fmt(snapshot.reaper_last_heartbeat_at)}",
-        f"  reconcile last heartbeat: {_fmt(snapshot.reconcile_last_heartbeat_at)}",
+        f"  reaper: {_fmt(snapshot.reaper_task_status)} (last heartbeat: {_fmt(snapshot.reaper_last_heartbeat_at)})",
+        f"  reconcile: {_fmt(snapshot.reconcile_task_status)} (last heartbeat: {_fmt(snapshot.reconcile_last_heartbeat_at)})",
+        f"  delivery: {_fmt(snapshot.delivery_task_status)}",
+        f"  classifier: {_fmt(snapshot.classifier_task_status)}",
         f"  background task stale: {snapshot.background_task_stale}",
         "",
         "Backup",

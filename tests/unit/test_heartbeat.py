@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from secondbrain.heartbeat import run_capture_service_heartbeat
+from secondbrain.heartbeat import mark_task_not_applicable, run_capture_service_heartbeat, _check_background_task_liveness
 from secondbrain.ledger import Ledger
 
 
@@ -249,3 +249,90 @@ async def test_heartbeat_loop_logs_superseded_instance_safely(capsys):
     output = capsys.readouterr().out
     assert "capture_service_heartbeat_superseded" in output
     assert _INSTANCE_A in output
+
+
+# ---------------------------------------------------------------------------
+# SB-137: per-task status — not_applicable, running, degraded
+# ---------------------------------------------------------------------------
+
+class _StateLedger:
+    """Minimal ledger stub supporting get/set system_state and heartbeat."""
+
+    def __init__(self, initial: dict | None = None):
+        self._state: dict[str, str] = initial or {}
+        self._hb_returns = True
+
+    def get_system_state(self, key: str) -> str | None:
+        return self._state.get(key)
+
+    def set_system_state(self, key: str, value: str) -> None:
+        self._state[key] = value
+
+    def record_capture_service_heartbeat(self, *, instance_id, now):
+        return self._hb_returns
+
+
+def test_mark_task_not_applicable_writes_status(tmp_path):
+    ledger = make_ledger(tmp_path)
+    mark_task_not_applicable(ledger, "classifier")
+    assert ledger.get_system_state("classifier_task_status") == "not_applicable"
+
+
+def test_not_applicable_task_never_reported_as_degraded():
+    stub = _StateLedger({"classifier_task_status": "not_applicable"})
+    stub.set_system_state("classifier_last_heartbeat_at", (datetime.now(UTC) - timedelta(hours=10)).isoformat())
+    _check_background_task_liveness(
+        ledger=stub,
+        reaper_liveness_threshold_s=300,
+        reconcile_liveness_threshold_s=300,
+        classifier_liveness_threshold_s=300,
+    )
+    assert stub.get_system_state("classifier_task_status") == "not_applicable"
+
+
+def test_healthy_task_shows_running_status():
+    now = datetime.now(UTC)
+    stub = _StateLedger({
+        "reaper_last_heartbeat_at": (now - timedelta(seconds=30)).isoformat(),
+    })
+    _check_background_task_liveness(
+        ledger=stub,
+        reaper_liveness_threshold_s=300,
+        reconcile_liveness_threshold_s=300,
+    )
+    assert stub.get_system_state("reaper_task_status") == "running"
+
+
+def test_stale_task_shows_degraded_status():
+    now = datetime.now(UTC)
+    stub = _StateLedger({
+        "reaper_last_heartbeat_at": (now - timedelta(seconds=600)).isoformat(),
+    })
+    _check_background_task_liveness(
+        ledger=stub,
+        reaper_liveness_threshold_s=300,
+        reconcile_liveness_threshold_s=300,
+    )
+    assert stub.get_system_state("reaper_task_status") == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_loop_respects_not_applicable_task():
+    """not_applicable tasks must not be overwritten to running/degraded by the heartbeat loop."""
+    now = datetime.now(UTC)
+    stub = _StateLedger({
+        "classifier_task_status": "not_applicable",
+        "classifier_last_heartbeat_at": (now - timedelta(seconds=10)).isoformat(),
+    })
+    stub._hb_returns = False  # exits after first tick
+
+    task = asyncio.create_task(
+        run_capture_service_heartbeat(
+            ledger=stub,
+            instance_id=_INSTANCE_A,
+            interval_seconds=0,
+            classifier_liveness_threshold_s=300,
+        )
+    )
+    await task
+    assert stub.get_system_state("classifier_task_status") == "not_applicable"

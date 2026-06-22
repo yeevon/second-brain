@@ -14,7 +14,7 @@ from secondbrain.capture_api import create_capture_api
 from secondbrain.capture_service import CaptureService
 from secondbrain.config import Settings
 from secondbrain.discord_capture import create_discord_client
-from secondbrain.heartbeat import run_capture_service_heartbeat
+from secondbrain.heartbeat import mark_task_not_applicable, run_capture_service_heartbeat
 from secondbrain.logging_config import configure_logging
 from secondbrain.observability import log_metadata
 from secondbrain.reconcile import ReconcileResult
@@ -235,6 +235,7 @@ async def run_local_full_runtime(settings: Settings) -> None:
         queue=queue,
         vault_writer=vault_writer,
     )
+    mark_task_not_applicable(capture_service, "delivery")
     instance_id = initialize_capture_service_lifecycle(
         startup=startup,
         capture_service=capture_service,
@@ -317,6 +318,9 @@ async def run_local_full_runtime(settings: Settings) -> None:
 async def run_capture_only_runtime(settings: Settings) -> None:
     capture_service = CaptureService.open(settings, notify_capture=None)
     startup = CaptureOnlyStartup(capture_service=capture_service, settings=settings)
+    mark_task_not_applicable(capture_service, "classifier")
+    if not settings.downstream_delivery_enabled:
+        mark_task_not_applicable(capture_service, "delivery")
     instance_id = initialize_capture_service_lifecycle(
         startup=startup,
         capture_service=capture_service,

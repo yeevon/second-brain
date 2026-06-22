@@ -79,10 +79,14 @@ class Ledger:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-        busy_timeout_ms      = getattr(settings, "sqlite_busy_timeout_ms",       1000)  if settings else 1000
-        retry_attempts       = getattr(settings, "sqlite_busy_retry_attempts",      5)  if settings else 5
-        retry_base_delay_ms  = getattr(settings, "sqlite_busy_retry_base_delay_ms", 25) if settings else 25
-        job_queue_maxsize    = getattr(settings, "sqlite_job_queue_maxsize",     10000) if settings else 10000
+        busy_timeout_ms           = getattr(settings, "sqlite_busy_timeout_ms",            1000)  if settings else 1000
+        retry_attempts            = getattr(settings, "sqlite_busy_retry_attempts",           5)  if settings else 5
+        retry_base_delay_ms       = getattr(settings, "sqlite_busy_retry_base_delay_ms",     25)  if settings else 25
+        job_queue_maxsize         = getattr(settings, "sqlite_job_queue_maxsize",         10000)  if settings else 10000
+        startup_timeout_s         = getattr(settings, "sqlite_startup_timeout_s",            10)  if settings else 10
+        queue_wait_timeout_s      = getattr(settings, "sqlite_queue_wait_timeout_s",         30)  if settings else 30
+        job_completion_timeout_s  = getattr(settings, "sqlite_job_completion_timeout_s",     60)  if settings else 60
+        shutdown_drain_timeout_s  = getattr(settings, "sqlite_shutdown_drain_timeout_s",     10)  if settings else 10
 
         self._runtime = SQLiteRuntime(
             self.path,
@@ -90,6 +94,10 @@ class Ledger:
             retry_attempts=retry_attempts,
             retry_base_delay_ms=retry_base_delay_ms,
             job_queue_maxsize=job_queue_maxsize,
+            startup_timeout_s=startup_timeout_s,
+            queue_wait_timeout_s=queue_wait_timeout_s,
+            job_completion_timeout_s=job_completion_timeout_s,
+            shutdown_timeout_s=shutdown_drain_timeout_s,
         )
 
     def close(self) -> None:

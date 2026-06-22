@@ -155,6 +155,9 @@ class CaptureService:
     def get_system_state(self, key: str) -> str | None:
         return self._ledger.get_system_state(key)
 
+    def set_system_state(self, key: str, value: str) -> None:
+        self._ledger.set_system_state(key, value)
+
     def record_capture_service_stop(self, *, instance_id: str, now: datetime) -> bool:
         updated = self._ledger.record_capture_service_stop(instance_id=instance_id, now=now)
         if updated:
