@@ -42,6 +42,15 @@ def _make_settings(tmp_path, **overrides):
         "ledger_path": tmp_path / "runtime" / "ledger.sqlite3",
         "vault_path": tmp_path / "vault",
         "downstream_delivery_enabled": False,
+        "delivery_retry_max_attempts": 3,
+        "delivery_retry_base_delay_seconds": 1,
+        "delivery_retry_max_delay_seconds": 10,
+        "delivery_forward_lease_seconds": 60,
+        "delivery_processing_lease_seconds": 300,
+        "delivery_dispatch_interval_seconds": 2,
+        "delivery_dispatch_batch_size": 25,
+        "delivery_reaper_interval_seconds": 30,
+        "delivery_reaper_batch_size": 100,
     }
     data.update(overrides)
     return SimpleNamespace(**data)
@@ -1117,3 +1126,289 @@ def test_sb148_all_duration_fields_are_milliseconds(tmp_path, capsys):
                         )
     finally:
         rt.close()
+
+
+# ===========================================================================
+# Blocker fixes — Review feedback round 1
+# ===========================================================================
+
+# ------ Fix 1: receipt sync on all terminal delivery paths ------
+
+@pytest.mark.asyncio
+async def test_fix1_schedule_delivery_retry_terminal_sets_failed_when_receipt_fails(tmp_path):
+    """schedule_delivery_retry with terminal failure sets receipt_sync_status='failed' if edit fails."""
+    from unittest.mock import patch
+    from secondbrain.ledger import RetryDisposition
+
+    settings = _make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    result = ledger.insert_accepted_capture(
+        discord_message_id="1", discord_channel_id="200",
+        discord_guild_id="100", discord_author_id="300", raw_text="hello",
+    )
+    capture_id = result.capture.capture_id
+    ledger.set_receipt_message_id(capture_id, "9001")
+
+    service = CaptureService(
+        settings=settings, ledger=ledger,
+        receipt_client=_AlwaysFailingReceiptClient(),
+    )
+
+    terminal_disposition = RetryDisposition(
+        capture_id=capture_id,
+        delivery_status="DELIVERY_FAILED",
+        delivery_attempts=3,
+        next_attempt_at=None,
+        retry_scheduled=False,
+        failed_terminally=True,
+        outcome="terminal_failure",
+    )
+    with patch.object(ledger, "schedule_retry", return_value=terminal_disposition):
+        await service.schedule_delivery_retry(
+            capture_id=capture_id, delivery_attempt=3, error_type="WebhookError",
+        )
+
+    updated = ledger.get_capture(capture_id)
+    assert updated.receipt_sync_status == "failed"
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_fix1_acknowledge_delivery_failed_sets_failed_when_receipt_fails(tmp_path):
+    """acknowledge_delivery_failed sets receipt_sync_status='failed' when the receipt edit fails."""
+    from unittest.mock import patch
+    from secondbrain.ledger import DeliveryMutationResult
+
+    settings = _make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    result = ledger.insert_accepted_capture(
+        discord_message_id="1", discord_channel_id="200",
+        discord_guild_id="100", discord_author_id="300", raw_text="hello",
+    )
+    capture_id = result.capture.capture_id
+    ledger.set_receipt_message_id(capture_id, "9001")
+
+    service = CaptureService(
+        settings=settings, ledger=ledger,
+        receipt_client=_AlwaysFailingReceiptClient(),
+    )
+
+    changed_result = DeliveryMutationResult(
+        capture_id=capture_id, delivery_status="DELIVERY_FAILED", delivery_attempts=1,
+        changed=True, outcome="changed",
+    )
+    with patch.object(ledger, "mark_delivery_failed_terminally", return_value=changed_result):
+        await service.acknowledge_delivery_failed(
+            capture_id=capture_id, delivery_attempt=1, reason_type="gemini_auth_failed",
+        )
+
+    updated = ledger.get_capture(capture_id)
+    assert updated.receipt_sync_status == "failed"
+    ledger.close()
+
+
+# ------ Fix 2: REJECTED_SENSITIVE receipt sync ------
+
+@pytest.mark.asyncio
+async def test_fix2_rejected_sensitive_receipt_failure_sets_failed(tmp_path):
+    """Rejected-sensitive capture sets receipt_sync_status='failed' when receipt send fails."""
+    from tests.fakes.discord import FakeDiscordMessage, FakeDiscordChannel
+    from secondbrain.secret_screen import SecretScreenResult
+
+    settings = _make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+
+    channel = FakeDiscordChannel()
+    channel.fail_initial_send = True  # makes send() raise on first call
+
+    service = CaptureService(
+        settings=settings, ledger=ledger,
+        receipt_client=FakeDiscordClient(channel),
+    )
+
+    fake_result = SecretScreenResult(is_sensitive=True, redacted_text="[REDACTED]", flags=("password",))
+    msg = FakeDiscordMessage(message_id=5555, content="irrelevant", channel=channel)
+
+    await service._persist_sensitive_rejection(msg, fake_result)
+
+    rows = ledger.get_out_of_sync_receipts()
+    assert len(rows) >= 1
+    cap = next(r for r in rows if r.discord_message_id == "5555")
+    assert cap.receipt_sync_status == "failed"
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_fix2_rejected_sensitive_receipt_success_sets_not_applicable(tmp_path):
+    """Rejected-sensitive capture with successful send is excluded from out-of-sync list."""
+    from tests.fakes.discord import FakeDiscordMessage, FakeDiscordChannel
+    from secondbrain.secret_screen import SecretScreenResult
+
+    settings = _make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    channel = FakeDiscordChannel()
+
+    service = CaptureService(
+        settings=settings, ledger=ledger,
+        receipt_client=FakeDiscordClient(channel),
+    )
+
+    fake_result = SecretScreenResult(is_sensitive=True, redacted_text="[REDACTED]", flags=("password",))
+    msg = FakeDiscordMessage(message_id=5556, content="irrelevant", channel=channel)
+
+    await service._persist_sensitive_rejection(msg, fake_result)
+
+    # not_applicable is excluded from out_of_sync, so this capture must not appear there
+    rows = ledger.get_out_of_sync_receipts()
+    assert not any(r.discord_message_id == "5556" for r in rows), (
+        "Successful rejection receipt must set not_applicable, not appear in out-of-sync list"
+    )
+    ledger.close()
+
+
+# ------ Fix 3: n8n Parse Error? node for malformed routing ------
+
+def test_fix3_intake_has_parse_error_if_node():
+    """Intake workflow has a 'Parse Error?' If node."""
+    wf = _intake()
+    names = [n["name"] for n in wf["nodes"]]
+    assert "Parse Error?" in names, (
+        f"Expected 'Parse Error?' node in workflow, found: {names}"
+    )
+
+
+def test_fix3_parse_gemini_response_routes_to_parse_error_node():
+    """Parse Gemini Response connects to Parse Error? (not directly to Validate Classification)."""
+    wf = _intake()
+    conns = wf["connections"]
+    targets = [
+        c["node"]
+        for branch in conns.get("Parse Gemini Response", {}).get("main", [])
+        for c in branch
+    ]
+    assert "Parse Error?" in targets, (
+        f"Parse Gemini Response must route to Parse Error?, got: {targets}"
+    )
+    assert "Validate Classification" not in targets, (
+        "Parse Gemini Response must not go directly to Validate Classification (must check parse_error first)"
+    )
+
+
+def test_fix3_parse_error_true_branch_routes_to_malformed_retry():
+    """Parse Error? true branch routes to Schedule Retry (malformed classifier output)."""
+    wf = _intake()
+    conns = wf["connections"]
+    branches = conns.get("Parse Error?", {}).get("main", [])
+    assert len(branches) >= 2
+    true_branch_targets = [c["node"] for c in branches[0]]
+    assert "Schedule Retry (malformed classifier output)" in true_branch_targets, (
+        f"Parse Error? true branch must go to malformed retry, got: {true_branch_targets}"
+    )
+
+
+def test_fix3_parse_error_false_branch_routes_to_validate_classification():
+    """Parse Error? false branch continues to Validate Classification."""
+    wf = _intake()
+    conns = wf["connections"]
+    branches = conns.get("Parse Error?", {}).get("main", [])
+    assert len(branches) >= 2
+    false_branch_targets = [c["node"] for c in branches[1]]
+    assert "Validate Classification" in false_branch_targets, (
+        f"Parse Error? false branch must go to Validate Classification, got: {false_branch_targets}"
+    )
+
+
+# ------ Fix 4: capture_service attachment-only gate before screen_text ------
+
+@pytest.mark.asyncio
+async def test_fix4_attachment_only_capture_bypasses_screen_text(tmp_path):
+    """Attachment-only message (empty text + attachment) is accepted without screening."""
+    from unittest.mock import patch
+    from tests.fakes.discord import FakeDiscordMessage, FakeDiscordAttachment, FakeDiscordChannel
+
+    settings = _make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    channel = FakeDiscordChannel()
+
+    service = CaptureService(
+        settings=settings, ledger=ledger,
+        receipt_client=FakeDiscordClient(channel),
+    )
+
+    attachment = FakeDiscordAttachment(filename="photo.jpg", content_type="image/jpeg")
+    msg = FakeDiscordMessage(
+        message_id=7777,
+        content="",  # no text
+        channel=channel,
+        attachments=[attachment],
+    )
+
+    with patch("secondbrain.capture_service.screen_text") as mock_screen:
+        await service.handle_gateway_message(msg)
+        mock_screen.assert_not_called()
+
+    all_caps = ledger._runtime.read(lambda conn: conn.execute("SELECT * FROM captures WHERE has_attachments=1").fetchall())
+    assert len(all_caps) >= 1, "Attachment-only message must be persisted with has_attachments=1"
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_fix4_message_with_text_and_attachment_still_screened(tmp_path):
+    """Message with both text and attachments is still screened for sensitive content."""
+    from unittest.mock import patch, MagicMock
+    from tests.fakes.discord import FakeDiscordMessage, FakeDiscordAttachment, FakeDiscordChannel
+
+    settings = _make_settings(tmp_path)
+    ledger = Ledger(settings.ledger_path)
+    channel = FakeDiscordChannel()
+
+    service = CaptureService(
+        settings=settings, ledger=ledger,
+        receipt_client=FakeDiscordClient(channel),
+    )
+
+    attachment = FakeDiscordAttachment(filename="photo.jpg", content_type="image/jpeg")
+    msg = FakeDiscordMessage(
+        message_id=7778,
+        content="some text with attachment",
+        channel=channel,
+        attachments=[attachment],
+    )
+
+    safe_result = MagicMock()
+    safe_result.is_sensitive = False
+    with patch("secondbrain.capture_service.screen_text", return_value=safe_result) as mock_screen:
+        await service.handle_gateway_message(msg)
+        mock_screen.assert_called_once()
+
+    ledger.close()
+
+
+# ------ Fix 5: receipt_sync_status enum validation ------
+
+def test_fix5_set_receipt_sync_status_rejects_invalid_value(tmp_path):
+    """set_receipt_sync_status raises ValueError for values outside the defined enum."""
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    result = ledger.insert_accepted_capture(
+        discord_message_id="1", discord_channel_id="200",
+        discord_guild_id="100", discord_author_id="300", raw_text="hello",
+    )
+    capture_id = result.capture.capture_id
+
+    with pytest.raises(ValueError, match="Invalid receipt_sync_status"):
+        ledger.set_receipt_sync_status(capture_id, status="broken")
+
+    ledger.close()
+
+
+def test_fix5_set_receipt_sync_status_accepts_all_valid_values(tmp_path):
+    """set_receipt_sync_status accepts all four defined enum values without error."""
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    for i, status in enumerate(["clean", "failed", "pending_repair", "not_applicable"]):
+        result = ledger.insert_accepted_capture(
+            discord_message_id=str(i + 1), discord_channel_id="200",
+            discord_guild_id="100", discord_author_id="300", raw_text=f"test {i}",
+        )
+        ledger.set_receipt_sync_status(result.capture.capture_id, status=status)
+
+    ledger.close()

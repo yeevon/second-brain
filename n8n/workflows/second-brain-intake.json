@@ -1212,6 +1212,35 @@
           "combinator": "and"
         }
       }
+    },
+    {
+      "id": "if-parse-error",
+      "name": "Parse Error?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3020,
+        60
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "id": "check-parse-error",
+              "leftValue": "={{ $json.parse_error }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
     }
   ],
   "pinData": {},
@@ -1366,7 +1395,7 @@
       "main": [
         [
           {
-            "node": "Validate Classification",
+            "node": "Parse Error?",
             "type": "main",
             "index": 0
           }
@@ -1627,6 +1656,24 @@
         [
           {
             "node": "Schedule Retry (malformed classifier output)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Error?": {
+      "main": [
+        [
+          {
+            "node": "Schedule Retry (malformed classifier output)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Validate Classification",
             "type": "main",
             "index": 0
           }

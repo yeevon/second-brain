@@ -170,12 +170,15 @@ async def _edit_receipt_best_effort(
     *,
     capture_id: str,
     content: str,
-) -> None:
+) -> bool:
+    """Return True if receipt was updated, False on failure."""
     try:
         await receipt_edit_client.edit_receipt(capture_id=capture_id, content=content)
+        return True
     except Exception as exc:
         log_metadata(
             "delivery_receipt_edit_failed",
             capture_id=capture_id,
             error_type=type(exc).__name__,
         )
+        return False

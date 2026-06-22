@@ -182,6 +182,8 @@ class Ledger:
             event_payload={"receipt_message_id": receipt_message_id},
         )
 
+    _VALID_RECEIPT_SYNC_STATUSES = frozenset({"clean", "failed", "pending_repair", "not_applicable"})
+
     def set_receipt_sync_status(
         self,
         capture_id: str,
@@ -190,6 +192,11 @@ class Ledger:
         last_attempt_at: str | None = None,
         error_type: str | None = None,
     ) -> None:
+        if status not in self._VALID_RECEIPT_SYNC_STATUSES:
+            raise ValueError(
+                f"Invalid receipt_sync_status {status!r}; "
+                f"must be one of {sorted(self._VALID_RECEIPT_SYNC_STATUSES)}"
+            )
         self._write(
             "set_receipt_sync_status",
             lambda conn: self._set_receipt_sync_status(
