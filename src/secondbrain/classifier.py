@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os as _os
 import re
 from typing import Any
 
@@ -12,6 +13,31 @@ from secondbrain.models import Classification, ClassificationOutcome
 
 
 CLASSIFIER_PROMPT_VERSION = "classifier-v1"
+
+DETERMINISTIC_CLASSIFICATION = {
+    "folder": "inbox",
+    "project": None,
+    "note_type": "note",
+    "note_date": None,
+    "title": "Deterministic Test Capture",
+    "tags": ["smoke-test"],
+    "body": "This note was filed by the deterministic classifier.",
+    "actions": [],
+    "needs_clarification": False,
+    "clarifying_question": None,
+    "confidence": 1.0,
+}
+
+_VALID_CLASSIFIER_MODES = frozenset({"gemini", "deterministic"})
+
+
+def _get_classifier_mode() -> str:
+    mode = _os.environ.get("CLASSIFIER_MODE", "gemini").strip().lower()
+    if mode not in _VALID_CLASSIFIER_MODES:
+        raise ValueError(
+            f"CLASSIFIER_MODE must be one of {sorted(_VALID_CLASSIFIER_MODES)}, got: {mode!r}"
+        )
+    return mode
 
 CLASSIFIER_SYSTEM_PROMPT = """You classify raw Discord captures for a personal Second Brain.
 
@@ -62,6 +88,16 @@ async def classify_capture(
     confidence_threshold: float,
     client: Any | None = None,
 ) -> ClassificationOutcome:
+    if _get_classifier_mode() == "deterministic":
+        from secondbrain.observability import log_metadata
+        log_metadata("classifier_mode_deterministic")
+        classification = Classification.model_validate(DETERMINISTIC_CLASSIFICATION)
+        return ClassificationOutcome(
+            classification=classification,
+            route="inbox",
+            inbox_reason="deterministic classifier mode",
+        )
+
     client = client or genai.Client(api_key=api_key)
 
     try:

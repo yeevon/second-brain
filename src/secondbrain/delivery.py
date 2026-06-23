@@ -152,9 +152,10 @@ async def _run_one_dispatch_pass(
             )
         elif result.outcome == "idempotent_replay":
             log_metadata(
-                "duplicate_delivery_acceptance_ignored",
+                "delivery_idempotent_replay_accepted",
                 capture_id=capture.capture_id,
                 delivery_attempt=attempt,
+                outcome="idempotent_replay",
             )
         else:
             log_metadata(

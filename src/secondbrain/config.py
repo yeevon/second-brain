@@ -46,6 +46,7 @@ class Settings:
         self.vault_path              = os.getenv("VAULT_PATH")
         self.ledger_path             = os.getenv("LEDGER_PATH")
         self.startup_reconcile_limit = os.getenv("STARTUP_RECONCILE_LIMIT")
+        self.startup_reconcile_enabled = _parse_bool_env("STARTUP_RECONCILE_ENABLED")
 
         # Internal capture API
         self.capture_service_internal_token = os.getenv("CAPTURE_SERVICE_INTERNAL_TOKEN")
@@ -230,3 +231,17 @@ def _parse_int_env(name: str, default: str) -> int:
         return int(raw)
     except (ValueError, TypeError) as exc:
         raise RuntimeError(f"{name} must be an integer, got: {raw!r}") from exc
+
+
+def _parse_bool_env(name: str, *, default: bool = True) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    normalized = raw.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise ValueError(
+        f"{name} must be 'true' or 'false', got: {raw!r}"
+    )

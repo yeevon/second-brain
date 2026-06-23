@@ -41,6 +41,7 @@ def make_settings(tmp_path):
         capture_processing_mode="local-full",
         writer_service_url=None,
         writer_service_token=None,
+        startup_reconcile_enabled=True,
     )
 
 
@@ -231,7 +232,8 @@ def test_format_operational_status_includes_basic_counts(tmp_path):
     assert "captures rejected as sensitive: 1" in report
     assert "captures failed: 1" in report
     assert "last reconciled Discord message ID: 1513233540316266517" in report
-    assert "last successful vault write: 00_inbox/inbox.md" in report
+    assert "last vault write path:" in report
+    assert "00_inbox/inbox.md" in report
 
 
 def test_main_reports_configuration_errors_without_traceback(monkeypatch, capsys):

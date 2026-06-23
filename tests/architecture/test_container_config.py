@@ -190,3 +190,11 @@ def test_verify_script_checks_ebs_marker():
 
     assert ".second-brain-ebs-volume" in verify
     assert "MARKER" in verify
+
+
+def test_mcp_local_compose_file_does_not_exist():
+    """Dockerized MCP is unsupported; the file must be absent."""
+    assert not (ROOT / "compose.mcp-local.yaml").exists(), (
+        "compose.mcp-local.yaml was removed — Dockerized MCP is unsupported. "
+        "Use the host-process brain-mcp instead."
+    )

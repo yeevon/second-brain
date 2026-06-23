@@ -93,6 +93,7 @@ class OperationalStatusSnapshot:
     last_successful_restore_validation_at: datetime | None
     receipt_repairs_today: int
     last_vault_write_at: datetime | None
+    last_vault_write_capture_id: str | None
     reaper_last_heartbeat_at: datetime | None
     reconcile_last_heartbeat_at: datetime | None
     delivery_last_heartbeat_at: datetime | None
@@ -260,6 +261,7 @@ def _query_snapshot(
     ).fetchone()
     last_successful_vault_write = vault_row["derived_note_path"] if vault_row else None
     last_vault_write_at = parse_dt(get_state("last_vault_write_at"))
+    last_vault_write_capture_id = get_state("last_vault_write_capture_id")
 
     last_reconciled_discord_message_id = get_state("last_reconciled_discord_message_id")
     last_successful_reconciliation_at = parse_dt(get_state("last_successful_reconciliation_at"))
@@ -344,6 +346,7 @@ def _query_snapshot(
         last_successful_reconciliation_at=last_successful_reconciliation_at,
         last_successful_reconciliation_mode=last_successful_reconciliation_mode,
         last_successful_vault_write=last_successful_vault_write,
+        last_vault_write_capture_id=last_vault_write_capture_id,
         capture_service_health=health,
         capture_service_state=service_state,
         capture_service_instance_id=service_instance_id,
@@ -399,8 +402,9 @@ def format_operational_status(snapshot: OperationalStatusSnapshot) -> str:
         f"  captures needing clarification: {snapshot.captures_needing_clarification}",
         f"  captures failed: {snapshot.captures_failed}",
         f"  receipt repairs today: {snapshot.receipt_repairs_today}",
-        f"  last successful vault write: {_fmt(snapshot.last_successful_vault_write)}",
-        f"  last vault write at: {_fmt(snapshot.last_vault_write_at)}",
+        f"  last vault write at:      {_fmt(snapshot.last_vault_write_at)}",
+        f"  last vault write capture: {snapshot.last_vault_write_capture_id or 'none'}",
+        f"  last vault write path:    {_fmt(snapshot.last_successful_vault_write)}",
         "",
         "Delivery backlog",
         f"  captures waiting for retry: {snapshot.captures_waiting_for_retry}",

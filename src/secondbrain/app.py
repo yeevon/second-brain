@@ -77,7 +77,13 @@ class LocalWorkerStartup:
             if self.worker_task is not None and not self.worker_task.done():
                 return None
 
-            reconcile_result = await self.capture_service.startup_reconcile(client)
+            if self.settings.startup_reconcile_enabled:
+                reconcile_result = await self.capture_service.startup_reconcile(client)
+            else:
+                from secondbrain.observability import log_metadata
+                log_metadata("startup_reconcile_disabled_for_local_smoke")
+                from secondbrain.reconcile import ReconcileResult
+                reconcile_result = ReconcileResult()
             self.worker_task, capture_ids = await start_local_worker_and_enqueue_recovered(
                 settings=self.settings,
                 capture_service=self.capture_service,
@@ -107,7 +113,13 @@ class CaptureOnlyStartup:
         async with self._startup_lock:
             if self._started:
                 return None
-            result = await self.capture_service.startup_reconcile(client)
+            reconcile_enabled = getattr(self.settings, "startup_reconcile_enabled", True)
+            if reconcile_enabled:
+                result = await self.capture_service.startup_reconcile(client)
+            else:
+                from secondbrain.observability import log_metadata
+                log_metadata("startup_reconcile_disabled_for_local_smoke")
+                result = None
             self._started = True
             return result
 

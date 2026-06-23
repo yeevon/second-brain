@@ -93,6 +93,19 @@ def _unwrap(body):
     return body
 
 
+def _retry(fn, *, attempts=None, delay_s=None, label=""):
+    _attempts = attempts if attempts is not None else int(os.environ.get("N8N_INIT_RETRY_ATTEMPTS", "5"))
+    _delay = delay_s if delay_s is not None else int(os.environ.get("N8N_INIT_RETRY_DELAY_S", "3"))
+    for attempt in range(1, _attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if attempt == _attempts:
+                raise
+            print(f"  {label or 'step'} attempt {attempt}/{_attempts} failed ({exc}), retrying in {_delay}s…")
+            time.sleep(_delay)
+
+
 # ── Owner setup ───────────────────────────────────────────────────────────────
 
 def setup_owner():
@@ -120,12 +133,30 @@ def setup_owner():
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 def login():
-    # n8n 2.x login: response body carries the user object; the session
-    # is maintained via the Set-Cookie header, captured by _cookie_jar.
     status, body = _api("POST", "/rest/login", {
         "emailOrLdapLoginId": LOCAL_EMAIL,
         "password": LOCAL_PASSWORD,
-    })
+    }, ok_statuses=None)
+    if status == 401:
+        print(
+            "\nERROR: n8n login returned 401 — owner account credentials do not match.\n"
+            "\nLikely causes:\n"
+            "  1. Stale n8n data volume from a previous session with different credentials.\n"
+            "     Fix: docker compose down && docker volume rm second-brain-local-n8n-data\n"
+            "          then re-run docker compose up -d\n"
+            "  2. N8N_LOCAL_EMAIL or N8N_LOCAL_PASSWORD changed since the volume was created.\n"
+            "     Fix: align the env vars with the credentials stored in the volume,\n"
+            "          or wipe the volume as above.\n"
+            "  3. Owner was never created (setup step skipped).\n"
+            "     Fix: open http://localhost:5678 and complete the owner setup in the UI.\n"
+            "\nDo not include passwords in bug reports.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if status not in (200, 201):
+        raise RuntimeError(
+            f"POST /rest/login → HTTP {status}: {json.dumps(body)[:300]}"
+        )
     data = _unwrap(body)
     if not isinstance(data, dict) or "email" not in data:
         raise RuntimeError(f"Login response did not contain user object: {body}")
@@ -285,30 +316,30 @@ def main():
 
     print("Importing Error Handler workflow…")
     eh_json = patch_json(ERROR_HANDLER_WF, cred_patches)
-    eh_id   = import_or_update_workflow(eh_json)
+    eh_id   = _retry(lambda: import_or_update_workflow(eh_json), label="import workflow")
 
     print("Activating Error Handler workflow…")
-    activate_workflow(eh_id)
+    _retry(lambda: activate_workflow(eh_id), label="activate workflow")
 
     print("Importing Intake workflow…")
     intake_patches = dict(cred_patches)
     intake_patches["PLACEHOLDER_SECOND_BRAIN_ERROR_HANDLER"] = eh_id
     intake_json  = patch_json(INTAKE_WF, intake_patches)
-    intake_wf_id = import_or_update_workflow(intake_json)
+    intake_wf_id = _retry(lambda: import_or_update_workflow(intake_json), label="import workflow")
 
     print("Activating Intake workflow…")
-    activate_workflow(intake_wf_id)
+    _retry(lambda: activate_workflow(intake_wf_id), label="activate workflow")
 
     print("Verifying webhook registration…")
-    verify_webhook()
+    _retry(lambda: verify_webhook(), label="verify webhook")
 
     print("Importing Daily Digest workflow…")
     daily_digest_json = patch_json(DAILY_DIGEST_WF, cred_patches)
-    daily_digest_id   = import_or_update_workflow(daily_digest_json)
+    daily_digest_id   = _retry(lambda: import_or_update_workflow(daily_digest_json), label="import workflow")
 
     print("Importing Weekly Review workflow…")
     weekly_review_json = patch_json(WEEKLY_REVIEW_WF, cred_patches)
-    weekly_review_id   = import_or_update_workflow(weekly_review_json)
+    weekly_review_id   = _retry(lambda: import_or_update_workflow(weekly_review_json), label="import workflow")
 
     print("=== local-n8n-init complete ===")
     print(f"  Error Handler  id={eh_id} (active)")

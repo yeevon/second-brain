@@ -562,10 +562,10 @@ class CaptureService:
             classification_json=classification_json,
         )
         if result.outcome in {"changed", "idempotent_replay"}:
-            self._ledger.set_system_state(
-                "last_vault_write_at",
-                datetime.now(UTC).isoformat(),
-            )
+            self._ledger.set_system_states({
+                "last_vault_write_at": datetime.now(UTC).isoformat(),
+                "last_vault_write_capture_id": capture_id,
+            })
             try:
                 await self.edit_receipt(
                     capture_id=capture_id,
@@ -608,10 +608,10 @@ class CaptureService:
             classification_json=classification_json,
         )
         if result.outcome in {"changed", "idempotent_replay"}:
-            self._ledger.set_system_state(
-                "last_vault_write_at",
-                datetime.now(UTC).isoformat(),
-            )
+            self._ledger.set_system_states({
+                "last_vault_write_at": datetime.now(UTC).isoformat(),
+                "last_vault_write_capture_id": capture_id,
+            })
             try:
                 await self.edit_receipt(
                     capture_id=capture_id,
@@ -838,10 +838,10 @@ class CaptureService:
             correction_reason=correction_reason,
             move_outcome=move_outcome,
         )
-        self._ledger.set_system_state(
-            "last_vault_write_at",
-            datetime.now(UTC).isoformat(),
-        )
+        self._ledger.set_system_states({
+            "last_vault_write_at": datetime.now(UTC).isoformat(),
+            "last_vault_write_capture_id": capture_id,
+        })
         log_metadata(
             "correction_applied",
             capture_id=capture_id,
@@ -1289,6 +1289,13 @@ class CaptureService:
         queued = notify_downstream and self._notify_capture is not None
         if queued:
             await self._notify_capture(capture.capture_id)
+        elif not notify_downstream:
+            log_metadata(
+                "capture_deferred",
+                capture_id=capture.capture_id,
+                discord_message_id=capture.discord_message_id,
+                reason="historical_reconciliation_deferred",
+            )
         elif not self.settings.downstream_delivery_enabled:
             log_metadata(
                 "capture_deferred",
