@@ -55,6 +55,7 @@ class Settings:
 
         # Runtime
         self.capture_processing_mode = os.getenv("CAPTURE_PROCESSING_MODE")
+        self.classifier_mode = (os.getenv("CLASSIFIER_MODE") or "").strip() or None
 
         # SQLite runtime
         self.sqlite_busy_timeout_ms = _parse_int_env("SQLITE_BUSY_TIMEOUT_MS", "1000")
@@ -82,16 +83,16 @@ class Settings:
             "CAPTURE_API_PORT": self.capture_api_port,
         }
         if self.capture_processing_mode == "local-full":
-            required.update(
-                {
-                    "GEMINI_API_KEY": self.gemini_api_key,
-                    "GEMINI_MODEL": self.gemini_model,
-                    "CLASSIFICATION_CONFIDENCE_THRESHOLD": self.classification_confidence_threshold,
-                    "CLASSIFIER_WORKER_COUNT": self.classifier_worker_count,
-                    "CLASSIFIER_QUEUE_MAXSIZE": self.classifier_queue_maxsize,
-                    "VAULT_PATH": self.vault_path,
-                }
-            )
+            local_full_required: dict[str, str | None] = {
+                "GEMINI_MODEL": self.gemini_model,
+                "CLASSIFICATION_CONFIDENCE_THRESHOLD": self.classification_confidence_threshold,
+                "CLASSIFIER_WORKER_COUNT": self.classifier_worker_count,
+                "CLASSIFIER_QUEUE_MAXSIZE": self.classifier_queue_maxsize,
+                "VAULT_PATH": self.vault_path,
+            }
+            if self.classifier_mode != "deterministic":
+                local_full_required["GEMINI_API_KEY"] = self.gemini_api_key
+            required.update(local_full_required)
         missing = [name for name, value in required.items() if value is None or not value.strip()]
         if missing:
             raise RuntimeError(f"Missing required configuration: {', '.join(missing)}")
@@ -131,6 +132,12 @@ class Settings:
         self.status_timezone = os.getenv("STATUS_TIMEZONE", "UTC")
 
         self.ledger_path = Path(self.ledger_path)
+
+        _SUPPORTED_CLASSIFIER_MODES = {"deterministic", "gemini"}
+        if self.classifier_mode is not None and self.classifier_mode not in _SUPPORTED_CLASSIFIER_MODES:
+            raise RuntimeError(
+                f"CLASSIFIER_MODE must be one of {sorted(_SUPPORTED_CLASSIFIER_MODES)}, got: {self.classifier_mode!r}"
+            )
 
         if self.capture_processing_mode == "local-full":
             self.classifier_worker_count = int(self.classifier_worker_count)

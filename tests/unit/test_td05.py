@@ -430,6 +430,77 @@ def test_sb152_invalid_classifier_mode_raises(monkeypatch):
         _get_classifier_mode()
 
 
+def test_sb152_settings_deterministic_does_not_require_gemini_api_key(monkeypatch, tmp_path):
+    """Settings(local-full, deterministic) must not fail for missing GEMINI_API_KEY."""
+    from secondbrain.config import Settings
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    ledger = tmp_path / "ledger.sqlite3"
+
+    env = {
+        "CAPTURE_PROCESSING_MODE": "local-full",
+        "CLASSIFIER_MODE": "deterministic",
+        "DISCORD_BOT_TOKEN": "Bot.fake.token",
+        "DISCORD_GUILD_ID": "100",
+        "DISCORD_CAPTURE_CHANNEL_ID": "200",
+        "DISCORD_ALLOWED_USER_ID": "300",
+        "GEMINI_MODEL": "gemini-1.5-flash-002",
+        "CLASSIFICATION_CONFIDENCE_THRESHOLD": "0.75",
+        "CLASSIFIER_WORKER_COUNT": "1",
+        "CLASSIFIER_QUEUE_MAXSIZE": "100",
+        "VAULT_PATH": str(vault),
+        "LEDGER_PATH": str(ledger),
+        "STARTUP_RECONCILE_LIMIT": "10",
+        "CAPTURE_SERVICE_INTERNAL_TOKEN": "x" * 32,
+        "CAPTURE_API_HOST": "127.0.0.1",
+        "CAPTURE_API_PORT": "8000",
+    }
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    s = Settings()
+    assert s.classifier_mode == "deterministic"
+    assert s.gemini_api_key is None
+
+
+def test_sb152_preflight_deterministic_skips_gemini_api_key_check(monkeypatch, tmp_path):
+    """run_preflight with CLASSIFIER_MODE=deterministic must not fail for missing GEMINI_API_KEY."""
+    from secondbrain.preflight import run_preflight
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    ledger_dir = tmp_path / "runtime"
+    ledger_dir.mkdir()
+
+    env = {
+        "CAPTURE_PROCESSING_MODE": "local-full",
+        "CLASSIFIER_MODE": "deterministic",
+        "DISCORD_BOT_TOKEN": "Bot.fake.token",
+        "DISCORD_GUILD_ID": "100",
+        "DISCORD_CAPTURE_CHANNEL_ID": "200",
+        "DISCORD_ALLOWED_USER_ID": "300",
+        "GEMINI_MODEL": "gemini-1.5-flash-002",
+        "CLASSIFICATION_CONFIDENCE_THRESHOLD": "0.75",
+        "CLASSIFIER_WORKER_COUNT": "1",
+        "CLASSIFIER_QUEUE_MAXSIZE": "100",
+        "VAULT_PATH": str(vault),
+        "LEDGER_PATH": str(ledger_dir / "ledger.sqlite3"),
+        "STARTUP_RECONCILE_LIMIT": "10",
+        "CAPTURE_SERVICE_INTERNAL_TOKEN": "x" * 32,
+        "CAPTURE_API_HOST": "127.0.0.1",
+        "CAPTURE_API_PORT": "8000",
+    }
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    checks = run_preflight()
+    failed = [c for c in checks if not c.passed and c.name == "GEMINI_API_KEY"]
+    assert failed == [], f"GEMINI_API_KEY check must not fail in deterministic mode, got: {failed}"
+
+
 @pytest.mark.asyncio
 async def test_sb152_gemini_mode_selected_when_unset(monkeypatch):
     """Unset CLASSIFIER_MODE defaults to gemini and calls the Gemini client."""
@@ -524,6 +595,73 @@ def test_sb158_status_output_shows_capture_id(tmp_path):
 
     assert capture.capture_id in report
     assert "last vault write capture:" in report
+
+
+@pytest.mark.asyncio
+async def test_sb158_complete_filed_writes_last_vault_write_states(tmp_path):
+    """complete_filed writes last_vault_write_at and last_vault_write_capture_id to system_state."""
+    from secondbrain.models import Classification
+
+    service, ledger = _make_service(tmp_path)
+    capture = _insert_capture(ledger)
+    ledger.mark_classifying(capture.capture_id)
+
+    classification = Classification(
+        folder="projects",
+        project=None,
+        note_type="note",
+        title="Test",
+        tags=[],
+        body="body",
+        actions=[],
+        needs_clarification=False,
+        clarifying_question=None,
+        confidence=0.95,
+    )
+
+    await service.complete_filed(
+        capture_id=capture.capture_id,
+        classification=classification,
+        note_path="projects/test.md",
+    )
+
+    assert ledger.get_system_state("last_vault_write_capture_id") == capture.capture_id
+    assert ledger.get_system_state("last_vault_write_at") is not None
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_sb158_complete_inbox_writes_last_vault_write_states(tmp_path):
+    """complete_inbox writes last_vault_write_at and last_vault_write_capture_id to system_state."""
+    from secondbrain.models import Classification
+
+    service, ledger = _make_service(tmp_path)
+    capture = _insert_capture(ledger)
+    ledger.mark_classifying(capture.capture_id)
+
+    classification = Classification(
+        folder="inbox",
+        project=None,
+        note_type="note",
+        title="Test",
+        tags=[],
+        body="body",
+        actions=[],
+        needs_clarification=False,
+        clarifying_question=None,
+        confidence=0.5,
+    )
+
+    await service.complete_inbox(
+        capture_id=capture.capture_id,
+        classification=classification,
+        note_path="inbox/test.md",
+        reason="low_confidence",
+    )
+
+    assert ledger.get_system_state("last_vault_write_capture_id") == capture.capture_id
+    assert ledger.get_system_state("last_vault_write_at") is not None
+    ledger.close()
 
 
 # ---------------------------------------------------------------------------

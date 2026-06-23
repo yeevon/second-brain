@@ -74,9 +74,21 @@ def run_preflight(*, compose: bool = False, compose_dir: Path | None = None) -> 
     elif not port_raw:
         checks.append(PreflightCheck("CAPTURE_API_PORT", False, "missing"))
 
+    classifier_mode = (os.environ.get("CLASSIFIER_MODE") or "").strip() or None
+    _SUPPORTED_CLASSIFIER_MODES = {"deterministic", "gemini"}
+    if classifier_mode is not None:
+        if classifier_mode in _SUPPORTED_CLASSIFIER_MODES:
+            checks.append(PreflightCheck("CLASSIFIER_MODE", True, classifier_mode))
+        else:
+            checks.append(PreflightCheck(
+                "CLASSIFIER_MODE",
+                False,
+                f"must be one of {sorted(_SUPPORTED_CLASSIFIER_MODES)}, got {classifier_mode!r}",
+            ))
+
     # Mode-specific checks
     if mode == "local-full":
-        checks.extend(_local_full_checks())
+        checks.extend(_local_full_checks(classifier_mode=classifier_mode))
     else:
         checks.extend(_capture_only_checks())
 
@@ -121,11 +133,12 @@ def _check_sqlite_openable(ledger_path: Path) -> PreflightCheck:
         return PreflightCheck("SQLite open", False, f"{type(exc).__name__}: cannot open database")
 
 
-def _local_full_checks() -> list[PreflightCheck]:
+def _local_full_checks(*, classifier_mode: str | None = None) -> list[PreflightCheck]:
     checks: list[PreflightCheck] = []
 
-    gemini_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
-    checks.append(_check_present("GEMINI_API_KEY", gemini_key))
+    if classifier_mode != "deterministic":
+        gemini_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+        checks.append(_check_present("GEMINI_API_KEY", gemini_key))
 
     gemini_model = (os.environ.get("GEMINI_MODEL") or "").strip()
     if not gemini_model:

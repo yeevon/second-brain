@@ -225,6 +225,10 @@ class CaptureService:
         )
         updated = self._ledger.get_capture(capture_id)
         if transition.changed:
+            self._ledger.set_system_states({
+                "last_vault_write_at": datetime.now(UTC).isoformat(),
+                "last_vault_write_capture_id": updated.capture_id,
+            })
             log_metadata(
                 "capture_filed",
                 capture_id=updated.capture_id,
@@ -268,6 +272,10 @@ class CaptureService:
         )
         updated = self._ledger.get_capture(capture_id)
         if transition.changed:
+            self._ledger.set_system_states({
+                "last_vault_write_at": datetime.now(UTC).isoformat(),
+                "last_vault_write_capture_id": updated.capture_id,
+            })
             log_metadata(
                 "capture_inbox",
                 capture_id=updated.capture_id,
