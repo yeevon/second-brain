@@ -1,0 +1,56 @@
+{
+  "nodes": [
+    {
+      "id": "fixture-home",
+      "type": "file",
+      "file": "Home.md",
+      "x": 0,
+      "y": 0,
+      "width": 360,
+      "height": 240
+    },
+    {
+      "id": "fixture-test",
+      "type": "file",
+      "file": "00 Inbox/Canvas Test Note.md",
+      "x": 500,
+      "y": 0,
+      "width": 400,
+      "height": 280,
+      "color": "3"
+    },
+    {
+      "id": "fixture-missing",
+      "type": "file",
+      "file": "00 Inbox/Missing Note.md",
+      "x": 500,
+      "y": 380,
+      "width": 400,
+      "height": 240,
+      "color": "1"
+    },
+    {
+      "id": "fixture-unsupported",
+      "type": "text",
+      "text": "Unsupported text node",
+      "x": 0,
+      "y": 380,
+      "width": 360,
+      "height": 220
+    }
+  ],
+  "edges": [
+    {
+      "id": "fixture-test-edge",
+      "fromNode": "fixture-home",
+      "toNode": "fixture-test",
+      "label": "test note"
+    },
+    {
+      "id": "fixture-missing-edge",
+      "fromNode": "fixture-test",
+      "toNode": "fixture-missing",
+      "label": "missing target"
+    }
+  ]
+}
