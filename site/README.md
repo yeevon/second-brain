@@ -4,7 +4,7 @@ Local, read-only browser access to the Digital Jochi Obsidian vault. The root pa
 
 ## Requirements
 
-- Node.js 22 or newer (verified with Node.js 24)
+- Node.js 22.12 or newer (verified with Node.js 24)
 - npm 10 or newer
 - A local Obsidian vault supplied through `DIGITAL_JOCHI_VAULT`, or available at the conventional sibling project location
 
@@ -32,6 +32,7 @@ The home canvas can be overridden for an isolated error fixture with `DIGITAL_JO
 
 ```powershell
 npm test
+npm run typecheck
 npm run build
 $env:NODE_ENV='production'
 npm start
@@ -42,7 +43,7 @@ The build writes browser assets to `dist/` and server output to `dist-server/`. 
 ## Supported in this release
 
 - Real Markdown headings, paragraphs, bold text, lists, and safe links
-- JSON Canvas file cards, authored positions/colors, labeled edges, pan, zoom, and fit-to-view
+- JSON Canvas file cards, authored positions/preset or hex colors, labeled and directed edges, pan, zoom, and fit-to-view
 - Visible missing targets, invalid-canvas recovery, and unsupported-node diagnostics
 - Wikilinks with aliases, vault-relative paths, spaces, unambiguous filenames, note Back, and unresolved-link recovery
 - Case-insensitive title, summary, and body substring search with keyboard-accessible results

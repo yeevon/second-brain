@@ -17,6 +17,7 @@ export type CanvasNode = {
   id: string;
   type: string;
   file?: string;
+  subpath?: string;
   text?: string;
   url?: string;
   x: number;
@@ -55,10 +56,11 @@ const normalizeVaultPath = (value: string): string => value.replaceAll('\\', '/'
 const isExcluded = (relativePath: string): boolean => {
   const normalized = normalizeVaultPath(relativePath);
   const segments = normalized.split('/');
+  const folded = segments.map((segment) => segment.toLocaleLowerCase());
   return (
     segments.some((segment) => segment.startsWith('.')) ||
-    segments[0] === '90 Templates' ||
-    normalized.startsWith('99 Attachments/Implementation/')
+    folded[0] === '90 templates' ||
+    folded.slice(0, 2).join('/') === '99 attachments/implementation'
   );
 };
 
@@ -118,9 +120,14 @@ export class VaultReader {
     } catch {
       throw new VaultAccessError(`The requested file was not found: ${relative}`, 404);
     }
-    const rootPrefix = rootReal.endsWith(path.sep) ? rootReal : `${rootReal}${path.sep}`;
-    if (candidateReal !== rootReal && !candidateReal.startsWith(rootPrefix)) {
+    const resolvedNative = path.relative(rootReal, candidateReal);
+    if (!resolvedNative || resolvedNative === '..' || resolvedNative.startsWith(`..${path.sep}`) || path.isAbsolute(resolvedNative)) {
       throw new VaultAccessError('The requested file resolves outside the configured vault.', 403);
+    }
+    const resolvedRelative = normalizeVaultPath(resolvedNative);
+    if (isExcluded(resolvedRelative)) throw new VaultAccessError('The requested path is excluded from the reader.', 403);
+    if (!extensions.includes(path.posix.extname(resolvedRelative).toLowerCase())) {
+      throw new VaultAccessError('This file type is not readable through the vault API.', 415);
     }
     return { absolute: candidateReal, relative };
   }

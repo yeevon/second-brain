@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { NoteSummary } from '../types';
+import { excerptFor } from '../search';
 
 type Props = {
   notes: NoteSummary[];
@@ -7,23 +8,6 @@ type Props = {
   selectedPath: string;
   onRetry: () => void;
   onOpen: (path: string) => void;
-};
-
-const plainText = (markdown: string): string =>
-  markdown
-    .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, '$2 $1')
-    .replace(/[*_#>`~-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-const excerptFor = (note: NoteSummary, query: string): string => {
-  const source = plainText(note.summary || note.body);
-  if (!query) return note.summary || source.slice(0, 110);
-  const index = source.toLocaleLowerCase().indexOf(query.toLocaleLowerCase());
-  if (index < 0) return source.slice(0, 120);
-  const start = Math.max(0, index - 42);
-  const end = Math.min(source.length, index + query.length + 70);
-  return `${start ? '…' : ''}${source.slice(start, end)}${end < source.length ? '…' : ''}`;
 };
 
 export function Sidebar({ notes, error, selectedPath, onRetry, onOpen }: Props) {

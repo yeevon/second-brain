@@ -14,6 +14,7 @@ export type VaultCanvasNode = {
   id: string;
   type: string;
   file?: string;
+  subpath?: string;
   text?: string;
   url?: string;
   x: number;

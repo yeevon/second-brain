@@ -9,6 +9,7 @@ site/coverage/
 # Runtime evidence may contain private-vault titles, content, and local paths.
 # Canonical implementation evidence remains in the private Digital Jochi vault.
 site/evidence/
+/audit/
 
 # Never copy the private vault or Obsidian state into this public repository.
 /vault/

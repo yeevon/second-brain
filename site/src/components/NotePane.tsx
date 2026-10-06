@@ -1,12 +1,14 @@
+import { Component, type ErrorInfo, type ReactNode } from 'react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { decodeWikilink } from '../link-utils';
 import type { Note } from '../types';
 
 type ReaderState =
   | { kind: 'empty' }
   | { kind: 'loading'; path: string }
   | { kind: 'note'; note: Note }
-  | { kind: 'error'; message: string; path?: string }
+  | { kind: 'error'; message: string; path?: string; recovery?: { sourcePath: string; target: string } }
   | { kind: 'unresolved'; state: { status: string; target: string; message: string; candidates?: string[] } };
 
 type Props = {
@@ -15,6 +17,7 @@ type Props = {
   onBack: () => void;
   onFollowLink: (target: string) => void;
   onRetry: () => void;
+  onReturnToSource: () => void;
 };
 
 const encodeWikilinks = (markdown: string): string =>
@@ -23,7 +26,35 @@ const encodeWikilinks = (markdown: string): string =>
     return `[${label}](wikilink:${encodeURIComponent(target)})`;
   });
 
-export function NotePane({ state, canGoBack, onBack, onFollowLink, onRetry }: Props) {
+class MarkdownBoundary extends Component<{ resetKey: string; children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(_error: Error, _info: ErrorInfo) {
+    // The visible diagnostic below keeps the rest of the reader usable.
+  }
+
+  componentDidUpdate(previous: Readonly<{ resetKey: string; children: ReactNode }>) {
+    if (previous.resetKey !== this.props.resetKey && this.state.failed) this.setState({ failed: false });
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <div className="inline-state error-state markdown-error" role="alert">
+          <strong>Note content could not be rendered</strong>
+          <p>The note remains unchanged. Select another note or correct the malformed Markdown in Obsidian.</p>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export function NotePane({ state, canGoBack, onBack, onFollowLink, onRetry, onReturnToSource }: Props) {
   const note = state.kind === 'note' ? state.note : undefined;
   return (
     <article className="reader-pane" aria-label="Note reading pane">
@@ -47,7 +78,10 @@ export function NotePane({ state, canGoBack, onBack, onFollowLink, onRetry }: Pr
         <div className="inline-state error-state reader-error" role="alert">
           <strong>Note unavailable</strong>
           <p>{state.message}</p>
-          <button type="button" onClick={onRetry}>Retry</button>
+          <div className="error-actions">
+            <button type="button" onClick={onRetry}>Retry</button>
+            {state.recovery && <button type="button" className="secondary-action" onClick={onReturnToSource}>Return to source note</button>}
+          </div>
         </div>
       )}
       {state.kind === 'unresolved' && (
@@ -65,23 +99,28 @@ export function NotePane({ state, canGoBack, onBack, onFollowLink, onRetry }: Pr
       {note && (
         <>
           <div className="note-path">{note.path}</div>
-          <div className="markdown-body">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              urlTransform={(url) => (url.startsWith('wikilink:') ? url : defaultUrlTransform(url))}
-              components={{
-                a: ({ href, children }) => {
-                  if (href?.startsWith('wikilink:')) {
-                    const target = decodeURIComponent(href.slice('wikilink:'.length));
-                    return <button type="button" className="wikilink" onClick={() => onFollowLink(target)}>{children}</button>;
-                  }
-                  return <a href={href} target="_blank" rel="noreferrer">{children}</a>;
-                },
-              }}
-            >
-              {encodeWikilinks(note.body)}
-            </ReactMarkdown>
-          </div>
+          <MarkdownBoundary resetKey={note.path}>
+            <div className="markdown-body">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                urlTransform={(url) => (url.startsWith('wikilink:') ? url : defaultUrlTransform(url))}
+                components={{
+                  a: ({ href, children }) => {
+                    if (href?.startsWith('wikilink:')) {
+                      const decoded = decodeWikilink(href);
+                      if (!decoded.ok) {
+                        return <span className="invalid-wikilink" role="alert" title={decoded.target}>Invalid note link</span>;
+                      }
+                      return <button type="button" className="wikilink" onClick={() => onFollowLink(decoded.target)}>{children}</button>;
+                    }
+                    return <a href={href} target="_blank" rel="noreferrer">{children}</a>;
+                  },
+                }}
+              >
+                {encodeWikilinks(note.body)}
+              </ReactMarkdown>
+            </div>
+          </MarkdownBoundary>
         </>
       )}
     </article>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Board } from './components/Board';
 import { NotePane } from './components/NotePane';
 import { Sidebar } from './components/Sidebar';
@@ -9,7 +9,7 @@ type ReaderState =
   | { kind: 'empty' }
   | { kind: 'loading'; path: string }
   | { kind: 'note'; note: Note }
-  | { kind: 'error'; message: string; path?: string }
+  | { kind: 'error'; message: string; path?: string; recovery?: { sourcePath: string; target: string } }
   | { kind: 'unresolved'; state: UnresolvedState };
 
 export function App() {
@@ -18,6 +18,24 @@ export function App() {
   const [reader, setReader] = useState<ReaderState>({ kind: 'empty' });
   const [history, setHistory] = useState<string[]>([]);
   const [selectedPath, setSelectedPath] = useState('');
+  const readerRef = useRef<ReaderState>(reader);
+  const historyRef = useRef<string[]>(history);
+  const navigationRef = useRef(0);
+
+  const updateReader = useCallback((next: ReaderState) => {
+    readerRef.current = next;
+    setReader(next);
+  }, []);
+
+  const updateHistory = useCallback((next: string[]) => {
+    historyRef.current = next;
+    setHistory(next);
+  }, []);
+
+  const pushHistory = useCallback((notePath: string) => {
+    if (historyRef.current.at(-1) === notePath) return;
+    updateHistory([...historyRef.current, notePath]);
+  }, [updateHistory]);
 
   const loadNotes = useCallback(async () => {
     setNotesError('');
@@ -32,56 +50,77 @@ export function App() {
     void loadNotes();
   }, [loadNotes]);
 
-  const openNote = useCallback(
-    async (notePath: string, rememberCurrent = true) => {
-      if (rememberCurrent && reader.kind === 'note' && reader.note.path !== notePath) {
-        setHistory((current) => [...current, reader.note.path]);
-      }
+  const loadNote = useCallback(
+    async (notePath: string, navigationId: number, rememberCurrent: boolean) => {
+      const current = readerRef.current;
+      if (rememberCurrent && current.kind === 'note' && current.note.path !== notePath) pushHistory(current.note.path);
       setSelectedPath(notePath);
-      setReader({ kind: 'loading', path: notePath });
+      updateReader({ kind: 'loading', path: notePath });
       try {
-        setReader({ kind: 'note', note: await fetchNote(notePath) });
+        const note = await fetchNote(notePath);
+        if (navigationId === navigationRef.current) updateReader({ kind: 'note', note });
       } catch (error) {
-        setReader({
-          kind: 'error',
-          path: notePath,
-          message: error instanceof Error ? error.message : 'The note could not be opened.',
-        });
+        if (navigationId === navigationRef.current) {
+          updateReader({
+            kind: 'error',
+            path: notePath,
+            message: error instanceof Error ? error.message : 'The note could not be opened.',
+          });
+        }
       }
     },
-    [reader],
+    [pushHistory, updateReader],
   );
 
+  const openNote = useCallback((notePath: string, rememberCurrent = true) => {
+    const navigationId = ++navigationRef.current;
+    void loadNote(notePath, navigationId, rememberCurrent);
+  }, [loadNote]);
+
+  const resolveAndOpenLink = useCallback(async (sourcePath: string, target: string) => {
+    const navigationId = ++navigationRef.current;
+    try {
+      const resolution = await resolveLink(sourcePath, target);
+      if (navigationId !== navigationRef.current) return;
+      pushHistory(sourcePath);
+      if (resolution.status === 'resolved') await loadNote(resolution.path, navigationId, false);
+      else updateReader({ kind: 'unresolved', state: { ...resolution, target } });
+    } catch (error) {
+      if (navigationId !== navigationRef.current) return;
+      updateReader({
+        kind: 'error',
+        message: error instanceof Error ? error.message : 'The link could not be resolved.',
+        recovery: { sourcePath, target },
+      });
+    }
+  }, [loadNote, pushHistory, updateReader]);
+
   const followLink = useCallback(
-    async (target: string) => {
-      if (reader.kind !== 'note') return;
-      const sourcePath = reader.note.path;
-      try {
-        const resolution = await resolveLink(sourcePath, target);
-        setHistory((current) => [...current, sourcePath]);
-        if (resolution.status === 'resolved') await openNote(resolution.path, false);
-        else setReader({ kind: 'unresolved', state: { ...resolution, target } });
-      } catch (error) {
-        setReader({
-          kind: 'error',
-          message: error instanceof Error ? error.message : 'The link could not be resolved.',
-        });
-      }
+    (target: string) => {
+      const current = readerRef.current;
+      if (current.kind === 'note') void resolveAndOpenLink(current.note.path, target);
     },
-    [openNote, reader],
+    [resolveAndOpenLink],
   );
 
   const goBack = useCallback(() => {
-    const prior = history.at(-1);
+    const prior = historyRef.current.at(-1);
     if (!prior) return;
-    setHistory((current) => current.slice(0, -1));
-    void openNote(prior, false);
-  }, [history, openNote]);
+    updateHistory(historyRef.current.slice(0, -1));
+    openNote(prior, false);
+  }, [openNote, updateHistory]);
 
   const retryReader = useCallback(() => {
-    if (reader.kind === 'error' && reader.path) void openNote(reader.path, false);
+    const current = readerRef.current;
+    if (current.kind === 'error' && current.recovery) void resolveAndOpenLink(current.recovery.sourcePath, current.recovery.target);
+    else if (current.kind === 'error' && current.path) openNote(current.path, false);
     else void loadNotes();
-  }, [loadNotes, openNote, reader]);
+  }, [loadNotes, openNote, resolveAndOpenLink]);
+
+  const returnToSource = useCallback(() => {
+    const current = readerRef.current;
+    if (current.kind === 'error' && current.recovery) openNote(current.recovery.sourcePath, false);
+  }, [openNote]);
 
   const statusText = useMemo(() => {
     if (notesError) return 'Vault unavailable';
@@ -118,7 +157,7 @@ export function App() {
           </div>
           <Board selectedPath={selectedPath} onOpen={openNote} />
         </section>
-        <NotePane state={reader} canGoBack={history.length > 0} onBack={goBack} onFollowLink={followLink} onRetry={retryReader} />
+        <NotePane state={reader} canGoBack={history.length > 0} onBack={goBack} onFollowLink={followLink} onRetry={retryReader} onReturnToSource={returnToSource} />
       </main>
     </div>
   );

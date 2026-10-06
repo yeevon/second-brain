@@ -131,6 +131,10 @@ h2 { font-size: 17px; }
 .markdown-body strong { font-weight: 800; }
 .markdown-body a { color: var(--accent-dark); }
 .wikilink { display: inline; padding: 0; border: 0; border-bottom: 1px solid currentColor; background: transparent; color: var(--accent-dark); cursor: pointer; font-weight: 700; text-align: left; }
+.invalid-wikilink { display: inline-block; padding: 1px 5px; border: 1px solid #c78677; border-radius: 4px; background: #f4e1dc; color: var(--accent-dark); font: 700 10px 'DM Mono', monospace; }
+.markdown-error { margin: 20px; }
+.error-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.error-actions .secondary-action { border: 1px solid var(--ink); background: transparent; color: var(--ink); }
 .reader-empty { min-height: calc(100% - 68px); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 36px; text-align: center; color: var(--muted); }
 .reader-empty strong { margin: 18px 0 4px; color: var(--ink); font-size: 15px; }
 .reader-empty p { max-width: 240px; margin: 0; font-size: 11px; line-height: 1.6; }
