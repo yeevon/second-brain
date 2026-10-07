@@ -143,3 +143,175 @@ test('reading notes does not modify source bytes', async () => {
   const afterBytes = await fs.readFile(target);
   assert.deepEqual(afterBytes, beforeBytes);
 });
+
+test('reads equivalent inline and block string tags while isolating metadata diagnostics', async () => {
+  await fs.writeFile(
+    path.join(vault, 'Inline Tags.md'),
+    '---\ntags: [topic, "Mixed Case", topic, 42]\n---\n# Inline\n\n#body-tag',
+  );
+  await fs.writeFile(
+    path.join(vault, 'Block Tags.md'),
+    '---\ntags:\n  - topic\n  - "Mixed Case"\n---\n# Block',
+  );
+  await fs.writeFile(path.join(vault, 'Broken Frontmatter.md'), '---\ntags: [topic]\n# Still readable');
+  const reader = new VaultReader(vault);
+  const inline = await reader.readNote('Inline Tags.md');
+  const block = await reader.readNote('Block Tags.md');
+  const broken = await reader.readNote('Broken Frontmatter.md');
+  assert.deepEqual(inline.tags, ['topic', 'Mixed Case']);
+  assert.deepEqual(block.tags, ['topic', 'Mixed Case']);
+  assert.equal(inline.diagnostics.length, 1);
+  assert.match(inline.diagnostics[0], /non-string tag value: 42/);
+  assert.doesNotMatch(inline.tags.join(','), /body-tag/);
+  assert.match(broken.body, /Still readable/);
+  assert.match(broken.diagnostics[0], /no closing delimiter/);
+});
+
+test('preserves valid string-like tags and trims quoted tag whitespace before deduplication', async () => {
+  await fs.writeFile(
+    path.join(vault, 'String Tags.md'),
+    '---\ntags: [true-story, falsehood, nullability, 2026-plan, " topic ", topic, true, null, 42]\n---\n# String tags',
+  );
+  await fs.writeFile(
+    path.join(vault, 'Block String Tags.md'),
+    '---\ntags:\n  - true-story\n  - falsehood\n  - nullability\n  - 2026-plan\n  - " topic "\n  - topic\n  - false\n---\n# Block string tags',
+  );
+  const reader = new VaultReader(vault);
+  const note = await reader.readNote('String Tags.md');
+  const block = await reader.readNote('Block String Tags.md');
+  assert.deepEqual(note.tags, ['true-story', 'falsehood', 'nullability', '2026-plan', 'topic']);
+  assert.deepEqual(block.tags, ['true-story', 'falsehood', 'nullability', '2026-plan', 'topic']);
+  assert.equal(note.diagnostics.length, 3);
+  assert.equal(block.diagnostics.length, 1);
+});
+
+test('backlinks reuse supported link resolution and ignore duplicates, code, literals, and ambiguous names', async () => {
+  await fs.mkdir(path.join(vault, 'Area A'), { recursive: true });
+  await fs.mkdir(path.join(vault, 'Area B'), { recursive: true });
+  await fs.writeFile(path.join(vault, 'Area A', 'Same Name.md'), '# First duplicate');
+  await fs.writeFile(path.join(vault, 'Area B', 'Same Name.md'), '# Second duplicate');
+  await fs.writeFile(path.join(vault, 'Source One.md'), '# Source One\n\n[[Home]] and [[Home|again]].');
+  await fs.writeFile(path.join(vault, 'Source Two.md'), '# Source Two\n\n[[Home.md|path-qualified]].');
+  await fs.writeFile(
+    path.join(vault, 'Ignored Examples.md'),
+    '# Ignored\n\n`[[Home]]`\n\n```md\n[[Home]]\n```\n\n\\[[Home]] [[Home#Heading]] [[Missing]] [[Same Name]]',
+  );
+  const reader = new VaultReader(vault);
+  assert.deepEqual(await reader.listBacklinks('Home.md'), [
+    { path: '00 Inbox/Canvas Test Note.md', title: 'Canvas Test Note' },
+    { path: 'Source One.md', title: 'Source One' },
+    { path: 'Source Two.md', title: 'Source Two' },
+  ]);
+  await fs.writeFile(path.join(vault, 'Source Two.md'), '# Source Two\n\nLink removed.');
+  assert.deepEqual(await reader.listBacklinks('Home.md'), [
+    { path: '00 Inbox/Canvas Test Note.md', title: 'Canvas Test Note' },
+    { path: 'Source One.md', title: 'Source One' },
+  ]);
+});
+
+test('backlinks exclude indented code and respect the opening fence length', async () => {
+  await fs.writeFile(
+    path.join(vault, 'Code Shapes.md'),
+    '# Code shapes\n\n    [[Home]]\n\n````md\n[[Home]]\n```\nstill code [[Home]]\n````\n\nOutside [[Home]].',
+  );
+  const backlinks = await new VaultReader(vault).listBacklinks('Home.md');
+  assert.equal(backlinks.filter((item) => item.path === 'Code Shapes.md').length, 1);
+
+  await fs.writeFile(
+    path.join(vault, 'Code Shapes.md'),
+    '# Code shapes\n\n    [[Home]]\n\n````md\n[[Home]]\n```\nstill code [[Home]]\n````',
+  );
+  const codeOnly = await new VaultReader(vault).listBacklinks('Home.md');
+  assert.equal(codeOnly.some((item) => item.path === 'Code Shapes.md'), false);
+});
+
+test('constructs an exact encoded Obsidian target from the validated absolute note path', async () => {
+  await fs.mkdir(path.join(vault, 'Área'), { recursive: true });
+  await fs.writeFile(path.join(vault, 'Área', 'Spaced Note.md'), '# Exact target');
+  const target = await new VaultReader(vault).obsidianTarget('Área/Spaced Note.md');
+  const targetUrl = new URL(target.uri);
+  assert.equal(targetUrl.hostname, 'open');
+  assert.equal(targetUrl.searchParams.get('path'), path.join(vault, 'Área', 'Spaced Note.md').replaceAll('\\', '/'));
+  assert.equal(target.vaultPath, await fs.realpath(vault));
+  assert.equal(target.path, 'Área/Spaced Note.md');
+
+  const otherVault = path.join(sandbox, 'other', 'vault');
+  await fs.mkdir(path.join(otherVault, 'Área'), { recursive: true });
+  await fs.writeFile(path.join(otherVault, 'Área', 'Spaced Note.md'), '# Different exact target');
+  const otherTarget = await new VaultReader(otherVault).obsidianTarget('Área/Spaced Note.md');
+  assert.notEqual(otherTarget.uri, target.uri);
+  assert.equal(new URL(otherTarget.uri).searchParams.get('path'), path.join(otherVault, 'Área', 'Spaced Note.md').replaceAll('\\', '/'));
+  await assert.rejects(
+    () => new VaultReader(vault).obsidianTarget('https://example.com.md'),
+    (error) => error instanceof VaultAccessError && error.status === 403,
+  );
+});
+
+test('refresh snapshot returns one coherent context and a recoverable removed-note state', async () => {
+  await fs.writeFile(path.join(vault, 'Source.md'), '# Source\n\n[[Home]]');
+  const server = createApi(new VaultReader(vault), '80 Canvases/Digital Jochi.canvas').listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  try {
+    const url = `http://127.0.0.1:${address.port}/api/refresh?path=${encodeURIComponent('Home.md')}`;
+    const first = await (await fetch(url)).json();
+    assert.equal(first.context.note.path, 'Home.md');
+    assert.deepEqual(first.context.backlinks, [
+      { path: '00 Inbox/Canvas Test Note.md', title: 'Canvas Test Note' },
+      { path: 'Source.md', title: 'Source' },
+    ]);
+    assert.equal(first.canvasPath, '80 Canvases/Digital Jochi.canvas');
+    await fs.rm(path.join(vault, 'Home.md'));
+    const removed = await (await fetch(url)).json();
+    assert.equal(removed.context, null);
+    assert.match(removed.selectedError, /not found: Home.md/);
+    assert.equal(removed.notes.some((note) => note.path === 'Home.md'), false);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test('refresh isolates a broken canvas while still returning readable notes', async () => {
+  const server = createApi(new VaultReader(vault), '80 Canvases/Digital Jochi.canvas').listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  try {
+    const url = `http://127.0.0.1:${address.port}/api/refresh?path=${encodeURIComponent('Home.md')}`;
+    const initial = await (await fetch(url)).json();
+    assert.equal(initial.canvas.nodes.length, 2);
+    await fs.writeFile(path.join(vault, 'Home.md'), '# Home\n\nFresh note content after the board breaks.');
+    await fs.writeFile(path.join(vault, '80 Canvases', 'Digital Jochi.canvas'), '{ broken json');
+    const response = await fetch(url);
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(payload.notesError, '');
+    assert.equal(payload.notes.some((note) => note.path === 'Home.md'), true);
+    assert.equal(payload.context.note.path, 'Home.md');
+    assert.match(payload.context.note.body, /Fresh note content/);
+    assert.equal(payload.canvas, null);
+    assert.match(payload.canvasError, /invalid JSON/);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test('refresh distinguishes an unavailable vault from an isolated canvas failure', async () => {
+  const missingVault = path.join(sandbox, 'missing-vault');
+  const server = createApi(new VaultReader(missingVault), '80 Canvases/Digital Jochi.canvas').listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/refresh`);
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.deepEqual(payload.notes, []);
+    assert.match(payload.notesError, /configured vault is unavailable/);
+    assert.equal(payload.canvas, null);
+    assert.match(payload.canvasError, /configured vault is unavailable/);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});

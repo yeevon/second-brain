@@ -6,11 +6,18 @@ export type NoteSummary = {
   title: string;
   summary: string;
   body: string;
+  tags: string[];
+  diagnostics: string[];
 };
 
 export type Note = NoteSummary & {
   raw: string;
   metadata: Record<string, string>;
+};
+
+export type Backlink = {
+  path: string;
+  title: string;
 };
 
 export type CanvasNode = {
@@ -64,17 +71,143 @@ const isExcluded = (relativePath: string): boolean => {
   );
 };
 
-const splitFrontmatter = (raw: string): { body: string; metadata: Record<string, string> } => {
-  if (!raw.startsWith('---\n') && !raw.startsWith('---\r\n')) return { body: raw, metadata: {} };
+const yamlString = (rawValue: string): string | undefined => {
+  const value = rawValue.trim();
+  if (!value) return undefined;
+  const quoted = value.match(/^(['"])(.*)\1(?:\s+#.*)?$/);
+  if (quoted) return quoted[2].trim() || undefined;
+  const plain = value.replace(/\s+#.*$/, '').trim();
+  if (!plain) return undefined;
+  if (/^(?:null|~|true|false)$/i.test(plain)) return undefined;
+  if (/^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?$/i.test(plain)) return undefined;
+  if (/^[\[{&*!]/.test(plain)) return undefined;
+  return plain;
+};
+
+const stripMarkdownCode = (markdown: string): string => {
+  let fence: { marker: '`' | '~'; length: number } | null = null;
+  return markdown.split(/\r?\n/).map((line) => {
+    const candidate = line.match(/^ {0,3}(`+|~+)(.*)$/);
+    if (fence) {
+      if (candidate) {
+        const run = candidate[1];
+        if (run[0] === fence.marker && run.length >= fence.length && !candidate[2].trim()) fence = null;
+      }
+      return '';
+    }
+    if (candidate && candidate[1].length >= 3) {
+      fence = { marker: candidate[1][0] as '`' | '~', length: candidate[1].length };
+      return '';
+    }
+    if (/^(?: {4}|\t)/.test(line)) return '';
+
+    let result = '';
+    for (let index = 0; index < line.length;) {
+      if (line[index] !== '`') {
+        result += line[index];
+        index += 1;
+        continue;
+      }
+      let runEnd = index;
+      while (line[runEnd] === '`') runEnd += 1;
+      const length = runEnd - index;
+      let closing = runEnd;
+      while (closing < line.length) {
+        closing = line.indexOf('`', closing);
+        if (closing < 0) break;
+        let closingEnd = closing;
+        while (line[closingEnd] === '`') closingEnd += 1;
+        if (closingEnd - closing === length) break;
+        closing = closingEnd;
+      }
+      if (closing < 0) {
+        result += line.slice(index, runEnd);
+        index = runEnd;
+      } else {
+        result += ' '.repeat(closing + length - index);
+        index = closing + length;
+      }
+    }
+    return result;
+  }).join('\n');
+};
+
+const inlineListItems = (value: string): string[] | undefined => {
+  if (!value.startsWith('[') || !value.endsWith(']')) return undefined;
+  const source = value.slice(1, -1);
+  const items: string[] = [];
+  let current = '';
+  let quote = '';
+  for (const character of source) {
+    if ((character === '"' || character === "'") && (!quote || quote === character)) {
+      quote = quote ? '' : character;
+      current += character;
+    } else if (character === ',' && !quote) {
+      items.push(current);
+      current = '';
+    } else current += character;
+  }
+  if (quote) return undefined;
+  if (current.trim() || source.trim()) items.push(current);
+  return items;
+};
+
+const splitFrontmatter = (
+  raw: string,
+): { body: string; metadata: Record<string, string>; tags: string[]; diagnostics: string[] } => {
+  if (!raw.startsWith('---\n') && !raw.startsWith('---\r\n')) {
+    return { body: raw, metadata: {}, tags: [], diagnostics: [] };
+  }
   const lines = raw.split(/\r?\n/);
   const end = lines.slice(1).findIndex((line) => line.trim() === '---');
-  if (end < 0) return { body: raw, metadata: {} };
-  const metadata: Record<string, string> = {};
-  for (const line of lines.slice(1, end + 1)) {
-    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
-    if (match) metadata[match[1]] = match[2].trim().replace(/^['"]|['"]$/g, '');
+  if (end < 0) {
+    return {
+      body: raw,
+      metadata: {},
+      tags: [],
+      diagnostics: ['Frontmatter starts with --- but has no closing delimiter; metadata was ignored.'],
+    };
   }
-  return { body: lines.slice(end + 2).join('\n').replace(/^\s+/, ''), metadata };
+  const metadata: Record<string, string> = {};
+  const tags: string[] = [];
+  const diagnostics: string[] = [];
+  const frontmatter = lines.slice(1, end + 1);
+  for (let index = 0; index < frontmatter.length; index += 1) {
+    const line = frontmatter[index];
+    if (!line.trim() || line.trimStart().startsWith('#')) continue;
+    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (!match) {
+      diagnostics.push(`Frontmatter line ${index + 2} is not a supported key/value entry.`);
+      continue;
+    }
+    const [, key, rawValue] = match;
+    if (key !== 'tags') {
+      const value = yamlString(rawValue);
+      if (value !== undefined) metadata[key] = value;
+      continue;
+    }
+
+    const values: string[] = [];
+    if (rawValue.trim()) {
+      const inline = inlineListItems(rawValue.trim());
+      if (!inline) {
+        diagnostics.push('The tags field must be a YAML block list or inline list of strings.');
+        continue;
+      }
+      values.push(...inline);
+    } else {
+      while (index + 1 < frontmatter.length && /^\s+-\s*/.test(frontmatter[index + 1])) {
+        index += 1;
+        values.push(frontmatter[index].replace(/^\s+-\s*/, ''));
+      }
+    }
+    for (const rawTag of values) {
+      const tag = yamlString(rawTag);
+      if (tag === undefined) diagnostics.push(`Ignored a non-string tag value: ${rawTag.trim() || '(empty)'}.`);
+      else if (!tags.includes(tag)) tags.push(tag);
+    }
+  }
+  return { body: lines.slice(end + 2).join('\n').replace(/^\s+/, ''), metadata, tags, diagnostics };
 };
 
 const titleFrom = (body: string, relativePath: string): string => {
@@ -150,7 +283,14 @@ export class VaultReader {
     return Promise.all(
       paths.map(async (relativePath) => {
         const note = await this.readNote(relativePath);
-        return { path: note.path, title: note.title, summary: note.summary, body: note.body };
+        return {
+          path: note.path,
+          title: note.title,
+          summary: note.summary,
+          body: note.body,
+          tags: note.tags,
+          diagnostics: note.diagnostics,
+        };
       }),
     );
   }
@@ -158,7 +298,7 @@ export class VaultReader {
   async readNote(relativePath: string): Promise<Note> {
     const resolved = await this.resolveExisting(relativePath, ['.md']);
     const raw = await fs.readFile(resolved.absolute, 'utf8');
-    const { body, metadata } = splitFrontmatter(raw);
+    const { body, metadata, tags, diagnostics } = splitFrontmatter(raw);
     return {
       path: resolved.relative,
       title: titleFrom(body, resolved.relative),
@@ -166,6 +306,8 @@ export class VaultReader {
       body,
       raw,
       metadata,
+      tags,
+      diagnostics,
     };
   }
 
@@ -204,6 +346,16 @@ export class VaultReader {
     | { status: 'missing' | 'ambiguous' | 'unsupported'; message: string; candidates?: string[] }
   > {
     await this.readNote(sourcePath);
+    const notes = await this.listNotes();
+    return this.resolveTarget(notes, rawTarget);
+  }
+
+  private resolveTarget(
+    notes: NoteSummary[],
+    rawTarget: string,
+  ):
+    | { status: 'resolved'; path: string }
+    | { status: 'missing' | 'ambiguous' | 'unsupported'; message: string; candidates?: string[] } {
     const target = rawTarget.trim();
     const hashIndex = target.indexOf('#');
     if (hashIndex >= 0) {
@@ -213,7 +365,6 @@ export class VaultReader {
       };
     }
     const normalized = normalizeVaultPath(target).replace(/\.md$/i, '');
-    const notes = await this.listNotes();
     let matches: NoteSummary[];
     if (normalized.includes('/')) {
       matches = notes.filter((note) => note.path.slice(0, -3).toLocaleLowerCase() === normalized.toLocaleLowerCase());
@@ -231,6 +382,36 @@ export class VaultReader {
       };
     }
     return { status: 'missing', message: `No note matches “${target}”.` };
+  }
+
+  async listBacklinks(targetPath: string, notes?: NoteSummary[]): Promise<Backlink[]> {
+    await this.readNote(targetPath);
+    const eligibleNotes = notes ?? await this.listNotes();
+    const foldedTarget = normalizeVaultPath(targetPath).toLocaleLowerCase();
+    const incoming: Backlink[] = [];
+    for (const source of eligibleNotes) {
+      const withoutCode = stripMarkdownCode(source.body);
+      const rawTargets = [...withoutCode.matchAll(/(?<![\\!])\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g)]
+        .map((match) => match[1].trim());
+      const uniqueTargets = [...new Set(rawTargets)];
+      if (uniqueTargets.some((target) => {
+        const resolution = this.resolveTarget(eligibleNotes, target);
+        return resolution.status === 'resolved' && resolution.path.toLocaleLowerCase() === foldedTarget;
+      })) incoming.push({ path: source.path, title: source.title });
+    }
+    return incoming.sort((left, right) => left.title.localeCompare(right.title) || left.path.localeCompare(right.path));
+  }
+
+  async obsidianTarget(relativePath: string): Promise<{ uri: string; vault: string; vaultPath: string; path: string }> {
+    const resolved = await this.resolveExisting(relativePath, ['.md']);
+    const vaultPath = await this.rootRealPath();
+    const absolutePath = resolved.absolute.replaceAll('\\', '/');
+    return {
+      uri: `obsidian://open?path=${encodeURIComponent(absolutePath)}`,
+      vault: path.basename(vaultPath),
+      vaultPath,
+      path: resolved.relative,
+    };
   }
 }
 

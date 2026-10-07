@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useMemo } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -11,10 +11,16 @@ import {
   type Node,
   type NodeProps,
 } from '@xyflow/react';
-import { fetchCanvas } from '../api';
-import type { VaultCanvasEdge, VaultCanvasNode } from '../types';
+import type { VaultCanvas, VaultCanvasEdge, VaultCanvasNode } from '../types';
 
-type Props = { selectedPath: string; onOpen: (path: string) => void };
+type Props = {
+  canvas?: VaultCanvas;
+  canvasPath: string;
+  selectedPath: string;
+  onOpen: (path: string) => void;
+  error: string;
+  onRetry: () => void;
+};
 type CardData = { source: VaultCanvasNode; label: string; selected: boolean; onOpen: (path: string) => void };
 
 const colorClass: Record<string, string> = {
@@ -102,37 +108,10 @@ const CanvasCard = memo(({ data }: NodeProps<Node<CardData>>) => {
 CanvasCard.displayName = 'CanvasCard';
 const nodeTypes = { canvasCard: CanvasCard };
 
-export function Board({ selectedPath, onOpen }: Props) {
-  const [sourceNodes, setSourceNodes] = useState<VaultCanvasNode[]>([]);
-  const [sourceEdges, setSourceEdges] = useState<Edge[]>([]);
-  const [canvasPath, setCanvasPath] = useState('80 Canvases/Digital Jochi.canvas');
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(true);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const result = await fetchCanvas();
-      setCanvasPath(result.path);
-      setSourceNodes(result.canvas.nodes);
-      setSourceEdges(
-        result.canvas.edges.map(adaptEdge),
-      );
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'The home board could not be loaded.');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
+export function Board({ canvas, canvasPath, selectedPath, onOpen, error, onRetry }: Props) {
   const nodes = useMemo<Node<CardData>[]>(
     () =>
-      sourceNodes.map((source) => ({
+      (canvas?.nodes ?? []).map((source) => ({
         id: source.id,
         type: 'canvasCard',
         position: { x: source.x, y: source.y },
@@ -146,25 +125,32 @@ export function Board({ selectedPath, onOpen }: Props) {
           onOpen,
         },
       })),
-    [onOpen, selectedPath, sourceNodes],
+    [canvas?.nodes, onOpen, selectedPath],
   );
+  const edges = useMemo(() => (canvas?.edges ?? []).map(adaptEdge), [canvas?.edges]);
 
-  if (loading) return <div className="board-state"><span className="spinner" />Reading the authored home canvas…</div>;
-  if (error) {
+  if (!canvas && error) {
     return (
       <div className="board-state board-error" role="alert">
         <span className="error-glyph" aria-hidden="true">!</span>
         <strong>Home board unavailable</strong>
         <p>{error}</p>
-        <button type="button" onClick={load}>Retry board</button>
+        <button type="button" onClick={onRetry}>Retry board</button>
       </div>
     );
   }
+  if (!canvas) return <div className="board-state"><span className="spinner" />Reading the authored home canvas…</div>;
   return (
     <div className="board-wrap">
+      {error && (
+        <div className="board-warning" role="alert">
+          <strong>Home board could not refresh.</strong> {error}
+          <button type="button" onClick={onRetry}>Retry board</button>
+        </div>
+      )}
       <ReactFlow
         nodes={nodes}
-        edges={sourceEdges}
+        edges={edges}
         nodeTypes={nodeTypes}
         fitView
         fitViewOptions={{ padding: 0.15, maxZoom: 0.75 }}
@@ -177,7 +163,7 @@ export function Board({ selectedPath, onOpen }: Props) {
         <Background variant={BackgroundVariant.Dots} gap={24} size={1.2} color="#c9c1b4" />
         <Controls showInteractive={false} position="bottom-right" />
       </ReactFlow>
-      <div className="canvas-source" title={canvasPath}>{sourceNodes.length} cards · {sourceEdges.length} links</div>
+      <div className="canvas-source" title={canvasPath}>{canvas.nodes.length} cards · {canvas.edges.length} links</div>
     </div>
   );
 }

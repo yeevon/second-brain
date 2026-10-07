@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import type { NoteSummary } from '../types';
-import { excerptFor } from '../search';
+import { excerptFor, filterNotes } from '../search';
 
 type Props = {
   notes: NoteSummary[];
@@ -8,40 +8,37 @@ type Props = {
   selectedPath: string;
   onRetry: () => void;
   onOpen: (path: string) => void;
+  query: string;
+  onQueryChange: (query: string) => void;
+  selectedTag: string;
+  onTagChange: (tag: string) => void;
+  filterNotice: string;
 };
 
-export function Sidebar({ notes, error, selectedPath, onRetry, onOpen }: Props) {
-  const [query, setQuery] = useState('');
+export function Sidebar({ notes, error, selectedPath, onRetry, onOpen, query, onQueryChange, selectedTag, onTagChange, filterNotice }: Props) {
   const listRef = useRef<HTMLDivElement>(null);
   const normalized = query.trim().toLocaleLowerCase();
+  const tags = useMemo(
+    () => [...new Set(notes.flatMap((note) => note.tags))].sort((left, right) => left.localeCompare(right)),
+    [notes],
+  );
   const results = useMemo(
-    () => {
-      if (!normalized) return notes;
-      return notes
-        .map((note) => {
-          const title = note.title.toLocaleLowerCase();
-          const summary = note.summary.toLocaleLowerCase();
-          const body = note.body.toLocaleLowerCase();
-          const score = title.includes(normalized) ? 0 : summary.includes(normalized) ? 1 : body.includes(normalized) ? 2 : -1;
-          return { note, score };
-        })
-        .filter((result) => result.score >= 0)
-        .sort((a, b) => a.score - b.score || a.note.title.localeCompare(b.note.title))
-        .map((result) => result.note);
-    },
-    [normalized, notes],
+    () => filterNotes(notes, query, selectedTag),
+    [normalized, notes, selectedTag],
   );
 
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = 0;
-  }, [normalized]);
+  }, [normalized, selectedTag]);
+
+  const constrained = Boolean(normalized || selectedTag);
 
   return (
     <aside className="sidebar" aria-label="Vault notes and search">
       <div className="region-heading sidebar-heading">
         <div>
           <p className="eyebrow">Browse</p>
-          <h2>{normalized ? 'Search results' : 'Vault notes'}</h2>
+          <h2>{constrained ? 'Filtered notes' : 'Vault notes'}</h2>
         </div>
         <span className="count-badge">{results.length}</span>
       </div>
@@ -52,12 +49,24 @@ export function Sidebar({ notes, error, selectedPath, onRetry, onOpen }: Props) 
         <input
           type="search"
           value={query}
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={(event) => onQueryChange(event.target.value)}
           placeholder="Search titles and notes…"
           autoComplete="off"
         />
         {query && <kbd>esc</kbd>}
       </label>
+
+      <label className="tag-filter">
+        <span>Frontmatter tag</span>
+        <select value={selectedTag} onChange={(event) => onTagChange(event.target.value)}>
+          <option value="">All tags</option>
+          {tags.map((tag) => <option value={tag} key={tag}>{tag}</option>)}
+        </select>
+      </label>
+      <p className="filter-summary" role="status">
+        {selectedTag ? `Tag: ${selectedTag}` : 'All tags'} · {results.length} {results.length === 1 ? 'result' : 'results'}
+      </p>
+      {filterNotice && <div className="filter-notice" role="status">{filterNotice}</div>}
 
       {error ? (
         <div className="inline-state error-state" role="alert">
@@ -65,11 +74,11 @@ export function Sidebar({ notes, error, selectedPath, onRetry, onOpen }: Props) 
           <p>{error}</p>
           <button type="button" onClick={onRetry}>Retry</button>
         </div>
-      ) : normalized && results.length === 0 ? (
+      ) : constrained && results.length === 0 ? (
         <div className="inline-state empty-search" role="status">
           <span aria-hidden="true">∅</span>
           <strong>No notes found</strong>
-          <p>Nothing in the local vault matches “{query.trim()}”.</p>
+          <p>No eligible note matches the current {normalized && selectedTag ? 'search and tag filters' : selectedTag ? `“${selectedTag}” tag` : `search “${query.trim()}”`}.</p>
         </div>
       ) : (
         <div className="note-list" aria-live="polite" ref={listRef}>
@@ -85,6 +94,7 @@ export function Sidebar({ notes, error, selectedPath, onRetry, onOpen }: Props) 
                 <strong>{note.title}</strong>
                 <small>{note.path}</small>
                 {normalized && <span className="search-excerpt">{excerptFor(note, query.trim())}</span>}
+                {note.diagnostics.length > 0 && <span className="metadata-diagnostic">⚠ {note.diagnostics[0]}</span>}
               </span>
             </button>
           ))}

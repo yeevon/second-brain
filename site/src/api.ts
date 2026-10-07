@@ -1,4 +1,4 @@
-import type { Note, NoteSummary, UnresolvedState, VaultCanvas } from './types';
+import type { Note, NoteContext, NoteSummary, RefreshSnapshot, UnresolvedState, VaultCanvas } from './types';
 
 const getJson = async <T>(url: string): Promise<T> => {
   const response = await fetch(url);
@@ -15,6 +15,12 @@ export const fetchNote = async (notePath: string): Promise<Note> =>
 
 export const fetchCanvas = async (): Promise<{ canvas: VaultCanvas; path: string }> =>
   getJson<{ canvas: VaultCanvas; path: string }>('/api/canvas');
+
+export const fetchNoteContext = async (notePath: string): Promise<NoteContext> =>
+  getJson<NoteContext>(`/api/context?path=${encodeURIComponent(notePath)}`);
+
+export const fetchRefreshSnapshot = async (notePath = ''): Promise<RefreshSnapshot> =>
+  getJson<RefreshSnapshot>(`/api/refresh?path=${encodeURIComponent(notePath)}`);
 
 export const resolveLink = async (
   source: string,

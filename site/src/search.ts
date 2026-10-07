@@ -27,3 +27,20 @@ export const excerptFor = (note: NoteSummary, query: string): string => {
   if (title.toLocaleLowerCase().includes(normalized)) return `Title match: ${title}`;
   return summary || body.slice(0, 120) || title;
 };
+
+export const filterNotes = (notes: NoteSummary[], query: string, tag: string): NoteSummary[] => {
+  const normalized = query.trim().toLocaleLowerCase();
+  const tagged = tag ? notes.filter((note) => note.tags.includes(tag)) : notes;
+  if (!normalized) return tagged;
+  return tagged
+    .map((note) => {
+      const title = note.title.toLocaleLowerCase();
+      const summary = note.summary.toLocaleLowerCase();
+      const body = note.body.toLocaleLowerCase();
+      const score = title.includes(normalized) ? 0 : summary.includes(normalized) ? 1 : body.includes(normalized) ? 2 : -1;
+      return { note, score };
+    })
+    .filter((result) => result.score >= 0)
+    .sort((left, right) => left.score - right.score || left.note.title.localeCompare(right.note.title))
+    .map((result) => result.note);
+};
